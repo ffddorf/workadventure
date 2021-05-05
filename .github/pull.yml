@@ -1,0 +1,10 @@
+version: "1"
+rules: # Array of rules
+  - base: develop
+    upstream: thecodingmachine:develop
+    mergeMethod: rebase
+  - base: master
+    upstream: thecodingmachine:master
+    mergeMethod: rebase
+label: ":arrow_heading_down: pull"
+conflictLabel: "merge-conflict"
