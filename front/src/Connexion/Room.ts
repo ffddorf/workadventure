@@ -1,37 +1,42 @@
 import Axios from "axios";
-import {API_URL} from "../Enum/EnvironmentVariable";
+import {PUSHER_URL} from "../Enum/EnvironmentVariable";
 
 export class Room {
     public readonly id: string;
     public readonly isPublic: boolean;
     private mapUrl: string|undefined;
     private instance: string|undefined;
+    private _search: URLSearchParams;
 
     constructor(id: string) {
-        if (id.startsWith('/')) {
-            id = id.substr(1);
+        const url = new URL(id, 'https://example.com');
+
+        this.id = url.pathname;
+
+        if (this.id.startsWith('/')) {
+            this.id = this.id.substr(1);
         }
-        this.id = id;
-        if (id.startsWith('_/')) {
+        if (this.id.startsWith('_/')) {
             this.isPublic = true;
-        } else if (id.startsWith('@/')) {
+        } else if (this.id.startsWith('@/')) {
             this.isPublic = false;
         } else {
             throw new Error('Invalid room ID');
         }
 
-        const indexOfHash = this.id.indexOf('#');
-        if (indexOfHash !== -1) {
-            this.id = this.id.substr(0, indexOfHash);
-        }
+        this._search = new URLSearchParams(url.search);
     }
-    
+
     public static getIdFromIdentifier(identifier: string, baseUrl: string, currentInstance: string): {roomId: string, hash: string} {
         let roomId = '';
         let hash = '';
         if (!identifier.startsWith('/_/') && !identifier.startsWith('/@/')) { //relative file link
-            const absoluteExitSceneUrl = new URL(identifier, baseUrl);
-            roomId = '_/'+currentInstance+'/'+absoluteExitSceneUrl.hostname + absoluteExitSceneUrl.pathname; //in case of a relative url, we need to create a public roomId
+            //Relative identifier can be deep enough to rewrite the base domain, so we cannot use the variable 'baseUrl' as the actual base url for the URL objects.
+            //We instead use 'workadventure' as a dummy base value.
+            const baseUrlObject = new URL(baseUrl);
+            const absoluteExitSceneUrl = new URL(identifier, 'http://workadventure/_/'+currentInstance+'/'+baseUrlObject.hostname+baseUrlObject.pathname);
+            roomId = absoluteExitSceneUrl.pathname; //in case of a relative url, we need to create a public roomId
+            roomId = roomId.substring(1); //remove the leading slash
             hash = absoluteExitSceneUrl.hash;
             hash = hash.substring(1); //remove the leading diese
         } else { //absolute room Id
@@ -62,14 +67,15 @@ export class Room {
                 // We have a private ID, we need to query the map URL from the server.
                 const urlParts = this.parsePrivateUrl(this.id);
 
-                Axios.get(`${API_URL}/map`, {
+                Axios.get(`${PUSHER_URL}/map`, {
                     params: urlParts
                 }).then(({data}) => {
                     console.log('Map ', this.id, ' resolves to URL ', data.mapUrl);
                     resolve(data.mapUrl);
                     return;
+                }).catch((reason) => {
+                    reject(reason);
                 });
-
             }
         });
     }
@@ -111,5 +117,18 @@ export class Room {
             results.roomSlug = match[3];
         }
         return results;
+    }
+
+    public isDisconnected(): boolean
+    {
+        const alone = this._search.get('alone');
+        if (alone && alone !== '0' && alone.toLowerCase() !== 'false') {
+            return true;
+        }
+        return false;
+    }
+
+    public get search(): URLSearchParams {
+        return this._search;
     }
 }
