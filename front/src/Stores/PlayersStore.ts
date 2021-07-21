@@ -1,6 +1,9 @@
 import { writable } from "svelte/store";
 import type { PlayerInterface } from "../Phaser/Game/PlayerInterface";
 import type { RoomConnection } from "../Connexion/RoomConnection";
+import { getRandomColor } from "../WebRtc/ColorGenerator";
+
+let idCount = 0;
 
 /**
  * A store that contains the list of players currently known.
@@ -24,6 +27,7 @@ function createPlayersStore() {
                         visitCardUrl: message.visitCardUrl,
                         companion: message.companion,
                         userUuid: message.userUuid,
+                        color: getRandomColor(),
                     });
                     return users;
                 });
@@ -37,6 +41,27 @@ function createPlayersStore() {
         },
         getPlayerById(userId: number): PlayerInterface | undefined {
             return players.get(userId);
+        },
+        addFacticePlayer(name: string): number {
+            let userId: number | null = null;
+            players.forEach((p) => {
+                if (p.name === name) userId = p.userId;
+            });
+            if (userId) return userId;
+            const newUserId = idCount--;
+            update((users) => {
+                users.set(newUserId, {
+                    userId: newUserId,
+                    name,
+                    characterLayers: [],
+                    visitCardUrl: null,
+                    companion: null,
+                    userUuid: "dummy",
+                    color: getRandomColor(),
+                });
+                return users;
+            });
+            return newUserId;
         },
     };
 }

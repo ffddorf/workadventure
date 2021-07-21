@@ -19,6 +19,8 @@ import { sendMenuClickedEvent } from "../../Api/iframe/Ui/MenuItem";
 import { consoleGlobalMessageManagerVisibleStore } from "../../Stores/ConsoleGlobalMessageManagerStore";
 import { get } from "svelte/store";
 import { playersStore } from "../../Stores/PlayersStore";
+import { mediaManager } from "../../WebRtc/MediaManager";
+import { chatVisibilityStore } from "../../Stores/ChatStore";
 
 export const MenuSceneName = "MenuScene";
 const gameMenuKey = "gameMenu";
@@ -98,6 +100,10 @@ export class MenuScene extends Phaser.Scene {
         this.menuElement.setOrigin(0);
         MenuScene.revealMenusAfterInit(this.menuElement, "gameMenu");
 
+        if (mediaManager.hasNotification()) {
+            HtmlUtils.getElementByIdOrFail("enableNotification").hidden = true;
+        }
+
         const middleX = window.innerWidth / 3 - 298;
         this.gameQualityMenuElement = this.add.dom(middleX, -400).createFromCache(gameSettingsMenuKey);
         MenuScene.revealMenusAfterInit(this.gameQualityMenuElement, "gameQuality");
@@ -142,6 +148,9 @@ export class MenuScene extends Phaser.Scene {
         this.menuElement.on("click", this.onMenuClick.bind(this));
 
         worldFullWarningStream.stream.subscribe(() => this.showWorldCapacityWarning());
+        chatVisibilityStore.subscribe((v) => {
+            this.menuButton.setVisible(!v);
+        });
     }
 
     //todo put this method in a parent menuElement class
@@ -357,6 +366,9 @@ export class MenuScene extends Phaser.Scene {
             case "toggleFullscreen":
                 this.toggleFullscreen();
                 break;
+            case "enableNotification":
+                this.enableNotification();
+                break;
             case "adminConsoleButton":
                 if (get(consoleGlobalMessageManagerVisibleStore)) {
                     consoleGlobalMessageManagerVisibleStore.set(false);
@@ -418,5 +430,13 @@ export class MenuScene extends Phaser.Scene {
 
     public isDirty(): boolean {
         return false;
+    }
+
+    private enableNotification() {
+        mediaManager.requestNotification().then(() => {
+            if (mediaManager.hasNotification()) {
+                HtmlUtils.getElementByIdOrFail("enableNotification").hidden = true;
+            }
+        });
     }
 }
