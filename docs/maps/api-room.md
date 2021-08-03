@@ -79,6 +79,58 @@ Example :
 WA.room.setProperty('wikiLayer', 'openWebsite', 'https://www.wikipedia.org/');
 ```
 
+### Get the room id
+
+```
+WA.room.id: string;
+```
+
+The ID of the current room is available from the `WA.room.id` property.
+
+{.alert.alert-info}
+You need to wait for the end of the initialization before accessing `WA.room.id`
+
+```typescript
+WA.onInit().then(() => {
+    console.log('Room id: ', WA.room.id);
+    // Will output something like: 'https://play.workadventu.re/@/myorg/myworld/myroom', or 'https://play.workadventu.re/_/global/mymap.org/map.json"
+})
+```
+
+### Get the map URL
+
+```
+WA.room.mapURL: string;
+```
+
+The URL of the map is available from the `WA.room.mapURL` property.
+
+{.alert.alert-info}
+You need to wait for the end of the initialization before accessing `WA.room.mapURL`
+
+```typescript
+WA.onInit().then(() => {
+    console.log('Map URL: ', WA.room.mapURL);
+    // Will output something like: 'https://mymap.org/map.json"
+})
+```
+
+
+
+### Getting map data
+```
+WA.room.getTiledMap(): Promise<ITiledMap>
+```
+
+Returns a promise that resolves to the JSON map file.
+
+```javascript
+const map = await WA.room.getTiledMap();
+console.log("Map generated with Tiled version ", map.tiledversion);
+```
+
+Check the [Tiled documentation to learn more about the format of the JSON map](https://doc.mapeditor.org/en/stable/reference/json-map-format/).
+
 ### Changing tiles 
 ```
 WA.room.setTiles(tiles: TileDescriptor[]): void
@@ -110,4 +162,18 @@ WA.room.setTiles([
                 {x: 8, y: 4, tile: 109, layer: 'setTiles'},
                 {x: 9, y: 4, tile: 'blue', layer: 'setTiles'}
                 ]);
+```
+
+### Loading a tileset
+```
+WA.room.loadTileset(url: string): Promise<number>
+```
+Load a tileset in JSON format from an url and return the id of the first tile of the loaded tileset.
+
+You can create a tileset file in Tile Editor.
+
+```javascript
+WA.room.loadTileset("Assets/Tileset.json").then((firstId) => {
+    WA.room.setTiles([{x: 4, y: 4, tile: firstId, layer: 'bottom'}]);
+})
 ```
