@@ -1,4 +1,3 @@
-import { layoutManager } from "./LayoutManager";
 import { HtmlUtils } from "./HtmlUtils";
 import type { UserInputManager } from "../Phaser/UserInput/UserInputManager";
 import { localStreamStore } from "../Stores/MediaStore";
@@ -10,6 +9,10 @@ export type StopScreenSharingCallback = (media: MediaStream) => void;
 
 import { cowebsiteCloseButtonId } from "./CoWebsiteManager";
 import { gameOverlayVisibilityStore } from "../Stores/GameOverlayStoreVisibility";
+import { layoutManagerActionStore, layoutManagerVisibilityStore } from "../Stores/LayoutManagerStore";
+import { get } from "svelte/store";
+import { localUserStore } from "../Connexion/LocalUserStore";
+import { MediaStreamConstraintsError } from "../Stores/Errors/MediaStreamConstraintsError";
 
 export class MediaManager {
     startScreenSharingCallBacks: Set<StartScreenSharingCallback> = new Set<StartScreenSharingCallback>();
@@ -22,15 +25,21 @@ export class MediaManager {
     constructor() {
         localStreamStore.subscribe((result) => {
             if (result.type === "error") {
-                console.error(result.error);
-                layoutManager.addInformation(
-                    "warning",
-                    "Camera access denied. Click here and check your browser permissions.",
-                    () => {
-                        helpCameraSettingsVisibleStore.set(true);
-                    },
-                    this.userInputManager
-                );
+                if (result.error.name !== MediaStreamConstraintsError.NAME) {
+                    layoutManagerActionStore.addAction({
+                        uuid: "cameraAccessDenied",
+                        type: "warning",
+                        message: "Camera access denied. Click here and check your browser permissions.",
+                        callback: () => {
+                            helpCameraSettingsVisibleStore.set(true);
+                        },
+                        userInputManager: this.userInputManager,
+                    });
+                }
+                //remove it after 10 sec
+                setTimeout(() => {
+                    layoutManagerActionStore.removeAction("cameraAccessDenied");
+                }, 10000);
                 return;
             }
         });
@@ -38,14 +47,19 @@ export class MediaManager {
         screenSharingLocalStreamStore.subscribe((result) => {
             if (result.type === "error") {
                 console.error(result.error);
-                layoutManager.addInformation(
-                    "warning",
-                    "Screen sharing denied. Click here and check your browser permissions.",
-                    () => {
+                layoutManagerActionStore.addAction({
+                    uuid: "screenSharingAccessDenied",
+                    type: "warning",
+                    message: "Screen sharing denied. Click here and check your browser permissions.",
+                    callback: () => {
                         helpCameraSettingsVisibleStore.set(true);
                     },
-                    this.userInputManager
-                );
+                    userInputManager: this.userInputManager,
+                });
+                //remove it after 10 sec
+                setTimeout(() => {
+                    layoutManagerActionStore.removeAction("screenSharingAccessDenied");
+                }, 10000);
                 return;
             }
         });
@@ -176,7 +190,11 @@ export class MediaManager {
     }
 
     public hasNotification(): boolean {
-        return Notification.permission === "granted";
+        if (Notification.permission === "granted") {
+            return localUserStore.getNotification() === "granted";
+        } else {
+            return false;
+        }
     }
 
     public requestNotification() {
