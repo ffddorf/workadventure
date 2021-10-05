@@ -9,10 +9,10 @@ You can position this popup by using a "rectangle" object in Tiled that you will
 
 <div class="row">
     <div class="col">
-        <img src="https://workadventu.re/img/docs/screen_popup_tiled.png" class="figure-img img-fluid rounded" alt="" />
+        <img src="images/screen_popup_tiled.png" class="figure-img img-fluid rounded" alt="" />
     </div>
     <div class="col">
-        <img src="https://workadventu.re/img/docs/screen_popup_in_game.png" class="figure-img img-fluid rounded" alt="" />
+        <img src="images/screen_popup_in_game.png" class="figure-img img-fluid rounded" alt="" />
     </div>
 </div>
 
@@ -68,22 +68,97 @@ WA.room.onLeaveZone('myZone', () => {
 
 ### Add custom menu
 
-```typescript
-WA.ui.registerMenuCommand(menuCommand: string, callback: (menuCommand: string) => void): void
 ```
-Add a custom menu item containing the text `commandDescriptor` in the main menu. A click on the menu will trigger the `callback`.
+WA.ui.registerMenuCommand(commandDescriptor: string, options: MenuOptions): Menu
+```
+Add a custom menu item containing the text `commandDescriptor` in the navbar of the menu.
+`options` attribute accepts an object with three properties :
+- `callback : (commandDescriptor: string) => void` : A click on the custom menu will trigger the `callback`.
+- `iframe: string` : A click on the custom menu will open the `iframe` inside the menu.
+- `allowApi?: boolean` : Allow the iframe of the custom menu to use the Scripting API.
+
+Important : `options` accepts only `callback` or `iframe` not both.
+
 Custom menu exist only until the map is unloaded, or you leave the iframe zone of the script.
+
+<div class="row">
+    <div class="col">
+        <img src="images/custom-menu-navbar.png" class="figure-img img-fluid rounded" alt="" />
+    </div>
+    <div class="col">
+        <img src="images/custom-menu-iframe.png" class="figure-img img-fluid rounded" alt="" />
+    </div>
+</div>
+
+Example: 
+```javascript
+const menu = WA.ui.registerMenuCommand('menu test',
+    {
+        callback: () => {
+            WA.chat.sendChatMessage('test');
+        }
+    })
+
+// Some time later, if you want to remove the menu:
+menu.remove();
+```
+
+Please note that `registerMenuCommand` returns an object of the `Menu` class.
+
+The `Menu` class contains a single method: `remove(): void`. This will obviously remove the menu when called.
+
+```javascript
+class Menu {
+	/**
+	* Remove the menu
+	*/
+	remove() {};
+}
+```
+
+
+
+### Awaiting User Confirmation (with space bar)
+
+```
+WA.ui.displayActionMessage({
+    message: string,
+    callback: () => void,
+    type?: "message"|"warning",
+}): ActionMessage
+```
+
+Displays a message at the bottom of the screen (that will disappear when space bar is pressed).
+
+<div class="col">
+    <img src="images/trigger_message.png" class="figure-img img-fluid rounded" alt="" />
+</div>
 
 Example:
 
 ```javascript
+const triggerMessage = WA.ui.displayActionMessage({
+    message: "press 'space' to confirm",
+    callback: () => {
+        WA.chat.sendChatMessage("confirmed", "trigger message logic")
+    }
+});
 
-WA.ui.registerMenuCommand("test", () => {
-    WA.chat.sendChatMessage("test clicked", "menu cmd")
-})
-
+setTimeout(() => {
+    // later
+    triggerMessage.remove();
+}, 1000)
 ```
 
-<div class="col">
-    <img src="https://workadventu.re/img/docs/menu-command.png" class="figure-img img-fluid rounded" alt="" />
-</div>
+Please note that `displayActionMessage` returns an object of the `ActionMessage` class.
+
+The `ActionMessage` class contains a single method: `remove(): Promise<void>`. This will obviously remove the message when called.
+
+```javascript
+class ActionMessage {
+    /**
+     * Hides the message
+     */
+    remove() {};
+}
+```
