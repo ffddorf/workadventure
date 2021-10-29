@@ -1,6 +1,7 @@
 import { writable } from "svelte/store";
 import { playersStore } from "./PlayersStore";
 import type { PlayerInterface } from "../Phaser/Game/PlayerInterface";
+import { iframeListener } from "../Api/IframeListener";
 
 export const chatVisibilityStore = writable(false);
 export const chatInputFocusStore = writable(false);
@@ -78,13 +79,20 @@ function createChatMessagesStore() {
                         date: new Date(),
                     });
                 }
+
+                iframeListener.sendUserInputChat(text);
                 return list;
             });
         },
         addExternalMessage(authorId: number, text: string) {
             update((list) => {
                 const lastMessage = list[list.length - 1];
-                if (lastMessage && lastMessage.type === ChatMessageTypes.text && lastMessage.text) {
+                if (
+                    lastMessage &&
+                    lastMessage.type === ChatMessageTypes.text &&
+                    lastMessage.text &&
+                    lastMessage?.author?.userId === authorId
+                ) {
                     lastMessage.text.push(text);
                 } else {
                     list.push({
@@ -94,6 +102,8 @@ function createChatMessagesStore() {
                         date: new Date(),
                     });
                 }
+
+                iframeListener.sendUserInputChat(text);
                 return list;
             });
             chatVisibilityStore.set(true);
@@ -116,4 +126,4 @@ function createChatSubMenuVisibilityStore() {
     };
 }
 
-export const chatSubMenuVisbilityStore = createChatSubMenuVisibilityStore();
+export const chatSubMenuVisibilityStore = createChatSubMenuVisibilityStore();
