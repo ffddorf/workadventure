@@ -13,6 +13,8 @@ const audioPlayerVolumeKey = "audioVolume";
 const audioPlayerMuteKey = "audioMute";
 const helpCameraSettingsShown = "helpCameraSettingsShown";
 const fullscreenKey = "fullscreen";
+const forceCowebsiteTriggerKey = "forceCowebsiteTrigger";
+const ignoreFollowRequests = "ignoreFollowRequests";
 const lastRoomUrl = "lastRoomUrl";
 const authToken = "authToken";
 const state = "state";
@@ -120,12 +122,28 @@ class LocalUserStore {
         return localStorage.getItem(fullscreenKey) === "true";
     }
 
+    setForceCowebsiteTrigger(value: boolean): void {
+        localStorage.setItem(forceCowebsiteTriggerKey, value.toString());
+    }
+    getForceCowebsiteTrigger(): boolean {
+        return localStorage.getItem(forceCowebsiteTriggerKey) === "true";
+    }
+
+    setIgnoreFollowRequests(value: boolean): void {
+        localStorage.setItem(ignoreFollowRequests, value.toString());
+    }
+    getIgnoreFollowRequests(): boolean {
+        return localStorage.getItem(ignoreFollowRequests) === "true";
+    }
+
     setLastRoomUrl(roomUrl: string): void {
         localStorage.setItem(lastRoomUrl, roomUrl.toString());
-        caches.open(cacheAPIIndex).then((cache) => {
-            const stringResponse = new Response(JSON.stringify({ roomUrl }));
-            cache.put(`/${lastRoomUrl}`, stringResponse);
-        });
+        if ("caches" in window) {
+            caches.open(cacheAPIIndex).then((cache) => {
+                const stringResponse = new Response(JSON.stringify({ roomUrl }));
+                cache.put(`/${lastRoomUrl}`, stringResponse);
+            });
+        }
     }
     getLastRoomUrl(): string {
         return (
@@ -133,6 +151,9 @@ class LocalUserStore {
         );
     }
     getLastRoomUrlCacheApi(): Promise<string | undefined> {
+        if (!("caches" in window)) {
+            return Promise.resolve(undefined);
+        }
         return caches.open(cacheAPIIndex).then((cache) => {
             return cache.match(`/${lastRoomUrl}`).then((res) => {
                 return res?.json().then((data) => {
