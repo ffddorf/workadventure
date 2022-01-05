@@ -62,8 +62,7 @@ body .message-info.warning{
         background-color: black;
         border-radius: 50%;
         text-align: center;
-        padding-top: 32px;
-        font-size: 28px;
+        font-size: 14px;
         color: white;
         overflow: hidden;
     }
@@ -1067,6 +1066,7 @@ div.action.danger p.action-body{
     width: 100%;
     height: 100%;
     pointer-events: none;
+    user-select: none;
 
     & > div {
         position: relative;

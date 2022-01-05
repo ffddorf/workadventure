@@ -31,6 +31,8 @@ import type { SetVariableEvent } from "./Events/SetVariableEvent";
 import { ModifyEmbeddedWebsiteEvent, isEmbeddedWebsiteEvent } from "./Events/EmbeddedWebsiteEvent";
 import { handleMenuRegistrationEvent, handleMenuUnregisterEvent } from "../Stores/MenuStore";
 import type { ChangeLayerEvent } from "./Events/ChangeLayerEvent";
+import type { WasCameraUpdatedEvent } from "./Events/WasCameraUpdatedEvent";
+import type { ChangeZoneEvent } from "./Events/ChangeZoneEvent";
 
 type AnswererCallback<T extends keyof IframeQueryMap> = (
     query: IframeQueryMap[T]["query"],
@@ -49,7 +51,7 @@ class IframeListener {
     public readonly openTabStream = this._openTabStream.asObservable();
 
     private readonly _loadPageStream: Subject<string> = new Subject();
-    public readonly loadPageStream = this._loadPageStream.asObservable()
+    public readonly loadPageStream = this._loadPageStream.asObservable();
 
     private readonly _disablePlayerControlStream: Subject<void> = new Subject();
     public readonly disablePlayerControlStream = this._disablePlayerControlStream.asObservable();
@@ -83,6 +85,9 @@ class IframeListener {
 
     private readonly _loadSoundStream: Subject<LoadSoundEvent> = new Subject();
     public readonly loadSoundStream = this._loadSoundStream.asObservable();
+
+    private readonly _trackCameraUpdateStream: Subject<LoadSoundEvent> = new Subject();
+    public readonly trackCameraUpdateStream = this._trackCameraUpdateStream.asObservable();
 
     private readonly _setTilesStream: Subject<SetTilesEvent> = new Subject();
     public readonly setTilesStream = this._setTilesStream.asObservable();
@@ -225,6 +230,8 @@ class IframeListener {
                         this._removeBubbleStream.next();
                     } else if (payload.type == "onPlayerMove") {
                         this.sendPlayerMove = true;
+                    } else if (payload.type == "onCameraUpdate") {
+                        this._trackCameraUpdateStream.next();
                     } else if (payload.type == "setTiles" && isSetTilesEvent(payload.data)) {
                         this._setTilesStream.next(payload.data);
                     } else if (payload.type == "modifyEmbeddedWebsite" && isEmbeddedWebsiteEvent(payload.data)) {
@@ -311,7 +318,7 @@ class IframeListener {
                     "//" +
                     window.location.host +
                     '/iframe_api.js" ></script>\n' +
-                    '<script src="' +
+                    '<script type="module" src="' +
                     scriptUrl +
                     '" ></script>\n' +
                     "<title></title>\n" +
@@ -414,6 +421,24 @@ class IframeListener {
         });
     }
 
+    sendEnterZoneEvent(zoneName: string) {
+        this.postMessage({
+            type: "enterZoneEvent",
+            data: {
+                name: zoneName,
+            } as ChangeZoneEvent,
+        });
+    }
+
+    sendLeaveZoneEvent(zoneName: string) {
+        this.postMessage({
+            type: "leaveZoneEvent",
+            data: {
+                name: zoneName,
+            } as ChangeZoneEvent,
+        });
+    }
+
     hasPlayerMoved(event: HasPlayerMovedEvent) {
         if (this.sendPlayerMove) {
             this.postMessage({
@@ -421,6 +446,13 @@ class IframeListener {
                 data: event,
             });
         }
+    }
+
+    sendCameraUpdated(event: WasCameraUpdatedEvent) {
+        this.postMessage({
+            type: "wasCameraUpdated",
+            data: event,
+        });
     }
 
     sendButtonClickedEvent(popupId: number, buttonId: number): void {

@@ -1,5 +1,5 @@
 import { CharacterLayer, ExSocketInterface } from "../Model/Websocket/ExSocketInterface"; //TODO fix import by "_Model/.."
-import { GameRoomPolicyTypes } from "../Model/PusherRoom";
+import { GameRoomPolicyTypes, PusherRoom } from "../Model/PusherRoom";
 import { PointInterface } from "../Model/Websocket/PointInterface";
 import {
     SetPlayerDetailsMessage,
@@ -17,19 +17,25 @@ import {
     ServerToClientMessage,
     CompanionMessage,
     EmotePromptMessage,
+    FollowRequestMessage,
+    FollowConfirmationMessage,
+    FollowAbortMessage,
     VariableMessage,
 } from "../Messages/generated/messages_pb";
 import { UserMovesMessage } from "../Messages/generated/messages_pb";
 import { TemplatedApp } from "uWebSockets.js";
 import { parse } from "query-string";
-import { jwtTokenManager, tokenInvalidException } from "../Services/JWTTokenManager";
+import { AdminSocketTokenData, jwtTokenManager, tokenInvalidException } from "../Services/JWTTokenManager";
 import { adminApi, FetchMemberDataByUuidResponse } from "../Services/AdminApi";
 import { SocketManager, socketManager } from "../Services/SocketManager";
 import { emitInBatch } from "../Services/IoSocketHelpers";
-import { ADMIN_SOCKETS_TOKEN, ADMIN_API_URL, DISABLE_ANONYMOUS, SOCKET_IDLE_TIMER } from "../Enum/EnvironmentVariable";
+import { ADMIN_API_URL, DISABLE_ANONYMOUS, SOCKET_IDLE_TIMER } from "../Enum/EnvironmentVariable";
 import { Zone } from "_Model/Zone";
 import { ExAdminSocketInterface } from "_Model/Websocket/ExAdminSocketInterface";
-import { CharacterTexture } from "../Services/AdminApi/CharacterTexture";
+import { CharacterTexture } from "../Messages/JsonMessages/CharacterTexture";
+import { isAdminMessageInterface } from "../Model/Websocket/Admin/AdminMessages";
+import Axios from "axios";
+import { InvalidTokenError } from "../Controller/InvalidTokenError";
 
 export class IoSocketController {
     private nextUserId: number = 1;
@@ -42,59 +48,108 @@ export class IoSocketController {
     adminRoomSocket() {
         this.app.ws("/admin/rooms", {
             upgrade: (res, req, context) => {
-                const query = parse(req.getQuery());
                 const websocketKey = req.getHeader("sec-websocket-key");
                 const websocketProtocol = req.getHeader("sec-websocket-protocol");
                 const websocketExtensions = req.getHeader("sec-websocket-extensions");
-                const token = query.token;
-                let authorizedRoomIds: string[];
-                try {
-                    const data = jwtTokenManager.verifyAdminSocketToken(token as string);
-                    authorizedRoomIds = data.authorizedRoomIds;
-                } catch (e) {
-                    console.error("Admin access refused for token: " + token);
-                    res.writeStatus("401 Unauthorized").end("Incorrect token");
-                    return;
-                }
-                const roomId = query.roomId;
-                if (typeof roomId !== "string" || !authorizedRoomIds.includes(roomId)) {
-                    console.error("Invalid room id");
-                    res.writeStatus("403 Bad Request").end("Invalid room id");
-                    return;
-                }
 
-                res.upgrade({ roomId }, websocketKey, websocketProtocol, websocketExtensions, context);
+                res.upgrade({}, websocketKey, websocketProtocol, websocketExtensions, context);
             },
             open: (ws) => {
-                console.log("Admin socket connect for room: " + ws.roomId);
+                console.log("Admin socket connect to client on " + Buffer.from(ws.getRemoteAddressAsText()).toString());
                 ws.disconnecting = false;
-
-                socketManager.handleAdminRoom(ws as ExAdminSocketInterface, ws.roomId as string);
             },
             message: (ws, arrayBuffer, isBinary): void => {
                 try {
-                    //TODO refactor message type and data
-                    const message: { event: string; message: { type: string; message: unknown; userUuid: string } } =
-                        JSON.parse(new TextDecoder("utf-8").decode(new Uint8Array(arrayBuffer)));
+                    const message = JSON.parse(new TextDecoder("utf-8").decode(new Uint8Array(arrayBuffer)));
 
-                    if (message.event === "user-message") {
-                        const messageToEmit = message.message as { message: string; type: string; userUuid: string };
-                        if (messageToEmit.type === "banned") {
-                            socketManager.emitBan(
-                                messageToEmit.userUuid,
-                                messageToEmit.message,
-                                messageToEmit.type,
-                                ws.roomId as string
+                    if (!isAdminMessageInterface(message)) {
+                        console.error("Invalid message received.", message);
+                        ws.send(
+                            JSON.stringify({
+                                type: "Error",
+                                data: {
+                                    message: "Invalid message received! The connection has been closed.",
+                                },
+                            })
+                        );
+                        ws.close();
+                        return;
+                    }
+
+                    const token = message.jwt;
+
+                    let data: AdminSocketTokenData;
+
+                    try {
+                        data = jwtTokenManager.verifyAdminSocketToken(token);
+                    } catch (e) {
+                        console.error("Admin socket access refused for token: " + token, e);
+                        ws.send(
+                            JSON.stringify({
+                                type: "Error",
+                                data: {
+                                    message: "Admin socket access refused! The connection has been closed.",
+                                },
+                            })
+                        );
+                        ws.close();
+                        return;
+                    }
+
+                    const authorizedRoomIds = data.authorizedRoomIds;
+
+                    if (message.event === "listen") {
+                        const notAuthorizedRoom = message.roomIds.filter(
+                            (roomId) => !authorizedRoomIds.includes(roomId)
+                        );
+
+                        if (notAuthorizedRoom.length > 0) {
+                            const errorMessage = `Admin socket refused for client on ${Buffer.from(
+                                ws.getRemoteAddressAsText()
+                            ).toString()} listening of : \n${JSON.stringify(notAuthorizedRoom)}`;
+                            console.error();
+                            ws.send(
+                                JSON.stringify({
+                                    type: "Error",
+                                    data: {
+                                        message: errorMessage,
+                                    },
+                                })
                             );
+                            ws.close();
+                            return;
                         }
-                        if (messageToEmit.type === "ban") {
-                            socketManager.emitSendUserMessage(
-                                messageToEmit.userUuid,
-                                messageToEmit.message,
-                                messageToEmit.type,
-                                ws.roomId as string
-                            );
+
+                        for (const roomId of message.roomIds) {
+                            socketManager
+                                .handleAdminRoom(ws as ExAdminSocketInterface, roomId)
+                                .catch((e) => console.error(e));
                         }
+                    } else if (message.event === "user-message") {
+                        const messageToEmit = message.message;
+                        // Get roomIds of the world where we want broadcast the message
+                        const roomIds = authorizedRoomIds.filter(
+                            (authorizeRoomId) => authorizeRoomId.split("/")[5] === message.world
+                        );
+
+                        for (const roomId of roomIds) {
+                            if (messageToEmit.type === "banned") {
+                                socketManager
+                                    .emitBan(messageToEmit.userUuid, messageToEmit.message, messageToEmit.type, roomId)
+                                    .catch((error) => console.error(error));
+                            } else if (messageToEmit.type === "ban") {
+                                socketManager
+                                    .emitSendUserMessage(
+                                        messageToEmit.userUuid,
+                                        messageToEmit.message,
+                                        messageToEmit.type,
+                                        roomId
+                                    )
+                                    .catch((error) => console.error(error));
+                            }
+                        }
+                    } else {
+                        const tmp: never = message.event;
                     }
                 } catch (err) {
                     console.error(err);
@@ -186,6 +241,7 @@ export class IoSocketController {
                         let memberTags: string[] = [];
                         let memberVisitCardUrl: string | null = null;
                         let memberMessages: unknown;
+                        let memberUserRoomToken: string | undefined;
                         let memberTextures: CharacterTexture[] = [];
                         const room = await socketManager.getOrCreateRoom(roomId);
                         let userData: FetchMemberDataByUuidResponse = {
@@ -196,34 +252,38 @@ export class IoSocketController {
                             textures: [],
                             messages: [],
                             anonymous: true,
+                            userRoomToken: undefined,
                         };
                         if (ADMIN_API_URL) {
                             try {
                                 try {
                                     userData = await adminApi.fetchMemberDataByUuid(userIdentifier, roomId, IPAddress);
                                 } catch (err) {
-                                    if (err?.response?.status == 404) {
-                                        // If we get an HTTP 404, the token is invalid. Let's perform an anonymous login!
+                                    if (Axios.isAxiosError(err)) {
+                                        if (err?.response?.status == 404) {
+                                            // If we get an HTTP 404, the token is invalid. Let's perform an anonymous login!
 
-                                        console.warn(
-                                            'Cannot find user with email "' +
-                                                (userIdentifier || "anonymous") +
-                                                '". Performing an anonymous login instead.'
-                                        );
-                                    } else if (err?.response?.status == 403) {
-                                        // If we get an HTTP 403, the world is full. We need to broadcast a special error to the client.
-                                        // we finish immediately the upgrade then we will close the socket as soon as it starts opening.
-                                        return res.upgrade(
-                                            {
-                                                rejected: true,
-                                                message: err?.response?.data.message,
-                                                status: err?.response?.status,
-                                            },
-                                            websocketKey,
-                                            websocketProtocol,
-                                            websocketExtensions,
-                                            context
-                                        );
+                                            console.warn(
+                                                'Cannot find user with email "' +
+                                                    (userIdentifier || "anonymous") +
+                                                    '". Performing an anonymous login instead.'
+                                            );
+                                        } else if (err?.response?.status == 403) {
+                                            // If we get an HTTP 403, the world is full. We need to broadcast a special error to the client.
+                                            // we finish immediately the upgrade then we will close the socket as soon as it starts opening.
+                                            return res.upgrade(
+                                                {
+                                                    rejected: true,
+                                                    message: err?.response?.data.message,
+                                                    status: err?.response?.status,
+                                                    roomId,
+                                                },
+                                                websocketKey,
+                                                websocketProtocol,
+                                                websocketExtensions,
+                                                context
+                                            );
+                                        }
                                     } else {
                                         throw err;
                                     }
@@ -232,6 +292,8 @@ export class IoSocketController {
                                 memberTags = userData.tags;
                                 memberVisitCardUrl = userData.visitCardUrl;
                                 memberTextures = userData.textures;
+                                memberUserRoomToken = userData.userRoomToken;
+
                                 if (
                                     room.policyType === GameRoomPolicyTypes.USE_TAGS_POLICY &&
                                     (userData.anonymous === true || !room.canAccess(memberTags))
@@ -281,6 +343,7 @@ export class IoSocketController {
                                 messages: memberMessages,
                                 tags: memberTags,
                                 visitCardUrl: memberVisitCardUrl,
+                                userRoomToken: memberUserRoomToken,
                                 textures: memberTextures,
                                 position: {
                                     x: x,
@@ -302,23 +365,44 @@ export class IoSocketController {
                             context
                         );
                     } catch (e) {
-                        res.upgrade(
-                            {
-                                rejected: true,
-                                reason: e.reason || null,
-                                message: e.message ? e.message : "500 Internal Server Error",
-                            },
-                            websocketKey,
-                            websocketProtocol,
-                            websocketExtensions,
-                            context
-                        );
+                        if (e instanceof Error) {
+                            res.upgrade(
+                                {
+                                    rejected: true,
+                                    reason: e instanceof InvalidTokenError ? tokenInvalidException : null,
+                                    message: e.message,
+                                    roomId,
+                                },
+                                websocketKey,
+                                websocketProtocol,
+                                websocketExtensions,
+                                context
+                            );
+                        } else {
+                            res.upgrade(
+                                {
+                                    rejected: true,
+                                    reason: null,
+                                    message: "500 Internal Server Error",
+                                    roomId,
+                                },
+                                websocketKey,
+                                websocketProtocol,
+                                websocketExtensions,
+                                context
+                            );
+                        }
                     }
                 })();
             },
             /* Handlers */
             open: (ws) => {
                 if (ws.rejected === true) {
+                    // If there is a room in the error, let's check if we need to clean it.
+                    if (ws.roomId) {
+                        socketManager.deleteRoomIfEmptyFromId(ws.roomId as string);
+                    }
+
                     //FIX ME to use status code
                     if (ws.reason === tokenInvalidException) {
                         socketManager.emitTokenExpiredMessage(ws);
@@ -396,6 +480,18 @@ export class IoSocketController {
                         client,
                         message.getEmotepromptmessage() as EmotePromptMessage
                     );
+                } else if (message.hasFollowrequestmessage()) {
+                    socketManager.handleFollowRequest(
+                        client,
+                        message.getFollowrequestmessage() as FollowRequestMessage
+                    );
+                } else if (message.hasFollowconfirmationmessage()) {
+                    socketManager.handleFollowConfirmation(
+                        client,
+                        message.getFollowconfirmationmessage() as FollowConfirmationMessage
+                    );
+                } else if (message.hasFollowabortmessage()) {
+                    socketManager.handleFollowAbort(client, message.getFollowabortmessage() as FollowAbortMessage);
                 }
 
                 /* Ok is false if backpressure was built up, wait for drain */
