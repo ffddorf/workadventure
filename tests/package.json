@@ -1,7 +1,7 @@
 {
   "devDependencies": {
     "dockerode": "^3.3.1",
-    "testcafe": "^1.18.0"
+    "testcafe": "^15.1.317922"
   },
   "scripts": {
     "test": "testcafe"
