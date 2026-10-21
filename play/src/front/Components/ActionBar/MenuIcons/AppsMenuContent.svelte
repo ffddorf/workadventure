@@ -1,0 +1,132 @@
+<script lang="ts">
+    import { setContext } from "svelte";
+    import { openedMenuStore, roomListActivated, userIsConnected } from "../../../Stores/MenuStore";
+    import { gameManager } from "../../../Phaser/Game/GameManager";
+    import ActionBarButton from "../ActionBarButton.svelte";
+    import ExternalComponents from "../../ExternalModules/ExternalComponents.svelte";
+    import LL from "../../../../i18n/i18n-svelte";
+    import {
+        isActivatedStore as isCalendarActivatedStore,
+        isCalendarVisibleStore,
+    } from "../../../Stores/CalendarStore";
+    import {
+        isActivatedStore as isTodoListActivatedStore,
+        isTodoListVisibleStore,
+    } from "../../../Stores/TodoListStore";
+    import { analyticsClient } from "../../../Administration/AnalyticsClient";
+    import {
+        modalIframeStore,
+        modalVisibilityStore,
+        roomListVisibilityStore,
+        showModalGlobalComminucationVisibilityStore,
+    } from "../../../Stores/ModalStore";
+    import { mapEditorModeStore } from "../../../Stores/MapEditorStore";
+    import { chatVisibilityStore } from "../../../Stores/ChatStore";
+    import { userIsAdminStore } from "../../../Stores/GameStore";
+    import { showRecordingList } from "../../../Stores/RecordingStore";
+    import RecordingIcon from "../../Icons/RecordingIcon.svelte";
+    import AdditionalMenuItems from "./AdditionalMenuItems.svelte";
+    import { IconCalendar, IconCheckList, IconWorldSearch } from "@wa-icons";
+
+    // The ActionBarButton component is displayed differently in the menu.
+    // We use the context to decide how to render it.
+    setContext("inMenu", true);
+
+    const recording = gameManager.currentStartedRoom.recording;
+
+    function resetChatVisibility() {
+        chatVisibilityStore.set(false);
+    }
+
+    function resetModalVisibility() {
+        modalVisibilityStore.set(false);
+        modalIframeStore.set(null);
+        showModalGlobalComminucationVisibilityStore.set(false);
+    }
+
+    function showRoomList() {
+        analyticsClient.trackAdminEvent("room_list.opened");
+        resetChatVisibility();
+        resetModalVisibility();
+
+        roomListVisibilityStore.set(true);
+        openedMenuStore.closeAll();
+    }
+
+    // Both of these are toggles, so the analytics call has to come AFTER the flip and
+    // read the new state. Reporting first counted the click that closes the panel as
+    // an opening too.
+    function openExternalModuleCalendar() {
+        isCalendarVisibleStore.set(!$isCalendarVisibleStore);
+        isTodoListVisibleStore.set(false);
+        if ($isCalendarVisibleStore) {
+            analyticsClient.trackAdminEvent("external_module.calendar_opened");
+        }
+        mapEditorModeStore.switchMode(false);
+        openedMenuStore.closeAll();
+    }
+
+    function openExternalModuleTodoList() {
+        isTodoListVisibleStore.set(!$isTodoListVisibleStore);
+        isCalendarVisibleStore.set(false);
+        if ($isTodoListVisibleStore) {
+            analyticsClient.trackAdminEvent("external_module.todo_list_opened");
+        }
+        mapEditorModeStore.switchMode(false);
+        openedMenuStore.closeAll();
+    }
+</script>
+
+<!-- Room list part -->
+{#if $roomListActivated || $userIsAdminStore}
+    <ActionBarButton
+        onclick={showRoomList}
+        onkeydown={showRoomList}
+        label={$LL.actionbar.help.roomList.title()}
+        state={$roomListActivated ? "normal" : "disabled"}
+    >
+        <IconWorldSearch font-size="16" class="text-white" />
+    </ActionBarButton>
+{/if}
+
+{#if recording?.buttonState !== "hidden" && $userIsConnected}
+    <ActionBarButton
+        classList="group/btn-recording-list"
+        onclick={() => {
+            analyticsClient.trackAdminEvent("recording.list_opened");
+            $showRecordingList = true;
+            openedMenuStore.closeAll();
+        }}
+        label={$LL.recording.recordingList()}
+        state="normal"
+        dataTestId="recordingButton-list"
+    >
+        <RecordingIcon width="20" height="20" hoverClass="group-hover/btn-recording-list:text-red-500" />
+    </ActionBarButton>
+{/if}
+
+<!-- Calendar integration -->
+{#if $isCalendarActivatedStore || $userIsAdminStore}
+    <ActionBarButton
+        onclick={openExternalModuleCalendar}
+        label={$LL.actionbar.calendar()}
+        state={$isCalendarActivatedStore ? "normal" : "disabled"}
+    >
+        <IconCalendar width="20" height="20" />
+    </ActionBarButton>
+{/if}
+
+{#if $isTodoListActivatedStore || $userIsAdminStore}
+    <ActionBarButton
+        onclick={openExternalModuleTodoList}
+        label={$LL.actionbar.todoList()}
+        state={$isTodoListActivatedStore ? "normal" : "disabled"}
+    >
+        <IconCheckList width="20" height="20" />
+    </ActionBarButton>
+{/if}
+
+<!-- External module action bar -->
+<ExternalComponents zone="actionBarAppsMenu" />
+
+<AdditionalMenuItems menu="appsMenu" />

@@ -1,0 +1,17 @@
+import type { WamFile } from "@workadventure/map-editor";
+import { DeleteCustomEntityCommand } from "@workadventure/map-editor";
+import type { DeleteCustomEntityMessage } from "@workadventure/messages";
+import { CustomEntityCollectionService } from "../../Services/CustomEntityCollectionService";
+
+export class DeleteCustomEntityMapStorageCommand extends DeleteCustomEntityCommand {
+    private customEntityCollectionService: CustomEntityCollectionService;
+
+    constructor(deleteCustomEntityMessage: DeleteCustomEntityMessage, wamFile: WamFile, hostName: string) {
+        super(deleteCustomEntityMessage, wamFile, hostName);
+        this.customEntityCollectionService = new CustomEntityCollectionService(hostName);
+    }
+    async execute(): Promise<void> {
+        await super.execute();
+        return this.customEntityCollectionService.deleteEntity(this.deleteCustomEntityMessage);
+    }
+}

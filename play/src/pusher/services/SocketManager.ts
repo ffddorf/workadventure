@@ -1,0 +1,1795 @@
+import Debug from "debug";
+import { SignJWT } from "jose";
+import type {
+    AddSpaceFilterMessage,
+    AdminPusherToBackMessage,
+    AdminRoomMessage,
+    BanMessage,
+    BanPlayerMessage,
+    ChatMembersAnswer,
+    ChatMembersQuery,
+    EmoteEventMessage,
+    ErrorApiData,
+    ErrorMessage,
+    ErrorScreenMessage,
+    FilterType,
+    GetMemberAnswer,
+    GetMemberQuery,
+    GetRecordingsAnswer,
+    GetRecordingThumbnailsAnswer,
+    DeleteRecordingAnswer,
+    JoinRoomMessage,
+    MemberData,
+    NonUndefinedFields,
+    OauthRefreshTokenAnswer,
+    OauthRefreshTokenQuery,
+    PlayerDetailsUpdatedMessage,
+    PlayGlobalMessage,
+    PrivateEventFrontToPusher,
+    PublicEventFrontToPusher,
+    PusherToBackMessage,
+    QueryMessage,
+    RemoveSpaceFilterMessage,
+    ReportPlayerMessage,
+    SearchMemberAnswer,
+    SearchMemberQuery,
+    SearchTagsAnswer,
+    SearchTagsQuery,
+    ServerToAdminClientMessage,
+    SetPlayerDetailsMessage,
+    SpaceStateQuery,
+    IceServersAnswer,
+    UpdateSpaceUserMessage,
+    UserMovesMessage,
+    ViewportMessage,
+    GetSignedUrlAnswer,
+    BackEventFrontToPusherMessage,
+    ConnectToRoomMessage,
+    JoinRoomFrontMessage,
+    ServerToClientMessage,
+    BanIpPreviewAnswer,
+    BanIpPreviewQuery,
+    WorldUser,
+    WorldUsersAnswer,
+} from "@workadventure/messages";
+import { noUndefined } from "@workadventure/messages";
+import { Metadata } from "@grpc/grpc-js";
+import * as Sentry from "@sentry/node";
+import type { AxiosResponse } from "axios";
+import axios, { isAxiosError } from "axios";
+import type { WebSocket } from "uWebSockets.js";
+import { AbortError } from "@workadventure/shared-utils/src/Abort/AbortError";
+import { PusherRoom } from "../models/PusherRoom";
+import type { BackConnection } from "../models/Websocket/SocketData";
+
+import type { GroupDescriptor, UserDescriptor, ZoneEventListener } from "../models/Zone";
+import type { AdminConnection, AdminSocketData } from "../models/Websocket/AdminSocketData";
+import { EMBEDDED_DOMAINS_WHITELIST, FRONT_URL, GRPC_MAX_MESSAGE_SIZE, SECRET_KEY } from "../enums/EnvironmentVariable";
+import type { SpaceInterface } from "../models/Space";
+import { Space } from "../models/Space";
+import { SpaceConnection } from "../models/SpaceConnection";
+import { ClientNotPartOfSpaceError, SpaceDestroyedError } from "../models/SpaceValidationErrors";
+import type { UpgradeFailedData } from "../controllers/IoSocketController";
+import { eventProcessor } from "../models/eventProcessorInit";
+import { WS_CLOSE_CODE_SESSION_DESTROYED } from "../../common/WebSocketCloseCodes";
+import { clientEventsEmitter } from "./ClientEventsEmitter";
+import { gaugeManager } from "./GaugeManager";
+import { apiClientRepository } from "./ApiClientRepository";
+import { adminService } from "./AdminService";
+import type { ShortMapDescription } from "./ShortMapDescription";
+import { matrixProvider } from "./MatrixProvider";
+import RecordingService from "./RecordingService";
+import type { PusherWebSocket } from "./PusherWebSocket";
+import { analyticsTimedEventTracker, CONNECTION_SESSION_HANDLE } from "./AnalyticsTimedEventTracker";
+import { isFrameable } from "./EmbeddableHeaders";
+
+const debug = Debug("socket");
+
+export type AdminSocket = WebSocket<AdminSocketData>;
+export type SocketUpgradeFailed = WebSocket<UpgradeFailedData>;
+
+export class SocketManager implements ZoneEventListener {
+    private static readonly RECORDING_QUERY_TIMEOUT_MS = 60_000;
+    private rooms: Map<string, PusherRoom> = new Map<string, PusherRoom>();
+    // Rooms whose init() has not resolved yet, so concurrent getOrCreateRoom calls share one instance.
+    private creatingRooms: Map<string, Promise<PusherRoom>> = new Map<string, Promise<PusherRoom>>();
+    private spaces: Map<string, SpaceInterface> = new Map<string, SpaceInterface>();
+
+    constructor(private _spaceConnection = new SpaceConnection()) {
+        clientEventsEmitter.registerToClientJoin((clientUUid: string, roomId: string) => {
+            gaugeManager.incNbClientPerRoomGauge(roomId);
+        });
+        clientEventsEmitter.registerToClientLeave((clientUUid: string, roomId: string) => {
+            gaugeManager.decNbClientPerRoomGauge(roomId);
+        });
+        clientEventsEmitter.registerToCreateSpace((spaceName: string) => {
+            gaugeManager.incNbSpaces();
+        });
+        clientEventsEmitter.registerToDeleteSpace((spaceName: string) => {
+            gaugeManager.decNbSpaces();
+        });
+    }
+
+    async handleAdminRoom(client: AdminSocket, roomId: string): Promise<void> {
+        const apiClient = await apiClientRepository.getClient(roomId, GRPC_MAX_MESSAGE_SIZE);
+        const socketData = client.getUserData();
+        const adminRoomStream = apiClient.adminRoom();
+        if (!socketData.adminConnections) {
+            socketData.adminConnections = new Map<string, AdminConnection>();
+        }
+        if (socketData.adminConnections.has(roomId)) {
+            socketData.adminConnections.get(roomId)?.end();
+        }
+        socketData.adminConnections.set(roomId, adminRoomStream);
+
+        // Event listeners are valid for the lifetime of the connection
+        /* eslint-disable listeners/no-missing-remove-event-listener, listeners/no-inline-function-event-listener */
+        adminRoomStream
+            .on("data", (message: ServerToAdminClientMessage) => {
+                if (!message.message) {
+                    console.error("Empty message returned on adminRoomStream");
+                    return;
+                }
+                switch (message.message.$case) {
+                    case "userJoinedRoom": {
+                        const userJoinedRoomMessage = message.message.userJoinedRoom;
+                        if (!socketData.disconnecting) {
+                            socketData.sendMessage(
+                                JSON.stringify({
+                                    type: "MemberJoin",
+                                    data: {
+                                        uuid: userJoinedRoomMessage.uuid,
+                                        name: userJoinedRoomMessage.name,
+                                        ipAddress: userJoinedRoomMessage.ipAddress,
+                                        roomId: roomId,
+                                    },
+                                }),
+                            );
+                        }
+                        break;
+                    }
+                    case "userLeftRoom": {
+                        const userLeftRoomMessage = message.message.userLeftRoom;
+                        if (!socketData.disconnecting) {
+                            socketData.sendMessage(
+                                JSON.stringify({
+                                    type: "MemberLeave",
+                                    data: {
+                                        uuid: userLeftRoomMessage.uuid,
+                                    },
+                                }),
+                            );
+                        }
+                        break;
+                    }
+                    case "errorMessage": {
+                        const errorMessage = message.message.errorMessage;
+                        console.error("Error message received from adminRoomStream: " + errorMessage.message);
+                        Sentry.captureException("Error message received from adminRoomStream: " + errorMessage.message);
+                        if (!socketData.disconnecting) {
+                            socketData.sendMessage(
+                                JSON.stringify({
+                                    type: "Error",
+                                    data: {
+                                        message: errorMessage.message,
+                                    },
+                                }),
+                            );
+                        }
+                        break;
+                    }
+                    default: {
+                        const _exhaustiveCheck: never = message.message;
+                    }
+                }
+            })
+            .on("end", () => {
+                try {
+                    // Let's close the front connection if the back connection is closed. This way, we can retry connecting from the start.
+                    if (!socketData.disconnecting) {
+                        console.warn(
+                            "Admin connection lost to back server '" +
+                                apiClient.getChannel().getTarget() +
+                                "' for room '" +
+                                roomId +
+                                "'",
+                        );
+                        this.closeAdminWebsocketConnection(client, 1011, "Admin Connection lost to back server");
+                    }
+                } catch (e: unknown) {
+                    console.error("Error while handling ended admin connection to back", e);
+                    Sentry.captureException(e);
+                }
+            })
+            .on("error", (err: Error) => {
+                try {
+                    console.error(
+                        "Error in connection to back server '" +
+                            apiClient.getChannel().getTarget() +
+                            "' for room '" +
+                            roomId +
+                            "':",
+                        err,
+                    );
+                    if (!socketData.disconnecting) {
+                        this.closeAdminWebsocketConnection(client, 1011, "Error while connecting to back server");
+                    }
+                } catch (e: unknown) {
+                    console.error("Error while handling error event in admin connection to back", e);
+                    Sentry.captureException(e);
+                }
+            });
+
+        const message: AdminPusherToBackMessage = {
+            message: {
+                $case: "subscribeToRoom",
+                subscribeToRoom: roomId,
+            },
+        };
+
+        console.info(
+            `Admin socket handle room ${roomId} connections for a client on ${Buffer.from(
+                client.getRemoteAddressAsText(),
+            ).toString()}`,
+        );
+
+        adminRoomStream.write(message);
+    }
+
+    leaveAdminRoom(socket: AdminSocket): void {
+        for (const adminConnection of socket.getUserData().adminConnections?.values() ?? []) {
+            adminConnection.end();
+        }
+    }
+
+    async handleConnectToRoom(client: PusherWebSocket): Promise<void> {
+        const socketData = client.getUserData();
+
+        let streamToBack: BackConnection | undefined;
+        try {
+            const connectToRoomMessage: ConnectToRoomMessage = {
+                roomId: socketData.roomId,
+                tag: socketData.tags,
+                lastCommandId: socketData.lastCommandId ?? "", // TODO: turn this into an optional field
+            };
+
+            debug("Calling connectToRoom '" + socketData.roomId + "'");
+            const apiClient = await apiClientRepository.getClient(socketData.roomId, GRPC_MAX_MESSAGE_SIZE);
+            streamToBack = apiClient.connectToRoom();
+            let backConnectionCloseReason: string | undefined;
+
+            client.getUserData().backConnection = streamToBack;
+
+            streamToBack
+                .on("data", (message: ServerToClientMessage) => {
+                    if (!message.message) {
+                        console.error("Empty message returned on streamToBack");
+                        return;
+                    }
+                    switch (message.message.$case) {
+                        case "roomJoinedMessage": {
+                            socketData.userId = message.message.roomJoinedMessage.currentUserId;
+                            socketData.spaceUserId =
+                                socketData.roomId + "_" + message.message.roomJoinedMessage.currentUserId;
+
+                            // If this is the first message sent, send back the viewport.
+                            this.handleViewport(client, client.getUserData().viewport);
+                            // A session is an interval like any other: the tracker
+                            // emits user.connected now and user.disconnected when it
+                            // closes. open() is idempotent on the handle, which is what
+                            // the separate "already tracked" flag used to provide.
+                            analyticsTimedEventTracker.open(
+                                CONNECTION_SESSION_HANDLE,
+                                "user.disconnected",
+                                { connectionId: socketData.tabId },
+                                socketData,
+                            );
+                            break;
+                        }
+                        case "refreshRoomMessage": {
+                            const refreshMessage = message.message.refreshRoomMessage;
+                            this.refreshRoomData(refreshMessage.roomId, refreshMessage.versionNumber);
+                            break;
+                        }
+                        case "backConnectionCloseReasonMessage": {
+                            backConnectionCloseReason = message.message.backConnectionCloseReasonMessage.reason;
+                            return;
+                        }
+                    }
+
+                    // Let's pass data over from the back to the client.
+                    if (!client.isDisconnecting()) {
+                        client.send(message);
+                    }
+                })
+                .on("end", () => {
+                    try {
+                        // Let's close the front connection if the back connection is closed. This way, we can retry connecting from the start.
+                        if (!client.isDisconnecting()) {
+                            const connectionCloseReason =
+                                backConnectionCloseReason ?? "No close reason received from back server.";
+                            const logMessage = `Connection lost to back server '${apiClient
+                                .getChannel()
+                                .getTarget()}' for room '${socketData.roomId}' and user '${socketData.userUuid}'/'${
+                                socketData.name
+                            }'. Reason: ${connectionCloseReason}`;
+                            if (client.isPermanentlyDisconnected()) {
+                                // Expected teardown: the client closed its WebSocket for good, so we ended the
+                                // back connection ourselves. Not a real "connection lost" event.
+                                debug(logMessage);
+                            } else {
+                                console.warn(logMessage);
+                            }
+                            this.closeWebsocketConnection(
+                                client,
+                                WS_CLOSE_CODE_SESSION_DESTROYED,
+                                `Back lost: ${connectionCloseReason}`,
+                            );
+                        }
+                    } catch (e: unknown) {
+                        console.error("Error while handling ended connection to back", e);
+                        Sentry.captureException(e);
+                    }
+                })
+                .on("error", (err: Error) => {
+                    try {
+                        const date = new Date();
+                        console.error(
+                            "Error in connection to back server '" +
+                                apiClient.getChannel().getTarget() +
+                                "' for room '" +
+                                socketData.roomId +
+                                "'at :" +
+                                date.toLocaleString("en-GB"),
+                            err,
+                        );
+                        if (!client.isDisconnecting()) {
+                            this.closeWebsocketConnection(
+                                client,
+                                WS_CLOSE_CODE_SESSION_DESTROYED,
+                                "Error while connecting to back server",
+                            );
+                        }
+                    } catch (e: unknown) {
+                        console.error("Error while handling error event in connection to back", e);
+                        Sentry.captureException(e);
+                    }
+                });
+
+            const pusherToBackMessage: PusherToBackMessage = {
+                message: {
+                    $case: "connectToRoomMessage",
+                    connectToRoomMessage,
+                },
+            };
+            streamToBack.write(pusherToBackMessage);
+
+            const pusherRoom = await this.getOrCreateRoom(socketData.roomId);
+            pusherRoom.join(client);
+        } catch (e) {
+            Sentry.captureException(e);
+            console.error(`An error occurred on "connect_to_room" event`, e);
+
+            // Cleanup: make sure the back connection (stream) is closed if it was created.
+            // The websocket connection will then be closed below to complete the cleanup.
+            if (streamToBack) {
+                try {
+                    streamToBack.end();
+                } catch (err) {
+                    console.warn("Error while closing streamToBack after failed join:", err);
+                    Sentry.captureException(err);
+                }
+            }
+
+            // Let's close the websocket connection with an error code
+            this.closeWebsocketConnection(
+                client,
+                WS_CLOSE_CODE_SESSION_DESTROYED,
+                "Error while connecting to back server",
+            );
+        }
+    }
+
+    public async handleJoinRoom(client: PusherWebSocket, joinRoomFrontMessage: JoinRoomFrontMessage): Promise<void> {
+        const socketData = client.getUserData();
+        const message = noUndefined(joinRoomFrontMessage);
+
+        socketData.viewport = message.viewportMessage;
+        socketData.name = message.name;
+        socketData.availabilityStatus = message.availabilityStatus;
+
+        const streamToBack = socketData.backConnection;
+        if (!streamToBack) {
+            Sentry.captureException("Client has no back connection");
+            throw new Error("Client has no back connection");
+        }
+
+        try {
+            const joinRoomMessage: JoinRoomMessage = {
+                userUuid: socketData.userUuid,
+                IPAddress: socketData.ipAddress,
+                name: socketData.name,
+                availabilityStatus: socketData.availabilityStatus,
+                positionMessage: message.positionMessage,
+                tag: socketData.tags,
+                isLogged: socketData.isLogged,
+                companionTexture: socketData.companionTexture,
+                activatedInviteUser:
+                    socketData.activatedInviteUser != undefined ? socketData.activatedInviteUser : true,
+                canEdit: socketData.canEdit,
+                characterTextures: socketData.characterTextures,
+                applications: socketData.applications ? socketData.applications : [],
+                visitCardUrl: socketData.visitCardUrl ?? "", // TODO: turn this into an optional field
+                userRoomToken: socketData.userRoomToken ?? "", // TODO: turn this into an optional field
+                chatID: socketData.chatID,
+                tabId: socketData.tabId,
+            };
+
+            debug("Calling joinRoom '" + socketData.roomId + "'");
+            if (!socketData.joinedRoom) {
+                socketData.joinedRoom = true;
+                clientEventsEmitter.emitClientJoin(socketData.userUuid, socketData.roomId);
+            }
+
+            const pusherToBackMessage: PusherToBackMessage = {
+                message: {
+                    $case: "joinRoomMessage",
+                    joinRoomMessage,
+                },
+            };
+            streamToBack.write(pusherToBackMessage);
+
+            const pusherRoom = await this.getOrCreateRoom(socketData.roomId);
+            pusherRoom.join(client);
+        } catch (e) {
+            Sentry.captureException(e);
+            console.error(`An error occurred on "join_room" event`, e);
+
+            // Proper unregister: make sure the back connection (stream) is closed if it was created and
+            // undo the earlier emitted client join to keep metrics consistent.
+            if (streamToBack) {
+                try {
+                    streamToBack.end();
+                } catch (err) {
+                    console.warn("Error while closing streamToBack after failed join:", err);
+                    Sentry.captureException(err);
+                }
+            }
+
+            // The client leave event is emitted by leaveRoom, when the websocket is closed below.
+            try {
+                if (socketData.joinedRoom) {
+                    // Closes the session along with everything else, sessions last.
+                    analyticsTimedEventTracker.closeConnection(socketData, "join_failed");
+                }
+            } catch (emitErr) {
+                console.warn("Error while closing analytics after failed join:", emitErr);
+                Sentry.captureException(emitErr);
+            }
+
+            // Let's close the websocket connection with an error code
+            this.closeWebsocketConnection(
+                client,
+                WS_CLOSE_CODE_SESSION_DESTROYED,
+                "Error while connecting to back server",
+            );
+        }
+    }
+
+    public handleUpdateSpaceMetadata(
+        client: PusherWebSocket,
+        spaceName: string,
+        metadata: { [key: string]: unknown },
+    ): void {
+        try {
+            const space = this.spaces.get(spaceName);
+            if (!space) {
+                throw new Error("Space not found");
+            }
+
+            space.forwarder.updateMetadata(metadata, client.getUserData().spaceUserId);
+        } catch (error) {
+            Sentry.captureException(error);
+            console.error(`An error occurred on "update_space_metadata" event`, error);
+        }
+    }
+
+    public async handleJoinSpace(
+        client: PusherWebSocket,
+
+        spaceName: string,
+
+        localSpaceName: string,
+        filterType: FilterType,
+        propertiesToSync: string[],
+        options: { signal: AbortSignal },
+    ): Promise<void> {
+        const socketData = client.getUserData();
+
+        let space: SpaceInterface | undefined = this.spaces.get(spaceName);
+
+        if (!space) {
+            const onSpaceEmpty = (space: SpaceInterface) => {
+                this.spaces.delete(space.name);
+                clientEventsEmitter.emitDeleteSpace(space.name);
+            };
+
+            space = new Space(
+                spaceName,
+                localSpaceName,
+                eventProcessor,
+                filterType,
+                onSpaceEmpty,
+                this._spaceConnection,
+                client.getUserData().world,
+                propertiesToSync,
+            );
+
+            this.spaces.set(spaceName, space);
+            clientEventsEmitter.emitCreateSpace(spaceName);
+
+            space.initSpace();
+        }
+
+        if (space.filterType !== filterType) {
+            throw new Error("Error: Space filter type mismatch");
+        }
+
+        if (socketData.joinSpacesPromise.has(spaceName)) {
+            // Maybe we are in the process of leaving the space (the joinSpacesPromise is deleted only when the unregisterUser is done)
+            // Let's wait for that to finish
+            await socketData.joinSpacesPromise.get(spaceName);
+            if (options.signal.aborted) {
+                // The user has aborted the request, we should not add him to the space
+                throw new Error("Join space aborted by the user (before space was joined in the back)");
+            }
+        }
+
+        const joinPromise = (async () => {
+            try {
+                await space.forwarder.registerUser(client, filterType);
+                if (options.signal.aborted) {
+                    // The user has aborted the request, we should not add them to the space
+                    await space.forwarder.unregisterUser(client);
+                    throw options.signal.reason ?? new AbortError("Join space aborted");
+                }
+            } catch (e) {
+                // Deleting the promise BEFORE unregistering the user (in case unregistering fails)
+                socketData.joinSpacesPromise.delete(spaceName);
+                throw e;
+            }
+        })();
+
+        socketData.joinSpacesPromise.set(spaceName, joinPromise);
+
+        await joinPromise;
+
+        // We are done joining the space
+        // We could still receive an abort message afterwards (because the client could send the abort while we
+        // are sending the answer). In this case, we will just leave the space in the abort handler.
+        options.signal.addEventListener("abort", () => {
+            if (space == undefined) {
+                console.error("Space is undefined while unregistering user from space after abort");
+                Sentry.captureException(
+                    new Error("Space is undefined while unregistering user from space after abort"),
+                );
+                return;
+            }
+            space.forwarder.unregisterUser(client).catch((error) => {
+                console.error("Error while unregistering user from space after abort", error);
+                // The space being destroyed is an expected lifecycle event: log it but don't report to Sentry.
+                if (!(error instanceof SpaceDestroyedError)) {
+                    Sentry.captureException(error);
+                }
+            });
+        });
+    }
+
+    public async sendSpaceState(client: PusherWebSocket, spaceName: string): Promise<void> {
+        await this.spaces.get(spaceName)?.dispatcher.notifyMeState(client);
+    }
+
+    private closeAdminWebsocketConnection(client: AdminSocket, code: number, reason: string): void {
+        client.getUserData().disconnecting = true;
+        client.end(code, reason);
+    }
+
+    private closeWebsocketConnection(client: PusherWebSocket, code: number, reason: string): void {
+        this.cleanupSocket(client);
+        client.end(code, reason);
+    }
+
+    public cleanupSocket(client: PusherWebSocket): void {
+        if (client.isDisconnecting()) {
+            // Cleanup already called
+            return;
+        }
+
+        const socketData = client.getUserData();
+
+        try {
+            this.leaveRoom(client);
+        } catch (e) {
+            Sentry.captureException(e);
+            console.error("Error while leaving room", e);
+        }
+        try {
+            this.leaveSpaces(client).catch((error) => {
+                console.error("Error while leaving spaces", error);
+                Sentry.captureException(error);
+            });
+        } catch (e) {
+            Sentry.captureException(e);
+            console.error(e);
+        }
+        try {
+            this.leaveChatRoomArea(client).catch((error) => {
+                console.error("Error while leaving chat room area", error);
+                Sentry.captureException(error);
+            });
+        } catch (e) {
+            Sentry.captureException(e);
+            console.error(e);
+        }
+        socketData.currentChatRoomArea = [];
+    }
+
+    handleViewport(client: PusherWebSocket, viewport: ViewportMessage): void {
+        const socketData = client.getUserData();
+        try {
+            socketData.viewport = viewport;
+
+            const room = this.rooms.get(socketData.roomId);
+            if (!room) {
+                console.error("In SET_VIEWPORT, could not find world with id '", socketData.roomId, "'");
+                Sentry.captureException("In SET_VIEWPORT, could not find world with id ' " + socketData.roomId);
+                return;
+            }
+            room.setViewport(client, socketData.viewport);
+        } catch (e) {
+            Sentry.captureException(`An error occurred on "SET_VIEWPORT" event ${e}`);
+            console.error(`An error occurred on "SET_VIEWPORT" event ${e}`);
+        }
+    }
+
+    handleUserMovesMessage(client: PusherWebSocket, userMovesMessage: UserMovesMessage): void {
+        const socketData = client.getUserData();
+        if (!socketData.backConnection) {
+            Sentry.captureException("Client has no back connection");
+            throw new Error("Client has no back connection");
+        }
+
+        socketData.backConnection.write({
+            message: {
+                $case: "userMovesMessage",
+                userMovesMessage,
+            },
+        });
+
+        const viewport = userMovesMessage.viewport;
+        if (viewport === undefined) {
+            throw new Error("Missing viewport in UserMovesMessage");
+        }
+
+        // Now, we need to listen to the correct viewport.
+        this.handleViewport(client, viewport);
+    }
+
+    onGroupUsersUpdated(group: GroupDescriptor, listener: PusherWebSocket): void {
+        listener.emitInBatch({
+            message: {
+                $case: "groupUsersUpdateMessage",
+                groupUsersUpdateMessage: {
+                    groupId: group.groupId,
+                    userIds: group.userIds,
+                },
+            },
+        });
+    }
+
+    onEmote(emoteMessage: EmoteEventMessage, listener: PusherWebSocket): void {
+        listener.emitInBatch({
+            message: {
+                $case: "emoteEventMessage",
+                emoteEventMessage: emoteMessage,
+            },
+        });
+    }
+
+    onPlayerDetailsUpdated(playerDetailsUpdatedMessage: PlayerDetailsUpdatedMessage, listener: PusherWebSocket): void {
+        listener.emitInBatch({
+            message: {
+                $case: "playerDetailsUpdatedMessage",
+                playerDetailsUpdatedMessage,
+            },
+        });
+    }
+
+    onError(errorMessage: ErrorMessage, listener: PusherWebSocket): void {
+        listener.emitInBatch({
+            message: {
+                $case: "errorMessage",
+                errorMessage,
+            },
+        });
+    }
+
+    // Useless now, will be useful again if we allow editing details in game
+    async handleSetPlayerDetails(
+        client: PusherWebSocket,
+        playerDetailsMessage: SetPlayerDetailsMessage,
+    ): Promise<void> {
+        const socketData = client.getUserData();
+        const pusherToBackMessage: PusherToBackMessage["message"] = {
+            $case: "setPlayerDetailsMessage",
+            setPlayerDetailsMessage: playerDetailsMessage,
+        };
+
+        this.forwardMessageToBack(client, pusherToBackMessage);
+
+        const spacePromises = Array.from(socketData.spaces).map(async (spaceName: string) => {
+            const space = this.spaces.get(spaceName);
+            if (space) {
+                await this.checkClientIsPartOfSpace(client, spaceName);
+                const changedFields = space.applyAndGetUpdatedFieldsForUserFromSetPlayerDetails(
+                    client,
+                    playerDetailsMessage,
+                );
+                if (changedFields) {
+                    return space.forwarder.updateUser(changedFields.partialSpaceUser, changedFields.changedFields);
+                }
+            } else {
+                console.error(
+                    `User ${socketData.name} thinks he is in space ${spaceName} but this space does not exist anymore.`,
+                );
+                Sentry.captureException(
+                    new Error(
+                        `User ${socketData.name} thinks he is in space ${spaceName} but this space does not exist anymore.`,
+                    ),
+                );
+            }
+        });
+
+        await Promise.all(spacePromises);
+    }
+
+    async handleReportMessage(client: PusherWebSocket, reportPlayerMessage: ReportPlayerMessage): Promise<void> {
+        const socketData = client.getUserData();
+        try {
+            await adminService.reportPlayer(
+                reportPlayerMessage.reportedUserUuid,
+                reportPlayerMessage.reportComment,
+                socketData.userUuid,
+                socketData.roomId,
+                "en",
+            );
+        } catch (e) {
+            Sentry.captureException(`An error occurred on "handleReportMessage" ${e}`);
+            console.error(`An error occurred on "handleReportMessage" ${e}`);
+        }
+    }
+
+    async handleBanPlayerMessage(client: PusherWebSocket, banPlayerMessage: BanPlayerMessage): Promise<void> {
+        const socketData = client.getUserData();
+        // Kick and ban are reserved to the admins of the world
+        if (!socketData.tags.includes("admin")) return;
+        const reason = banPlayerMessage.reason.trim();
+        try {
+            if (banPlayerMessage.kick) {
+                // A kick only ejects the user from the room: nothing is persisted in the admin.
+                await this.emitBan(banPlayerMessage.banUserUuid, reason, "kicked", socketData.roomId);
+                return;
+            }
+            // On request, ban the IP the back sees for the user too, so they cannot come back with another account.
+            // Unless the moderator shares it, they would lock themselves out. If the user cannot be found (they left,
+            // a back did not answer), only their account is banned.
+            let ipAddress: string | undefined;
+            if (banPlayerMessage.byIp) {
+                try {
+                    const bannedUser = (await this.getWorldUsers(socketData.world)).find(
+                        (user) => user.uuid === banPlayerMessage.banUserUuid,
+                    );
+                    if (bannedUser?.ipAddress && bannedUser.ipAddress !== socketData.ipAddress) {
+                        ipAddress = bannedUser.ipAddress;
+                    }
+                } catch (e) {
+                    console.warn(`Could not find the IP of the banned user, banning their account only: ${e}`);
+                }
+            }
+            try {
+                await adminService.banUserByUuid(
+                    banPlayerMessage.banUserUuid,
+                    socketData.roomId,
+                    banPlayerMessage.banUserName,
+                    reason !== "" ? reason : `User banned by admin ${socketData.userUuid}`,
+                    socketData.userUuid,
+                    ipAddress,
+                );
+            } catch (e) {
+                // The ban could not be recorded (no admin back office, admin down...): still get the user out
+                // of the room, as a kick, since nothing will stop them from coming back.
+                Sentry.captureException(`Could not record the ban in "handleBanPlayerMessage" ${e}`);
+                console.error(`Could not record the ban in "handleBanPlayerMessage" ${e}`);
+                await this.emitBan(banPlayerMessage.banUserUuid, reason, "kicked", socketData.roomId);
+                return;
+            }
+            await this.emitBan(banPlayerMessage.banUserUuid, reason, "banned", socketData.roomId);
+        } catch (e) {
+            Sentry.captureException(`An error occurred on "handleBanPlayerMessage" ${e}`);
+            console.error(`An error occurred on "handleBanPlayerMessage" ${e}`);
+        }
+    }
+
+    leaveRoom(socket: PusherWebSocket): void {
+        // leave previous room and world
+        const socketData = socket.getUserData();
+        try {
+            if (socketData.roomId) {
+                try {
+                    //user leaves room
+                    const room: PusherRoom | undefined = this.rooms.get(socketData.roomId);
+                    if (room) {
+                        debug("Leaving room %s.", socketData.roomId);
+
+                        room.leave(socket);
+                        this.deleteRoomIfEmpty(room);
+                    } else {
+                        // The room was already removed from the map. Indeed, there is a race condition
+                        // between the closing if the last user connection to the back and the closing of the room
+                        // connection to the back.
+                        debug("Could not find the GameRoom the user is leaving: %s", socketData.roomId);
+                    }
+                    //user leave previous room
+                    //Client.leave(Client.roomId);
+                } finally {
+                    //delete Client.roomId;
+                    if (socketData.joinedRoom) {
+                        socketData.joinedRoom = false;
+                        clientEventsEmitter.emitClientLeave(socketData.userUuid, socketData.roomId);
+                    }
+                    // One call closes every interval this socket holds, session
+                    // included and emitted last — see sessionsLast(). The admin
+                    // attributes a conversation to the session containing it and drops
+                    // one ending even a millisecond after its session's disconnect, so
+                    // that ordering is what keeps the headline metric from silently
+                    // reading zero.
+                    analyticsTimedEventTracker.closeConnection(socketData, "socket_closed");
+                    debug("User ", socketData.name, " left: ", socketData.userUuid);
+                }
+            }
+        } finally {
+            if (socketData.backConnection) {
+                socketData.backConnection.end();
+            }
+        }
+    }
+
+    async leaveSpaces(socket: PusherWebSocket) {
+        const socketData = socket.getUserData();
+
+        // Create an array of operations to perform
+        const leaveSpacePromises = Array.from(socketData.spaces).map(async (spaceName) => {
+            const space = this.spaces.get(spaceName);
+
+            if (space) {
+                try {
+                    socketData.joinSpacesPromise.delete(spaceName);
+
+                    await space.forwarder.unregisterUser(socket);
+
+                    return { space, spaceName, success: true };
+                } catch (error) {
+                    console.error(`Error unregistering user from space ${spaceName}:`, error);
+                    // The space being destroyed is an expected lifecycle event: log it but don't report to Sentry.
+                    if (!(error instanceof SpaceDestroyedError)) {
+                        Sentry.captureException(error);
+                    }
+                    return { space, spaceName, success: false };
+                }
+            } else {
+                console.error(
+                    `User ${socketData.name} thinks he is in space ${spaceName} but this space does not exist anymore.`,
+                );
+                Sentry.captureException(
+                    new Error(
+                        `User ${socketData.name} thinks he is in space ${spaceName} but this space does not exist anymore.`,
+                    ),
+                );
+                return { space: null, spaceName, success: false };
+            }
+        });
+
+        await Promise.all(leaveSpacePromises);
+
+        socketData.spaces.clear();
+    }
+
+    private deleteRoomIfEmpty(room: PusherRoom): void {
+        if (room.isEmpty()) {
+            room.close();
+            this.rooms.delete(room.roomUrl);
+            debug("Room %s is empty. Deleting.", room.roomUrl);
+        }
+    }
+
+    public deleteRoomIfEmptyFromId(roomUrl: string): void {
+        const room = this.rooms.get(roomUrl);
+        if (room) {
+            this.deleteRoomIfEmpty(room);
+        }
+    }
+
+    async getOrCreateRoom(roomUrl: string): Promise<PusherRoom> {
+        const room = this.rooms.get(roomUrl);
+        if (room !== undefined) {
+            return room;
+        }
+
+        // Coalesce concurrent creations. init() only awaits microtasks today, but if it ever awaits real I/O,
+        // two callers would otherwise create two rooms for the same URL and leak one listenRoom stream.
+        let creation = this.creatingRooms.get(roomUrl);
+        if (creation === undefined) {
+            creation = this.createRoom(roomUrl).finally(() => this.creatingRooms.delete(roomUrl));
+            this.creatingRooms.set(roomUrl, creation);
+        }
+        return creation;
+    }
+
+    private async createRoom(roomUrl: string): Promise<PusherRoom> {
+        const room = new PusherRoom(roomUrl, this);
+        room.backConnectionClosedSignal.addEventListener(
+            "abort",
+            () => {
+                // Only evict the map entry if it still points to this instance.
+                if (this.rooms.get(roomUrl) === room) {
+                    this.rooms.delete(roomUrl);
+                }
+            },
+            { once: true },
+        );
+        await room.init();
+        this.rooms.set(roomUrl, room);
+        return room;
+    }
+
+    public getRooms(): Map<string, PusherRoom> {
+        return this.rooms;
+    }
+
+    /**
+     * Every user connected to a room of the world, whatever the back serving the room. The world is the URL the
+     * admin returns for the user: a room belongs to it when its URL starts with it. Rejects when a back does not
+     * answer: a partial list would hide users.
+     */
+    public async getWorldUsers(world: string): Promise<WorldUser[]> {
+        const backs = await apiClientRepository.getAllClients(GRPC_MAX_MESSAGE_SIZE);
+        const answers = await Promise.all(
+            backs.map(
+                (back) =>
+                    new Promise<WorldUsersAnswer>((resolve, reject) => {
+                        back.getWorldUsers(
+                            { world },
+                            new Metadata(),
+                            { deadline: Date.now() + 1000 },
+                            (error, answer) => (error ? reject(error) : resolve(answer)),
+                        );
+                    }),
+            ),
+        );
+        return answers.flatMap((answer) => answer.users);
+    }
+
+    /**
+     * Who else a ban by IP of a user would lock out: the other users connected to the world from the same IP.
+     * Only names go back to the game, never an IP address.
+     */
+    async handleBanIpPreviewQuery(
+        client: PusherWebSocket,
+        banIpPreviewQuery: BanIpPreviewQuery,
+    ): Promise<BanIpPreviewAnswer> {
+        const { world, userUuid, tags, ipAddress } = client.getUserData();
+        if (!tags.includes("admin")) {
+            throw new Error("Only an admin of the world can preview a ban");
+        }
+        const worldUsers = await this.getWorldUsers(world);
+        const bannedIp = worldUsers.find((user) => user.uuid === banIpPreviewQuery.banUserUuid)?.ipAddress;
+        if (!bannedIp) {
+            return { ipKnown: false, includesModerator: false, users: [] };
+        }
+        return {
+            ipKnown: true,
+            includesModerator: bannedIp === ipAddress,
+            users: worldUsers
+                .filter(
+                    (user) =>
+                        user.ipAddress === bannedIp &&
+                        user.uuid !== banIpPreviewQuery.banUserUuid &&
+                        user.uuid !== userUuid,
+                )
+                .map((user) => ({ name: user.name })),
+        };
+    }
+
+    public async emitBan(userUuid: string, message: string, type: string, roomId: string): Promise<void> {
+        const backConnection = await apiClientRepository.getClient(roomId, GRPC_MAX_MESSAGE_SIZE);
+        const banMessage: BanMessage = {
+            message,
+            roomId,
+            recipientUuid: userUuid,
+            type,
+        };
+        backConnection.ban(banMessage, (error: unknown) => {
+            if (error !== null) {
+                Sentry.captureException("Error while sending admin message", error);
+                console.error("Error while sending admin message", error);
+            }
+        });
+    }
+
+    public onUserEnters(user: UserDescriptor, listener: PusherWebSocket): void {
+        listener.emitInBatch({
+            message: {
+                $case: "userJoinedMessage",
+                userJoinedMessage: user.toUserJoinedMessage(),
+            },
+        });
+    }
+
+    public onUserMoves(user: UserDescriptor, listener: PusherWebSocket): void {
+        listener.emitInBatch({
+            message: {
+                $case: "userMovedMessage",
+                userMovedMessage: user.toUserMovedMessage(),
+            },
+        });
+    }
+
+    public onUserLeaves(userId: number, listener: PusherWebSocket): void {
+        listener.emitInBatch({
+            message: {
+                $case: "userLeftMessage",
+                userLeftMessage: {
+                    userId,
+                },
+            },
+        });
+    }
+
+    public onGroupEnters(group: GroupDescriptor, listener: PusherWebSocket): void {
+        listener.emitInBatch({
+            message: {
+                $case: "groupUpdateMessage",
+                groupUpdateMessage: group.toGroupUpdateMessage(),
+            },
+        });
+    }
+
+    public onGroupMoves(group: GroupDescriptor, listener: PusherWebSocket): void {
+        this.onGroupEnters(group, listener);
+    }
+
+    public onGroupLeaves(groupId: number, listener: PusherWebSocket): void {
+        listener.emitInBatch({
+            message: {
+                $case: "groupDeleteMessage",
+                groupDeleteMessage: {
+                    groupId,
+                },
+            },
+        });
+    }
+
+    public getTokenExpiredMessage(): ServerToClientMessage {
+        return {
+            message: {
+                $case: "tokenExpiredMessage",
+                tokenExpiredMessage: {},
+            },
+        };
+    }
+
+    public getInvalidCharacterTextureMessage(): ServerToClientMessage {
+        return {
+            message: {
+                $case: "invalidCharacterTextureMessage",
+                invalidCharacterTextureMessage: {
+                    message: "Invalid character textures",
+                },
+            },
+        };
+    }
+
+    public getInvalidCompanionTextureMessage(): ServerToClientMessage {
+        return {
+            message: {
+                $case: "invalidCompanionTextureMessage",
+                invalidCompanionTextureMessage: {
+                    message: "Invalid companion texture",
+                },
+            },
+        };
+    }
+
+    public toConnectionErrorMessage(message: string): ServerToClientMessage {
+        return {
+            message: {
+                $case: "worldConnectionMessage",
+                worldConnectionMessage: {
+                    message,
+                },
+            },
+        };
+    }
+
+    public toErrorScreenMessage(errorApi: ErrorApiData): ServerToClientMessage {
+        // FIXME: improve typing of ErrorScreenMessage
+        const errorScreenMessage: ErrorScreenMessage = {
+            type: errorApi.type,
+            code: "",
+            title: undefined,
+            subtitle: "",
+            details: "",
+            image: "",
+            imageLogo: "",
+            buttonTitle: "",
+            canRetryManual: false,
+            timeToRetry: 0,
+            urlToRedirect: "",
+        };
+
+        if (errorApi.type == "retry" || errorApi.type == "error" || errorApi.type == "unauthorized") {
+            errorScreenMessage.code = errorApi.code;
+            errorScreenMessage.title = errorApi.title;
+            errorScreenMessage.subtitle = errorApi.subtitle;
+            errorScreenMessage.details = errorApi.details;
+            errorScreenMessage.image = errorApi.image;
+            errorScreenMessage.imageLogo = errorApi.imageLogo;
+            if (errorApi.type == "unauthorized" && errorApi.buttonTitle) {
+                errorScreenMessage.buttonTitle = errorApi.buttonTitle;
+            }
+        }
+        if (errorApi.type == "retry") {
+            if (errorApi.buttonTitle) {
+                errorScreenMessage.buttonTitle = errorApi.buttonTitle;
+            }
+            if (errorApi.canRetryManual !== undefined) errorScreenMessage.canRetryManual = errorApi.canRetryManual;
+            if (errorApi.timeToRetry) errorScreenMessage.timeToRetry = errorApi.timeToRetry;
+        }
+        if (errorApi.type == "redirect" && errorApi.urlToRedirect) {
+            errorScreenMessage.urlToRedirect = errorApi.urlToRedirect;
+        }
+
+        return {
+            message: {
+                $case: "errorScreenMessage",
+                errorScreenMessage,
+            },
+        };
+    }
+
+    private refreshRoomData(roomId: string, versionNumber: number): void {
+        const room = this.rooms.get(roomId);
+        //this function is run for every users connected to the room, so we need to make sure the room wasn't already refreshed.
+        if (!room || !room.needsUpdate(versionNumber)) return;
+        //TODO check right of user in admin
+    }
+
+    public async emitPlayGlobalMessage(
+        client: PusherWebSocket,
+        playGlobalMessageEvent: PlayGlobalMessage,
+    ): Promise<void> {
+        const socketData = client.getUserData();
+        if (!socketData.tags.includes("admin")) {
+            throw new Error("Client is not an admin!");
+        }
+
+        const clientRoomUrl = socketData.roomId;
+        let tabUrlRooms: string[];
+
+        if (playGlobalMessageEvent.broadcastToWorld) {
+            const shortDescriptions = await adminService.getUrlRoomsFromSameWorld(clientRoomUrl, "en", [], true);
+            tabUrlRooms = shortDescriptions.map((shortDescription) => shortDescription.roomUrl);
+        } else {
+            tabUrlRooms = [clientRoomUrl];
+        }
+
+        for (const roomUrl of tabUrlRooms) {
+            //eslint-disable-next-line no-await-in-loop
+            const apiRoom = await apiClientRepository.getClient(roomUrl, GRPC_MAX_MESSAGE_SIZE);
+            const roomMessage: AdminRoomMessage = {
+                message: playGlobalMessageEvent.content,
+                type: playGlobalMessageEvent.type,
+                roomId: roomUrl,
+            };
+            apiRoom.sendAdminMessageToRoom(roomMessage, () => {
+                return;
+            });
+        }
+    }
+
+    forwardMessageToBack(client: PusherWebSocket, message: PusherToBackMessage["message"]): void {
+        const socketData = client.getUserData();
+        const pusherToBackMessage: PusherToBackMessage = {
+            message: message,
+        };
+
+        if (!socketData.backConnection) {
+            Sentry.captureException(new Error("forwardMessageToBack => client.backConnection is undefined"));
+            throw new Error("forwardMessageToBack => client.backConnection is undefined");
+        }
+
+        socketData.backConnection.write(pusherToBackMessage);
+    }
+
+    forwardAdminMessageToBack(client: PusherWebSocket, message: PusherToBackMessage["message"]): void {
+        const socketData = client.getUserData();
+        if (!socketData.canEdit) {
+            Sentry.captureException(
+                new Error(`Security exception, the client tried to update the map: ${JSON.stringify(socketData)}`),
+            );
+            // Emit error message
+            client.emitInBatch({
+                message: {
+                    $case: "errorMessage",
+                    errorMessage: {
+                        message: "You are not allowed to edit the map",
+                    },
+                },
+            });
+            return;
+        }
+        this.forwardMessageToBack(client, message);
+    }
+
+    private async checkClientIsPartOfSpace(client: PusherWebSocket, spaceName: string): Promise<void> {
+        const joinSpacesPromise = client.getUserData().joinSpacesPromise;
+        const joinSpacePromise = joinSpacesPromise.get(spaceName);
+        if (joinSpacePromise) {
+            await joinSpacePromise;
+        }
+
+        const socketData = client.getUserData();
+        if (!socketData.spaces.has(spaceName)) {
+            throw new ClientNotPartOfSpaceError(
+                `Client ${client.getUserData().userUuid} - ${
+                    client.getUserData().name
+                } is trying to do an operation on space ${spaceName} whose he is not part of. Client is part of those spaces: ${Array.from(
+                    socketData.spaces,
+                ).join(", ")}`,
+                spaceName,
+            );
+        }
+    }
+
+    async handleAddSpaceFilterMessage(
+        client: PusherWebSocket,
+        addSpaceFilterMessage: NonUndefinedFields<AddSpaceFilterMessage>,
+    ) {
+        const newFilter = addSpaceFilterMessage.spaceFilterMessage;
+
+        await this.checkClientIsPartOfSpace(client, newFilter.spaceName);
+
+        const space = this.spaces.get(newFilter.spaceName);
+        if (space) {
+            await space.handleWatch(client);
+        } else {
+            console.error(`Add space filter called on a space (${newFilter.spaceName}) that does not exist`);
+            Sentry.captureException(
+                new Error(`Add space filter called on a space (${newFilter.spaceName}) that does not exist`),
+            );
+        }
+    }
+
+    handleRemoveSpaceFilterMessage(
+        client: PusherWebSocket,
+        removeSpaceFilterMessage: NonUndefinedFields<RemoveSpaceFilterMessage>,
+    ) {
+        const oldFilter = removeSpaceFilterMessage.spaceFilterMessage;
+        // We don't check that the client is part of the space here, because we could stop watching a space after leaving it.
+        //await this.checkClientIsPartOfSpace(client, oldFilter.spaceName);
+        const space = this.spaces.get(oldFilter.spaceName);
+        if (space) {
+            space.handleUnwatch(client);
+        } else {
+            // This function is called when the userStore of a space in front is unsubscribed.
+            // This could happen after we leave the space. Therefore, we don't display an error here.
+            // When leaving the space, we take care of removing the filters anyway.
+            /*console.error(`Remove space filter called on a space (${oldFilter.spaceName}) that does not exist`);
+            Sentry.captureException(
+                new Error(`Remove space filter called on a space (${oldFilter.spaceName}) that does not exist`)
+            );*/
+        }
+    }
+
+    async handleUpdateSpaceUser(client: PusherWebSocket, updateSpaceUserMessage: UpdateSpaceUserMessage) {
+        const message = noUndefined(updateSpaceUserMessage);
+
+        await this.checkClientIsPartOfSpace(client, message.spaceName);
+        const space = this.spaces.get(message.spaceName);
+        if (!space) {
+            throw new Error(
+                `Could not find space ${message.spaceName} when updating value(s) ${message.updateMask.join(", ")}`,
+            );
+        }
+
+        const updatedSpaceUser = space.extractUpdatedFieldsFromUpdateSpaceUserMessage(client, message);
+        if (updatedSpaceUser) {
+            space.forwarder.updateUser(updatedSpaceUser.partialSpaceUser, updatedSpaceUser.changedFields);
+        }
+    }
+
+    async handleRoomTagsQuery(client: PusherWebSocket, queryMessage: QueryMessage) {
+        let tags: string[];
+        try {
+            tags = await adminService.getTagsList(client.getUserData().roomId);
+        } catch (e) {
+            console.warn("SocketManager => handleRoomTagsQuery => error while getting tags list", e);
+            // Nothing to do with the error
+            tags = [];
+        }
+        client.send({
+            message: {
+                $case: "answerMessage",
+                answerMessage: {
+                    id: queryMessage.id,
+                    answer: {
+                        $case: "roomTagsAnswer",
+                        roomTagsAnswer: {
+                            tags,
+                        },
+                    },
+                },
+            },
+        });
+    }
+
+    async handleRoomsFromSameWorldQuery(client: PusherWebSocket, queryMessage: QueryMessage) {
+        let roomDescriptions: ShortMapDescription[];
+        try {
+            roomDescriptions = await adminService.getUrlRoomsFromSameWorld(
+                client.getUserData().roomId,
+                undefined,
+                client.getUserData().tags,
+            );
+            client.send({
+                message: {
+                    $case: "answerMessage",
+                    answerMessage: {
+                        id: queryMessage.id,
+                        answer: {
+                            $case: "roomsFromSameWorldAnswer",
+                            roomsFromSameWorldAnswer: {
+                                roomDescriptions: roomDescriptions.map((room) => ({
+                                    ...room,
+                                    name: room.name ?? "",
+                                    roomUrl: room.roomUrl ?? "",
+                                    description: room.description ?? undefined, // Add this line to ensure description is not null
+                                    wamUrl: room.wamUrl ?? undefined, // Add this line to ensure wamUrl is not null
+                                    copyright: room.copyright ?? undefined, // Add this line to ensure copyright is not null
+                                    thumbnail: room.thumbnail ?? undefined, // Add this line to ensure thumbnail is not null
+                                    areasSearchable: room.areasSearchable ?? undefined, // Add this line to ensure areasSearchable is not null
+                                    entitiesSearchable: room.entitiesSearchable ?? undefined, // Add this line to ensure entitiesSearchable is not null
+                                })),
+                            },
+                        },
+                    },
+                },
+            });
+        } catch (e) {
+            console.warn("SocketManager => handleRoomsFromSameWorldQuery => error while getting other rooms list", e);
+            try {
+                client.send({
+                    message: {
+                        $case: "answerMessage",
+                        answerMessage: {
+                            id: queryMessage.id,
+                            answer: {
+                                $case: "error",
+                                error: {
+                                    message: e instanceof Error ? e.message + e.stack : "Unknown error",
+                                },
+                            },
+                        },
+                    },
+                });
+                // Nothing to do with the error
+                Sentry.captureException(e);
+                return;
+            } catch (e) {
+                Sentry.captureException(e);
+                console.warn("SocketManager => handleRoomsFromSameWorldQuery => error while sending error message", e);
+            }
+        }
+    }
+
+    async handleLeaveSpace(client: PusherWebSocket, spaceName: string) {
+        const socketData = client.getUserData();
+        const space = this.spaces.get(spaceName);
+        if (space) {
+            // Let's wait for the user to be fully joined to the space before leaving it
+            await this.checkClientIsPartOfSpace(client, spaceName);
+
+            await space.forwarder.unregisterUser(client);
+            socketData.joinSpacesPromise.delete(space.name);
+        } else {
+            console.error("Could not find space", spaceName, "to leave");
+            Sentry.captureException(new Error("Could not find space " + spaceName + " to leave"));
+        }
+    }
+
+    async handleEmbeddableWebsiteQuery(client: PusherWebSocket, queryMessage: QueryMessage) {
+        if (queryMessage.query?.$case !== "embeddableWebsiteQuery") {
+            return;
+        }
+
+        const url = queryMessage.query.embeddableWebsiteQuery.url;
+
+        const emitAnswerMessage = (state: boolean, embeddable: boolean, message: string | undefined = undefined) => {
+            client.send({
+                message: {
+                    $case: "answerMessage",
+                    answerMessage: {
+                        id: queryMessage.id,
+                        answer: {
+                            $case: "embeddableWebsiteAnswer",
+                            embeddableWebsiteAnswer: {
+                                url,
+                                state,
+                                embeddable,
+                                message,
+                            },
+                        },
+                    },
+                },
+            });
+        };
+
+        // If the URL is in the white list, we send a message to the client
+        if (verifyUrlAsDomainInWhiteList(url)) {
+            return emitAnswerMessage(true, true);
+        }
+
+        const processError = (error: { response: { status: number } }) => {
+            // If the error is a 999 error, it means that this is LinkedIn that return this error code because the website is not embeddable and is not reachable by axios
+            if (isAxiosError(error) && error.response?.status === 999) {
+                emitAnswerMessage(true, false);
+            } else {
+                debug(`SocketManager => embeddableUrl : ${url} ${JSON.stringify(error)}`);
+                // If the URL is not reachable, we send a message to the client
+                // Catch is used to avoid crash if the client is disconnected
+                try {
+                    emitAnswerMessage(false, false, "URL is not reachable");
+                } catch (e) {
+                    console.error(e);
+                }
+            }
+        };
+
+        const isAllowed = (response: AxiosResponse) => isFrameable(response.headers ?? {}, FRONT_URL);
+
+        await axios
+            .head(url, { timeout: 5_000 })
+            // Klaxoon
+            .then((response) => emitAnswerMessage(true, isAllowed(response)))
+            .catch(async (error) => {
+                // If response from server is "Method not allowed", we try to do a GET request
+                if (isAxiosError(error) && error.response?.status === 405) {
+                    await axios
+                        .get(url, { timeout: 5_000 })
+                        .then((response) => emitAnswerMessage(true, isAllowed(response)))
+                        .catch((error) => processError(error));
+                } else {
+                    processError(error);
+                }
+            });
+    }
+
+    async handleSearchMemberQuery(
+        client: PusherWebSocket,
+        searchMemberQuery: SearchMemberQuery,
+    ): Promise<SearchMemberAnswer> {
+        const { roomId } = client.getUserData();
+        const members = await adminService.searchMembers(roomId, searchMemberQuery.searchText);
+        return {
+            members: members.map((member: MemberData) => ({
+                name: member.name ?? undefined,
+                id: member.id,
+                email: member.email ?? undefined,
+            })),
+        };
+    }
+
+    async handleSearchTagsQuery(client: PusherWebSocket, searchTagsQuery: SearchTagsQuery): Promise<SearchTagsAnswer> {
+        const { roomId } = client.getUserData();
+        const tags = await adminService.searchTags(roomId, searchTagsQuery.searchText);
+        return {
+            tags,
+        };
+    }
+
+    async handleIceServersQuery(client: PusherWebSocket): Promise<IceServersAnswer> {
+        const { userId, userUuid, roomId } = client.getUserData();
+        if (!userId) {
+            throw new Error("User id not found");
+        }
+
+        return { iceServers: await adminService.getIceServers(userId, userUuid, roomId) };
+    }
+
+    async handleGetMemberQuery(getMemberQuery: GetMemberQuery): Promise<GetMemberAnswer | undefined> {
+        try {
+            const memberFromApi = await adminService.getMember(getMemberQuery.uuid);
+            return {
+                member: {
+                    id: memberFromApi.id,
+                    name: memberFromApi.name ?? undefined,
+                    email: memberFromApi.email ?? undefined,
+                    visitCardUrl: memberFromApi.visitCardUrl ?? undefined,
+                    chatID: memberFromApi.chatID ?? undefined,
+                },
+            };
+        } catch (e) {
+            console.warn(
+                `No member found for uuid ${getMemberQuery.uuid}. Probably the user doesn’t exist in the administration console`,
+                e,
+            );
+            return undefined; // Ensure a value is returned in the catch block
+        }
+    }
+
+    async handleChatMembersQuery(
+        client: PusherWebSocket,
+        chatMemberQuery: ChatMembersQuery,
+    ): Promise<ChatMembersAnswer> {
+        const { roomId } = client.getUserData();
+        const { total, members } = await adminService.getWorldChatMembers(roomId, chatMemberQuery.searchText);
+        return {
+            total,
+            members,
+        };
+    }
+
+    handleUpdateChatId(client: PusherWebSocket, email: string, chatId: string): Promise<void> {
+        const userData = client.getUserData();
+        userData.chatID = chatId;
+        return adminService.updateChatId(email, chatId, client.getUserData().roomId);
+    }
+
+    async handleGetRecordingsQuery(client: PusherWebSocket): Promise<GetRecordingsAnswer> {
+        const { userUuid } = client.getUserData();
+        const records = await RecordingService.getRecords(userUuid);
+        return {
+            recordings: records,
+        };
+    }
+
+    async handleGetRecordingThumbnailsQuery(
+        client: PusherWebSocket,
+        baseFilename: string,
+    ): Promise<GetRecordingThumbnailsAnswer> {
+        const { userUuid } = client.getUserData();
+        return {
+            urls: await RecordingService.getThumbnailUrls(userUuid, baseFilename),
+        };
+    }
+
+    async handleDeleteRecordingQuery(client: PusherWebSocket, recordingId: string): Promise<DeleteRecordingAnswer> {
+        const { userUuid } = client.getUserData();
+        const result = await RecordingService.deleteRecord(userUuid, recordingId);
+        return {
+            success: result,
+        };
+    }
+
+    /**
+     * Relays a space state query to the back, which is the authority on the state and on most permissions. The only
+     * check done here is the one the back cannot do: `canRecord` only exists in the socket data.
+     */
+    async handleSpaceStateQuery(
+        client: PusherWebSocket,
+        spaceName: string,
+        query: SpaceStateQuery | undefined,
+        options: { signal: AbortSignal },
+    ): Promise<void> {
+        await this.checkClientIsPartOfSpace(client, spaceName);
+        const socketData = client.getUserData();
+        if (!socketData.spaceUserId) {
+            throw new Error("Space user id not found");
+        }
+        const space = this.spaces.get(spaceName);
+        if (!space) {
+            throw new Error(`Trying to query a space that does not exist: "${spaceName}"`);
+        }
+        const queryCase = query?.query?.$case;
+        const isRecordingQuery = queryCase === "startRecording" || queryCase === "stopRecording";
+        if (isRecordingQuery && !socketData.canRecord) {
+            throw new Error("You are not allowed to record");
+        }
+
+        const answer = await space.query.send(
+            {
+                $case: "spaceStateQuery",
+                spaceStateQuery: {
+                    spaceUserId: socketData.spaceUserId,
+                    query,
+                },
+            },
+            {
+                signal: options.signal,
+                timeout: isRecordingQuery ? SocketManager.RECORDING_QUERY_TIMEOUT_MS : undefined,
+            },
+        );
+
+        if (answer.$case !== "spaceStateAnswer") {
+            throw new Error("Unexpected answer");
+        }
+    }
+
+    async handleGetSignedUrlQuery(client: PusherWebSocket, key: string): Promise<GetSignedUrlAnswer> {
+        const { userUuid } = client.getUserData();
+
+        // Security check: ensure the requested key belongs to this user's recordings
+        if (!key.startsWith(`${userUuid}/`)) {
+            throw new Error("Unauthorized access to recording");
+        }
+
+        const signedUrl = await RecordingService.getSignedUrl(key);
+        return {
+            signedUrl,
+        };
+    }
+
+    async handleOauthRefreshTokenQuery(
+        oauthRefreshTokenQuery: OauthRefreshTokenQuery,
+    ): Promise<OauthRefreshTokenAnswer> {
+        const { token, message } = await adminService.refreshOauthToken(
+            oauthRefreshTokenQuery.tokenToRefresh,
+            oauthRefreshTokenQuery.provider,
+            oauthRefreshTokenQuery.userIdentifier,
+        );
+        return { message, token };
+    }
+
+    async handlePublicEvent(client: PusherWebSocket, publicEvent: PublicEventFrontToPusher) {
+        const socketData = client.getUserData();
+
+        await this.checkClientIsPartOfSpace(client, publicEvent.spaceName);
+        const space = this.spaces.get(publicEvent.spaceName);
+        if (!space) {
+            throw new Error(
+                `Trying to send a public event to a space that does not exist: "${publicEvent.spaceName}".`,
+            );
+        }
+        if (!socketData.userId) {
+            throw new Error("User id not found");
+        }
+        space.forwarder.sendPublicEvent(publicEvent, socketData);
+    }
+
+    async handlePrivateEvent(client: PusherWebSocket, privateEvent: PrivateEventFrontToPusher) {
+        const socketData = client.getUserData();
+
+        await this.checkClientIsPartOfSpace(client, privateEvent.spaceName);
+        const space = this.spaces.get(privateEvent.spaceName);
+        if (!space) {
+            throw new Error(
+                `Trying to send a private event to a space that does not exist: "${privateEvent.spaceName}"`,
+            );
+        }
+        if (!socketData.userId) {
+            throw new Error("User id not found");
+        }
+        space.forwarder.sendPrivateEvent(privateEvent, socketData);
+    }
+
+    async handleBackEvent(client: PusherWebSocket, backEvent: BackEventFrontToPusherMessage) {
+        const socketData = client.getUserData();
+
+        await this.checkClientIsPartOfSpace(client, backEvent.spaceName);
+        const space = this.spaces.get(backEvent.spaceName);
+        if (!space) {
+            throw new Error(`Trying to send a back event to a space that does not exist: "${backEvent.spaceName}"`);
+        }
+        space.forwarder.forwardMessageToSpaceBack({
+            $case: "backEvent",
+            backEvent: {
+                spaceName: backEvent.spaceName,
+                backEvent: backEvent.backEvent,
+                senderUserId: socketData.spaceUserId,
+            },
+        });
+    }
+
+    async leaveChatRoomArea(socket: PusherWebSocket): Promise<void> {
+        const { chatID, currentChatRoomArea } = socket.getUserData();
+
+        if (!currentChatRoomArea) {
+            return Promise.reject(new Error("currentChatRoomArea is undefined"));
+        }
+
+        try {
+            if (chatID) {
+                await Promise.all(
+                    currentChatRoomArea.map((chatRoomAreaID) =>
+                        matrixProvider.kickUserFromRoom(chatID, chatRoomAreaID),
+                    ),
+                );
+            }
+        } catch (error) {
+            console.error(error);
+        }
+
+        return;
+    }
+
+    async handleLeaveChatRoomArea(socket: PusherWebSocket, chatRoomAreaToLeave: string) {
+        const socketData = socket.getUserData();
+        socketData.currentChatRoomArea = socketData.currentChatRoomArea.filter(
+            (ChatRoomArea) => ChatRoomArea !== chatRoomAreaToLeave,
+        );
+
+        const chatID = socketData.chatID;
+
+        try {
+            if (chatID) {
+                await matrixProvider.kickUserFromRoom(chatID, chatRoomAreaToLeave).catch((e) => console.error(e));
+            }
+            return;
+        } catch (error) {
+            console.error(error);
+            return;
+        }
+    }
+
+    async handleEnterChatRoomAreaQuery(socket: PusherWebSocket, roomID: string): Promise<void> {
+        const socketData = socket.getUserData();
+        if (!socketData.chatID) {
+            return Promise.reject(new Error("Error: Chat ID not found"));
+        }
+
+        socketData.currentChatRoomArea.push(roomID);
+        const isAdmin = socketData.tags.includes("admin");
+
+        await matrixProvider.inviteUserToRoom(socketData.chatID, roomID).catch((e) => console.error(e));
+
+        if (isAdmin) {
+            await matrixProvider.promoteUserToModerator(socketData.chatID, roomID).catch((e) => console.error(e));
+        }
+    }
+
+    async handleMapStorageJwtQuery(socket: PusherWebSocket): Promise<string> {
+        const userData = socket.getUserData();
+
+        const mapDetails = await adminService.fetchMapDetails(userData.roomId);
+
+        const wamUrl = !("wamUrl" in mapDetails) ? "" : mapDetails.wamUrl;
+
+        const secret = new TextEncoder().encode(SECRET_KEY ?? "");
+        return new SignJWT({ wamUrl, tags: userData.tags })
+            .setExpirationTime("1h")
+            .setProtectedHeader({ alg: "HS256" })
+            .sign(secret);
+    }
+
+    deleteSpaceIfEmpty(spaceName: string) {
+        const space = this.spaces.get(spaceName);
+        if (space && space.isEmpty()) {
+            space.cleanup();
+        }
+    }
+}
+
+// Verify that the domain of the url in parameter is in the white list of embeddable domains defined in the .env file (EMBEDDED_DOMAINS_WHITELIST)
+// Matching is on the host only: a substring test would let https://evil.com/?x=trusted.com through.
+const verifyUrlAsDomainInWhiteList = (url: string) => {
+    let hostname: string;
+    try {
+        hostname = new URL(url).hostname.toLowerCase();
+    } catch {
+        return false;
+    }
+    // The whitelist is already trimmed and lowercased by its environment variable validator.
+    return EMBEDDED_DOMAINS_WHITELIST.some((domain) => hostname === domain || hostname.endsWith(`.${domain}`));
+};
+
+export const socketManager = new SocketManager();

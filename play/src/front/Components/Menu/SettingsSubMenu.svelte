@@ -1,0 +1,793 @@
+<script lang="ts">
+    import { tick } from "svelte";
+    import { fly } from "svelte/transition";
+    import type { NoiseSuppressionProvider } from "../../Connection/LocalUserStore";
+    import {
+        audioManagerFileStore,
+        audioManagerVisibilityStore,
+        bubbleSoundStore,
+    } from "../../Stores/AudioManagerStore";
+    import { HtmlUtils } from "../../WebRtc/HtmlUtils";
+    import { LL, locale } from "../../../i18n/i18n-svelte";
+    import type { Locales } from "../../../i18n/i18n-types";
+    import { displayableLocales, setCurrentLocale } from "../../Utils/locales";
+    import { gameManager } from "../../Phaser/Game/GameManager";
+    import { Room } from "../../Connection/Room";
+
+    import { analyticsClient } from "../../Administration/AnalyticsClient";
+    import { localUserStore } from "../../Connection/LocalUserStore";
+    import { videoQualityStore } from "../../Stores/MediaStore";
+    import { browserNotificationStore } from "../../Stores/BrowserNotificationStore";
+    import { screenShareQualityStore } from "../../Stores/ScreenSharingStore";
+    import { volumeProximityDiscussionStore } from "../../Stores/PeerStore";
+    import { bandwidthConstrainedPreferenceStore } from "../../Stores/BandwidthConstrainedPreferenceStore";
+    import { settingsSubMenuTargetStore } from "../../Stores/MenuStore";
+    import {
+        browserNoiseSuppressionSupportedStore,
+        effectiveNoiseSuppressionProviderStore,
+        microphoneAutoGainControlStore,
+        microphoneBrowserNoiseSuppressionStore,
+        microphoneEchoCancellationStore,
+        noiseSuppressionEnabledStore,
+        noiseSuppressionProviderStore,
+        noiseSuppressionStateStore,
+        voiceIsolationSupportedStore,
+    } from "../../Stores/NoiseSuppressionStore";
+    import InputSwitch from "../Input/InputSwitch.svelte";
+    import RangeSlider from "../Input/RangeSlider.svelte";
+    import SoundSelect from "../Input/SoundSelect.svelte";
+    import { displayVideoQualityStore } from "../../Stores/DisplayVideoQualityStore";
+    import InputRadioBox from "../Input/InputRadioBox.svelte";
+    import Chip from "../UI/Chip.svelte";
+    import {
+        IconAntennaBarsLow,
+        IconAntennaBarsMid,
+        IconAntennaBarsHigh,
+        IconAdjustements,
+        IconLanguage,
+        IconDoorExit,
+        IconScreenShare,
+        IconCameraUp,
+        IconMicrophoneOn,
+    } from "@wa-icons";
+
+    let fullscreen: boolean = $state(localUserStore.getFullscreen());
+    let notification: boolean = $state(localUserStore.getNotification());
+    let allowPictureInPicture: boolean = $state(localUserStore.getAllowPictureInPicture());
+    let blockAudio: boolean = $state(localUserStore.getBlockAudio());
+    let forceCowebsiteTrigger: boolean = $state(localUserStore.getForceCowebsiteTrigger());
+    let ignoreFollowRequests: boolean = $state(localUserStore.getIgnoreFollowRequests());
+    let decreaseAudioPlayerVolumeWhileTalking: boolean = $state(
+        localUserStore.getDecreaseAudioPlayerVolumeWhileTalking(),
+    );
+    let disableAnimations: boolean = $state(localUserStore.getDisableAnimations());
+    let valueLocale: string = $state($locale);
+    let valueCameraPrivacySettings = $state(
+        localUserStore.getCameraPrivacySettings(
+            gameManager.currentStartedRoomOrNull?.defaultCameraPrivacySettings ?? Room.DEFAULT_CAMERA_PRIVACY_SETTINGS,
+        ),
+    );
+    let valueMicrophonePrivacySettings = $state(
+        localUserStore.getMicrophonePrivacySettings(
+            gameManager.currentStartedRoomOrNull?.defaultMicrophonePrivacySettings ??
+                Room.DEFAULT_MICROPHONE_PRIVACY_SETTINGS,
+        ),
+    );
+    const initialVideoQuality = localUserStore.getVideoQuality();
+    let valueVideoQuality = $state(initialVideoQuality === "high" ? 3 : initialVideoQuality === "low" ? 1 : 2);
+    const initialScreenShareQuality = localUserStore.getScreenShareQuality();
+    let valueScreenShareQuality = $state(
+        initialScreenShareQuality === "high" ? 3 : initialScreenShareQuality === "low" ? 1 : 2,
+    );
+    let bandwidthConstrainedPreference = $state(localUserStore.getBandwidthConstrainedScreenSharePreference());
+    let selectedNoiseSuppressionProvider: NoiseSuppressionProvider = $derived($effectiveNoiseSuppressionProviderStore);
+    let microphoneSettingsSection: HTMLElement | undefined = $state();
+
+    let volumeProximityDiscussion = $state(localUserStore.getVolumeProximityDiscussion());
+
+    let previewCameraPrivacySettings = $state((() => valueCameraPrivacySettings)());
+    let previewMicrophonePrivacySettings = $state((() => valueMicrophonePrivacySettings)());
+
+    let valueBubbleSound = $state(localUserStore.getBubbleSound());
+    let videoQualityStats = $state(localUserStore.getDisplayVideoQualityStats());
+
+    async function updateLocale() {
+        await setCurrentLocale(valueLocale as Locales);
+    }
+
+    function updateVideoQuality() {
+        let value: "low" | "recommended" | "high";
+
+        switch (valueVideoQuality) {
+            case 1:
+                value = "low";
+                break;
+            case 3:
+                value = "high";
+                break;
+            default:
+                value = "recommended";
+                break;
+        }
+
+        videoQualityStore.setQuality(value);
+    }
+
+    function updateScreenShareQuality() {
+        let value: "low" | "recommended" | "high";
+
+        switch (valueScreenShareQuality) {
+            case 1:
+                value = "low";
+                break;
+            case 3:
+                value = "high";
+                break;
+            default:
+                value = "recommended";
+                break;
+        }
+
+        screenShareQualityStore.setQuality(value);
+    }
+
+    function updateBandwidthConstrainedPreference() {
+        bandwidthConstrainedPreferenceStore.setPreference(bandwidthConstrainedPreference);
+    }
+
+    $effect(() => {
+        selectedNoiseSuppressionProvider = $effectiveNoiseSuppressionProviderStore;
+    });
+
+    $effect(() => {
+        if ($settingsSubMenuTargetStore !== "microphone") {
+            return;
+        }
+        tick()
+            .then(() => {
+                microphoneSettingsSection?.scrollIntoView({ block: "start" });
+                settingsSubMenuTargetStore.set(undefined);
+            })
+            .catch((e) => console.error("Failed to scroll to microphone settings", e));
+    });
+
+    function toggleMicrophoneAutoGainControl() {
+        microphoneAutoGainControlStore.setEnabled(!$microphoneAutoGainControlStore);
+    }
+
+    function toggleMicrophoneEchoCancellation() {
+        microphoneEchoCancellationStore.setEnabled(!$microphoneEchoCancellationStore);
+    }
+
+    function toggleMicrophoneBrowserNoiseSuppression() {
+        microphoneBrowserNoiseSuppressionStore.setEnabled(!$microphoneBrowserNoiseSuppressionStore);
+    }
+
+    function toggleNoiseSuppression() {
+        noiseSuppressionEnabledStore.setEnabled(!$noiseSuppressionEnabledStore);
+    }
+
+    function updateNoiseSuppressionProvider() {
+        noiseSuppressionProviderStore.setProvider(selectedNoiseSuppressionProvider);
+    }
+
+    function changeFullscreen() {
+        // Analytics Client
+        analyticsClient.trackAdminEvent("settings.fullscreen.changed", { value: fullscreen ? "true" : "false" });
+
+        const body = HtmlUtils.querySelectorOrFail("body");
+        if (body) {
+            if (document.fullscreenElement !== null && !fullscreen) {
+                document.exitFullscreen().catch((e) => console.error(e));
+            } else {
+                document.documentElement.requestFullscreen().catch((e) => console.error(e));
+            }
+            localUserStore.setFullscreen(fullscreen);
+        }
+    }
+
+    function changeNotification() {
+        // Analytics Client
+        analyticsClient.trackAdminEvent("settings.notification.changed", { value: notification ? "true" : "false" });
+
+        if (Notification.permission === "granted") {
+            localUserStore.setNotification(notification);
+            browserNotificationStore.refresh();
+        } else {
+            Notification.requestPermission()
+                .then((response) => {
+                    if (response === "granted") {
+                        localUserStore.setNotification(notification);
+                    } else {
+                        localUserStore.setNotification(false);
+                        notification = false;
+                    }
+                    browserNotificationStore.refresh();
+                })
+                .catch((e) => console.error(e));
+        }
+    }
+
+    function changePictureInPicture() {
+        // Analytics Client
+        analyticsClient.trackAdminEvent("settings.picture_in_picture.changed", {
+            value: allowPictureInPicture ? "true" : "false",
+        });
+
+        localUserStore.setAllowPictureInPicture(allowPictureInPicture);
+    }
+
+    function changeBlockAudio() {
+        if (blockAudio) {
+            audioManagerFileStore.unloadAudio();
+            audioManagerVisibilityStore.set("disabledBySettings");
+        }
+        localUserStore.setBlockAudio(blockAudio);
+    }
+
+    function changeForceCowebsiteTrigger() {
+        // Analytics Client
+        analyticsClient.trackAdminEvent("settings.ask_website.changed", {
+            value: forceCowebsiteTrigger ? "true" : "false",
+        });
+
+        localUserStore.setForceCowebsiteTrigger(forceCowebsiteTrigger);
+    }
+
+    function changeIgnoreFollowRequests() {
+        // Analytics Client
+        analyticsClient.trackAdminEvent("settings.request_follow.changed", {
+            value: ignoreFollowRequests ? "true" : "false",
+        });
+
+        localUserStore.setIgnoreFollowRequests(ignoreFollowRequests);
+    }
+
+    function changeDecreaseAudioPlayerVolumeWhileTalking() {
+        // Analytics Client
+        analyticsClient.trackAdminEvent("settings.decrease_audio_volume.changed", {
+            value: decreaseAudioPlayerVolumeWhileTalking ? "true" : "false",
+        });
+
+        localUserStore.setDecreaseAudioPlayerVolumeWhileTalking(decreaseAudioPlayerVolumeWhileTalking);
+    }
+
+    function changeDisableAnimations() {
+        localUserStore.setDisableAnimations(disableAnimations);
+        gameManager.getCurrentGameScene().setTileAnimationsPaused(disableAnimations);
+    }
+
+    function changeCameraPrivacySettings() {
+        // Analytics Client
+        analyticsClient.trackAdminEvent("settings.camera.changed", {
+            value: valueCameraPrivacySettings ? "true" : "false",
+        });
+
+        if (valueCameraPrivacySettings !== previewCameraPrivacySettings) {
+            previewCameraPrivacySettings = valueCameraPrivacySettings;
+            localUserStore.setCameraPrivacySettings(valueCameraPrivacySettings);
+        }
+    }
+
+    function changeMicrophonePrivacySettings() {
+        // Analytics Client
+        analyticsClient.trackAdminEvent("settings.microphone.changed", {
+            value: valueMicrophonePrivacySettings ? "true" : "false",
+        });
+
+        if (valueMicrophonePrivacySettings !== previewMicrophonePrivacySettings) {
+            previewMicrophonePrivacySettings = valueMicrophonePrivacySettings;
+            localUserStore.setMicrophonePrivacySettings(valueMicrophonePrivacySettings);
+        }
+    }
+
+    function updateVolumeProximityDiscussion() {
+        analyticsClient.trackAdminEvent("settings.audio_volume.opened");
+        localUserStore.setVolumeProximityDiscussion(volumeProximityDiscussion);
+        volumeProximityDiscussionStore.set(volumeProximityDiscussion);
+    }
+
+    function changeBubbleSound() {
+        localUserStore.setBubbleSound(valueBubbleSound);
+        bubbleSoundStore.set(valueBubbleSound);
+    }
+
+    function changeVideoQualityStats() {
+        localUserStore.setDisplayVideoQualityStats(videoQualityStats);
+        displayVideoQualityStore.set(videoQualityStats);
+    }
+
+    function getBubbleSoundUrl(bubbleSound: string): string {
+        return `/resources/objects/webrtc-in-${bubbleSound}.mp3`;
+    }
+</script>
+
+<div class="divide-y divide-white/20" transition:fly={{ x: -700, duration: 250 }}>
+    <section class=" p-0 first:pt-0 pt-8 m-0">
+        <div class="bg-contrast font-bold text-lg p-4 flex items-center">
+            <div class="me-4 opacity-50"><IconCameraUp /></div>
+            {$LL.menu.settings.videoBandwidth.title()}
+        </div>
+        <div class="flex w-full mb-6 mt-2 ps-6 justify-center">
+            <div class="flex flex-col w-10/12 lg:w-6/12">
+                <ul class="flex justify-between w-full px-[10px] mb-8">
+                    <li
+                        class="flex justify-center relative {valueVideoQuality === 1
+                            ? 'opacity-100 font-bold'
+                            : 'opacity-50 hover:opacity-80'}"
+                    >
+                        <IconAntennaBarsLow />
+                        <!-- svelte-ignore a11y_click_events_have_key_events -->
+                        <!-- svelte-ignore a11y_no_static_element_interactions -->
+                        <span
+                            class="absolute -bottom-4 cursor-pointer"
+                            onclick={(event) => {
+                                event.preventDefault();
+                                valueVideoQuality = 1;
+                            }}>{$LL.menu.settings.videoBandwidth.low()}</span
+                        >
+                    </li>
+                    <li
+                        class="flex justify-center relative {valueVideoQuality === 2
+                            ? 'opacity-100 font-bold'
+                            : 'opacity-50 hover:opacity-80'}"
+                    >
+                        <IconAntennaBarsMid />
+                        <!-- svelte-ignore a11y_click_events_have_key_events -->
+                        <!-- svelte-ignore a11y_no_static_element_interactions -->
+                        <span
+                            class="absolute -bottom-4 cursor-pointer"
+                            onclick={(event) => {
+                                event.preventDefault();
+                                valueVideoQuality = 2;
+                            }}>{$LL.menu.settings.videoBandwidth.recommended()}</span
+                        >
+                    </li>
+                    <li
+                        class="flex justify-center relative {valueVideoQuality === 3
+                            ? 'opacity-100 font-bold'
+                            : 'opacity-50 hover:opacity-80'}"
+                    >
+                        <IconAntennaBarsHigh />
+                        <!-- svelte-ignore a11y_click_events_have_key_events -->
+                        <!-- svelte-ignore a11y_no_static_element_interactions -->
+                        <span
+                            class="absolute -bottom-4 cursor-pointer"
+                            onclick={(event) => {
+                                event.preventDefault();
+                                valueVideoQuality = 3;
+                            }}>{$LL.menu.settings.videoBandwidth.high()}</span
+                        >
+                    </li>
+                </ul>
+                <RangeSlider
+                    buttonShape="square"
+                    min={1}
+                    max={3}
+                    step={1}
+                    bind:value={valueVideoQuality}
+                    onchange={updateVideoQuality}
+                />
+            </div>
+        </div>
+    </section>
+    <section class="flex flex-col p-0 first:pt-0 pt-8 m-0">
+        <div class="bg-contrast font-bold text-lg p-4 flex items-center">
+            <div class="me-4 opacity-50"><IconScreenShare /></div>
+
+            {$LL.menu.settings.shareScreenBandwidth.title()}
+        </div>
+        <div class="flex w-full mb-6 mt-2 ps-6 justify-center">
+            <div class="flex flex-col w-10/12 lg:w-6/12">
+                <ul class="flex justify-between w-full px-[10px] mb-8">
+                    <li
+                        class="flex relative {valueScreenShareQuality === 1
+                            ? 'opacity-100 font-bold'
+                            : 'opacity-50 hover:opacity-80'}"
+                    >
+                        <IconAntennaBarsLow />
+                        <!-- svelte-ignore a11y_click_events_have_key_events -->
+                        <!-- svelte-ignore a11y_no_static_element_interactions -->
+                        <span
+                            class="absolute -bottom-4 cursor-pointer"
+                            onclick={(event) => {
+                                event.preventDefault();
+                                valueScreenShareQuality = 1;
+                            }}>{$LL.menu.settings.shareScreenBandwidth.low()}</span
+                        >
+                    </li>
+                    <li
+                        class="flex justify-center relative {valueScreenShareQuality === 2
+                            ? 'opacity-100 font-bold'
+                            : 'opacity-50 hover:opacity-80'}"
+                    >
+                        <IconAntennaBarsMid />
+                        <!-- svelte-ignore a11y_click_events_have_key_events -->
+                        <!-- svelte-ignore a11y_no_static_element_interactions -->
+                        <span
+                            class="absolute -bottom-4 cursor-pointer"
+                            onclick={(event) => {
+                                event.preventDefault();
+                                valueScreenShareQuality = 2;
+                            }}>{$LL.menu.settings.shareScreenBandwidth.recommended()}</span
+                        >
+                    </li>
+                    <li
+                        class="flex justify-center relative {valueScreenShareQuality === 3
+                            ? 'opacity-100 font-bold'
+                            : 'opacity-50 hover:opacity-80'}"
+                    >
+                        <IconAntennaBarsHigh />
+                        <!-- svelte-ignore a11y_click_events_have_key_events -->
+                        <!-- svelte-ignore a11y_no_static_element_interactions -->
+                        <span
+                            class="absolute -bottom-4 cursor-pointer"
+                            onclick={(event) => {
+                                event.preventDefault();
+                                valueScreenShareQuality = 3;
+                            }}>{$LL.menu.settings.shareScreenBandwidth.high()}</span
+                        >
+                    </li>
+                </ul>
+                <RangeSlider
+                    min={1}
+                    max={3}
+                    step={1}
+                    bind:value={valueScreenShareQuality}
+                    onchange={updateScreenShareQuality}
+                    buttonShape="square"
+                />
+            </div>
+        </div>
+        <div class="input-label">
+            <div class="grow font-light text-center font-semibold">
+                {$LL.menu.settings.bandwidthConstrainedPreference.title()}
+            </div>
+        </div>
+        <div class="mt-2 p-2 grid grid-cols-1 @lg/main-layout:grid-cols-3 gap-4 justify-center items-stretch">
+            <InputRadioBox
+                value="maintain-resolution"
+                label={$LL.menu.settings.bandwidthConstrainedPreference.maintainResolutionTitle()}
+                bind:group={bandwidthConstrainedPreference}
+                onchange={updateBandwidthConstrainedPreference}
+                outerClass="flex-1"
+            >
+                <em>{$LL.menu.settings.bandwidthConstrainedPreference.maintainResolutionDescription()}</em>
+            </InputRadioBox>
+            <InputRadioBox
+                value="maintain-framerate"
+                label={$LL.menu.settings.bandwidthConstrainedPreference.maintainFramerateTitle()}
+                bind:group={bandwidthConstrainedPreference}
+                onchange={updateBandwidthConstrainedPreference}
+                outerClass="flex-1"
+            >
+                <em>{$LL.menu.settings.bandwidthConstrainedPreference.maintainFramerateDescription()}</em>
+            </InputRadioBox>
+            <InputRadioBox
+                value="balanced"
+                label={$LL.menu.settings.bandwidthConstrainedPreference.balancedTitle()}
+                bind:group={bandwidthConstrainedPreference}
+                onchange={updateBandwidthConstrainedPreference}
+                outerClass="flex-1"
+            >
+                <em>{$LL.menu.settings.bandwidthConstrainedPreference.balancedDescription()}</em>
+            </InputRadioBox>
+        </div>
+    </section>
+    <section
+        class="flex flex-col p-0 first:pt-0 pt-8 m-0"
+        bind:this={microphoneSettingsSection}
+        data-testid="microphone-settings-section"
+    >
+        <div class="bg-contrast font-bold text-lg p-4 flex items-center">
+            <div class="me-4 opacity-50"><IconMicrophoneOn /></div>
+            {$LL.menu.settings.microphone.title()}
+        </div>
+
+        <div class="flex cursor-pointer items-center relative m-4">
+            <InputSwitch
+                id="noise-suppression-settings-toggle"
+                value={$noiseSuppressionEnabledStore}
+                onchange={toggleNoiseSuppression}
+                label={$LL.menu.settings.microphone.enableAdvancedNoiseReduction()}
+            />
+        </div>
+
+        {#if $noiseSuppressionEnabledStore}
+            <div class="input-label text-center mt-4">{$LL.menu.settings.microphone.noiseSuppressionMode()}</div>
+            <div class="mt-2 p-2 grid grid-cols-1 @lg/main-layout:grid-cols-2 gap-4 justify-center items-stretch">
+                <InputRadioBox
+                    id="noise-suppression-provider-workadventure"
+                    value="workadventure"
+                    label={$LL.menu.settings.microphone.workAdventureNoiseSuppression()}
+                    bind:group={selectedNoiseSuppressionProvider}
+                    onchange={updateNoiseSuppressionProvider}
+                >
+                    <Chip class="mb-1">{$LL.menu.settings.microphone.recommended()}</Chip>
+                    <em>{$LL.menu.settings.microphone.workAdventureNoiseSuppressionDescription()}</em>
+                    {#if selectedNoiseSuppressionProvider === "workadventure" && $noiseSuppressionStateStore.status === "initializing"}
+                        <div data-testid="noise-suppression-loading" class="text-xs text-white/50 mt-1">
+                            {$LL.actionbar.microphone.noiseSuppressionInitializing()}
+                        </div>
+                    {:else if selectedNoiseSuppressionProvider === "workadventure" && $noiseSuppressionStateStore.status === "unsupported"}
+                        <div data-testid="noise-suppression-error" class="text-xs text-pop-red mt-1">
+                            {$noiseSuppressionStateStore.message ??
+                                $LL.actionbar.microphone.noiseSuppressionUnsupported()}
+                        </div>
+                    {:else if selectedNoiseSuppressionProvider === "workadventure" && $noiseSuppressionStateStore.status === "error"}
+                        <div data-testid="noise-suppression-error" class="text-xs text-pop-red mt-1">
+                            {$noiseSuppressionStateStore.message ?? $LL.actionbar.microphone.noiseSuppressionError()}
+                        </div>
+                    {/if}
+                </InputRadioBox>
+
+                {#if $voiceIsolationSupportedStore}
+                    <InputRadioBox
+                        id="noise-suppression-provider-voice-isolation"
+                        value="voiceIsolation"
+                        label={$LL.menu.settings.microphone.voiceIsolation()}
+                        bind:group={selectedNoiseSuppressionProvider}
+                        onchange={updateNoiseSuppressionProvider}
+                    >
+                        <em>{$LL.menu.settings.microphone.voiceIsolationDescription()}</em>
+                    </InputRadioBox>
+                {/if}
+            </div>
+        {/if}
+
+        <div class="flex flex-col cursor-pointer relative m-4 gap-2">
+            <InputSwitch
+                id="microphone-auto-gain-control-toggle"
+                value={$microphoneAutoGainControlStore}
+                onchange={toggleMicrophoneAutoGainControl}
+            >
+                <span class="flex flex-wrap items-center gap-2">
+                    <span
+                        >{$LL.menu.settings.microphone.autoGainControl()}
+                        <Chip size="xs" class="ml-2">{$LL.menu.settings.microphone.recommended()}</Chip></span
+                    >
+                </span>
+
+                {#snippet description()}
+                    <span>{$LL.menu.settings.microphone.autoGainControlDescription()}</span>
+                {/snippet}
+            </InputSwitch>
+        </div>
+
+        <div class="flex cursor-pointer items-center relative m-4">
+            <InputSwitch
+                id="microphone-echo-cancellation-toggle"
+                value={$microphoneEchoCancellationStore}
+                onchange={toggleMicrophoneEchoCancellation}
+            >
+                <span
+                    >{$LL.menu.settings.microphone.echoCancellation()}
+                    <Chip size="xs" class="ml-2">{$LL.menu.settings.microphone.recommended()}</Chip></span
+                >
+            </InputSwitch>
+        </div>
+        {#if $browserNoiseSuppressionSupportedStore}
+            <div class="flex flex-col cursor-pointer relative m-4 gap-2">
+                <InputSwitch
+                    id="microphone-browser-noise-suppression-toggle"
+                    value={$microphoneBrowserNoiseSuppressionStore}
+                    onchange={toggleMicrophoneBrowserNoiseSuppression}
+                >
+                    <span
+                        >{$LL.menu.settings.microphone.browserNoiseSuppression()}
+                        <Chip size="xs" class="ml-2">{$LL.menu.settings.microphone.recommended()}</Chip></span
+                    >
+
+                    {#snippet description()}
+                        <span>{$LL.menu.settings.microphone.browserNoiseSuppressionDescription()}</span>
+                    {/snippet}
+                </InputSwitch>
+            </div>
+        {/if}
+    </section>
+    <section class="flex flex-col p-0 first:pt-0 pt-8 m-0">
+        <div class="bg-contrast font-bold text-lg p-4 flex items-center">
+            <div class="me-4 opacity-50"><IconAdjustements /></div>
+
+            {$LL.menu.settings.proximityDiscussionVolume()}
+        </div>
+
+        <div class="flex w-full justify-center">
+            <div class="flex flex-col w-10/12 lg:w-6/12">
+                <ul class="flex justify-between w-full px-[10px] mb-5">
+                    <li class="flex justify-center relative">
+                        <span class="absolute">0</span>
+                    </li>
+                    <li class="flex justify-center relative">
+                        <span class="absolute">1</span>
+                    </li>
+                    <li class="flex justify-center relative">
+                        <span class="absolute">2</span>
+                    </li>
+                    <li class="flex justify-center relative">
+                        <span class="absolute">3</span>
+                    </li>
+                    <li class="flex justify-center relative">
+                        <span class="absolute">4</span>
+                    </li>
+                    <li class="flex justify-center relative">
+                        <span class="absolute">5</span>
+                    </li>
+                    <li class="flex justify-center relative">
+                        <span class="absolute">6</span>
+                    </li>
+                    <li class="flex justify-center relative">
+                        <span class="absolute">7</span>
+                    </li>
+                    <li class="flex justify-center relative">
+                        <span class="absolute">8</span>
+                    </li>
+                    <li class="flex justify-center relative">
+                        <span class="absolute">9</span>
+                    </li>
+                    <li class="flex justify-center relative">
+                        <span class="absolute">10</span>
+                    </li>
+                </ul>
+                <RangeSlider
+                    min={0}
+                    max={1}
+                    step={0.1}
+                    bind:value={volumeProximityDiscussion}
+                    onchange={updateVolumeProximityDiscussion}
+                />
+            </div>
+        </div>
+    </section>
+    <section class="flex flex-col p-0 first:pt-0 pt-8 m-0">
+        <div class="bg-contrast font-bold text-lg p-4 flex items-center">
+            <div class="me-4 opacity-50"><IconLanguage /></div>
+            {$LL.menu.settings.language.title()}
+        </div>
+        <div class="mt-2 p-2">
+            <select
+                class="w-full languages-switcher bg-contrast rounded border border-solid border-white/20 mb-0"
+                bind:value={valueLocale}
+                onchange={updateLocale}
+            >
+                {#each displayableLocales as locale (locale.id)}
+                    <option value={locale.id}>
+                        {`${
+                            locale.language ? locale.language.charAt(0).toUpperCase() + locale.language.slice(1) : ""
+                        } (${locale.region})`}
+                    </option>
+                {/each}
+            </select>
+        </div>
+    </section>
+    <section class="flex flex-col p-0 first:pt-0 pt-8 m-0">
+        <div class="tooltip">
+            <div class="group bg-contrast font-bold text-lg p-4 flex items-center relative">
+                <div class="me-4 opacity-50"><IconDoorExit /></div>
+                <div class="grow">
+                    <div>{$LL.menu.settings.privacySettings.title()}</div>
+                    <div class="text-sm italic text-white/50">{$LL.menu.settings.privacySettings.explanation()}</div>
+                </div>
+            </div>
+        </div>
+
+        <div class="flex cursor-pointer items-center relative m-4">
+            <InputSwitch
+                id="cam-toggle"
+                bind:value={valueCameraPrivacySettings}
+                onchange={changeCameraPrivacySettings}
+                label={$LL.menu.settings.privacySettings.cameraToggle()}
+            />
+        </div>
+
+        <div class="flex cursor-pointer items-center relative m-4">
+            <InputSwitch
+                id="mic-toggle"
+                bind:value={valueMicrophonePrivacySettings}
+                onchange={changeMicrophonePrivacySettings}
+                label={$LL.menu.settings.privacySettings.microphoneToggle()}
+            />
+        </div>
+    </section>
+    <section class="flex flex-col p-0 first:pt-0 pt-8 m-0">
+        <div class="bg-contrast font-bold text-lg p-4 flex items-center">
+            <div class="me-4 opacity-50"><IconAdjustements /></div>
+            {$LL.menu.settings.otherSettings()}
+        </div>
+
+        <div class="mt-2 p-2">
+            <SoundSelect
+                id="bubble-sound"
+                bind:value={valueBubbleSound}
+                onchange={changeBubbleSound}
+                label={$LL.menu.settings.bubbleSound()}
+                options={[
+                    { value: "ding", label: $LL.menu.settings.bubbleSoundOptions.ding() },
+                    { value: "wobble", label: $LL.menu.settings.bubbleSoundOptions.wobble() },
+                ]}
+                getSoundUrl={getBubbleSoundUrl}
+                playLabel="▶"
+            />
+        </div>
+
+        <div class="flex cursor-pointer items-center relative m-4">
+            <InputSwitch
+                id="fullscreen-toggle"
+                bind:value={fullscreen}
+                onchange={changeFullscreen}
+                label={$LL.menu.settings.fullscreen()}
+            />
+        </div>
+        <div class="flex cursor-pointer items-center relative m-4">
+            <InputSwitch
+                id="notification-toggle"
+                bind:value={notification}
+                onchange={changeNotification}
+                label={$LL.menu.settings.notifications()}
+            />
+        </div>
+        <div class="flex cursor-pointer items-center relative m-4">
+            <InputSwitch
+                id="picture-in-picture-toggle"
+                bind:value={allowPictureInPicture}
+                onchange={changePictureInPicture}
+                label={$LL.menu.settings.enablePictureInPicture()}
+            />
+        </div>
+        <div class="flex cursor-pointer items-center relative m-4">
+            <InputSwitch
+                id="cowebsiteTrigger-toggle"
+                bind:value={forceCowebsiteTrigger}
+                onchange={changeForceCowebsiteTrigger}
+                label={$LL.menu.settings.cowebsiteTrigger()}
+            />
+        </div>
+
+        <div class="flex cursor-pointer items-center relative m-4">
+            <InputSwitch
+                id="cowebsiteTrigger-toggle"
+                bind:value={ignoreFollowRequests}
+                onchange={changeIgnoreFollowRequests}
+                label={$LL.menu.settings.ignoreFollowRequest()}
+            />
+        </div>
+        <div class="flex cursor-pointer items-center relative m-4">
+            <InputSwitch
+                id="decreaseAudioPlayerVolumeWhileTalking-toggle"
+                bind:value={decreaseAudioPlayerVolumeWhileTalking}
+                onchange={changeDecreaseAudioPlayerVolumeWhileTalking}
+                label={$LL.audio.manager.reduce()}
+            />
+        </div>
+
+        <div class="flex cursor-pointer items-center relative m-4">
+            <InputSwitch
+                id="changeBlockAudio"
+                bind:value={blockAudio}
+                onchange={changeBlockAudio}
+                label={$LL.menu.settings.blockAudio()}
+            />
+        </div>
+
+        <div class="flex cursor-pointer items-center relative m-4">
+            <InputSwitch
+                id="changeDisableAnimations"
+                bind:value={disableAnimations}
+                onchange={changeDisableAnimations}
+                label={$LL.menu.settings.disableAnimations()}
+            />
+        </div>
+
+        <div class="flex cursor-pointer items-center relative m-4">
+            <InputSwitch
+                id="changeVideoQualityStats"
+                bind:value={videoQualityStats}
+                onchange={changeVideoQualityStats}
+                label={$LL.menu.settings.displayVideoQualityStats()}
+            />
+        </div>
+    </section>
+</div>
+
+<style>
+</style>

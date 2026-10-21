@@ -1,0 +1,326 @@
+<script lang="ts">
+    import { type Writable, writable } from "svelte/store";
+    import { FilterType } from "@workadventure/messages";
+    import MicrophoneCloseSvg from "../images/microphone-close.svg";
+    import NoVideoSvg from "../images/no-video.svg";
+    import { LL } from "../../../i18n/i18n-svelte";
+    import { requestVisitCardsStore, userIsAdminStore } from "../../Stores/GameStore";
+    import { raisedHandsOrderStore } from "../../Stores/RaisedHandsStore";
+    import { analyticsClient } from "../../Administration/AnalyticsClient";
+    import { meetingOf } from "../../Administration/CurrentMeeting";
+    import type { SpaceUserExtended } from "../../Space/SpaceInterface";
+    import { openModerationModal } from "../Moderation/openModerationModal";
+    import RangeSlider from "../Input/RangeSlider.svelte";
+    import type { StreamCategory } from "../../Space/Streamable";
+    import { IconAlertTriangle, IconUser, IconMute, IconUnMute, IconMicrophone, IconMicrophoneOff } from "@wa-icons";
+
+    interface Props {
+        spaceUser: SpaceUserExtended;
+        videoEnabled: boolean;
+        videoType?: StreamCategory;
+        onClose: () => void;
+        volumeStore: Writable<number>;
+    }
+
+    let { spaceUser, videoEnabled, videoType, onClose, volumeStore = writable(1) }: Props = $props();
+
+    let isScreenSharing = $derived(videoType === "screenSharing");
+
+    let isMicrophoneEnabled = $derived(spaceUser.reactiveUser.microphoneState);
+    let isVideoEnabled = $derived(spaceUser.reactiveUser.cameraState);
+    let canAskToMuteAudioOrTurnOffVideo = $derived(spaceUser.space.canAskToMuteAudioOrTurnOffVideo);
+    // Raise-hand state comes from the space state queue (not SpaceUser), so it is known even for a
+    // listener whose SpaceUser the local user does not receive.
+    let isHandRaised = $derived(
+        $raisedHandsOrderStore.get(spaceUser.space.getName())?.has(spaceUser.spaceUserId) ?? false,
+    );
+    let hasFloor = $derived(spaceUser.reactiveUser.megaphoneState);
+    // The floor is only a real thing in a megaphone broadcast. In a bubble or a meeting room (ALL_USERS space)
+    // everybody already speaks, so we offer no give / take back control there: the raised-hand badge is enough.
+    let canModerateFloor = $derived(
+        ($userIsAdminStore || $canAskToMuteAudioOrTurnOffVideo) && spaceUser.space.filterType !== FilterType.ALL_USERS,
+    );
+
+    let moreActionOpened = $state(false);
+
+    function muteAudio(spaceUser: SpaceUserExtended) {
+        analyticsClient.trackAdminEvent("meeting.microphone.muted", meetingOf(spaceUser.space));
+        spaceUser.emitPrivateEvent({
+            $case: "muteAudio",
+            muteAudio: {
+                force: false, // This is going to be overwritten by the processor of muteAudio in the back
+            },
+        });
+        close();
+    }
+
+    function muteAudioEveryBody(spaceUser: SpaceUserExtended) {
+        analyticsClient.trackAdminEvent("meeting.microphone.muted_for_everybody", meetingOf(spaceUser.space));
+        spaceUser.space.emitPublicMessage({
+            $case: "muteAudioForEverybody",
+            muteAudioForEverybody: {},
+        });
+        close();
+    }
+
+    function muteVideo(spaceUser: SpaceUserExtended) {
+        analyticsClient.trackAdminEvent("meeting.video.muted", meetingOf(spaceUser.space));
+        spaceUser.emitPrivateEvent({
+            $case: "muteVideo",
+            muteVideo: {
+                force: false, // This is going to be overwritten by the processor of muteVideo in the back
+            },
+        });
+        close();
+    }
+
+    function muteVideoEveryBody(spaceUser: SpaceUserExtended) {
+        analyticsClient.trackAdminEvent("meeting.video.muted_for_everybody", meetingOf(spaceUser.space));
+        spaceUser.space.emitPublicMessage({
+            $case: "muteVideoForEverybody",
+            muteVideoForEverybody: {},
+        });
+        close();
+    }
+
+    /**
+     * TODO: implement ban user
+     */
+    /*function ban() {
+        trackStreamWrapper.ban();
+    }*/
+
+    function giveFloor(spaceUser: SpaceUserExtended) {
+        analyticsClient.trackAdminEvent("meeting.floor.given");
+        spaceUser.space.state.giveFloor(spaceUser.spaceUserId).catch((error) => console.error(error));
+        close();
+    }
+
+    function revokeFloor(spaceUser: SpaceUserExtended) {
+        analyticsClient.trackAdminEvent("meeting.floor.revoked");
+        spaceUser.space.state.revokeFloor(spaceUser.spaceUserId).catch((error) => console.error(error));
+        close();
+    }
+
+    function toggleActionMenu(value: boolean) {
+        moreActionOpened = value;
+    }
+
+    function openBlockOrReportPopup(spaceUser: SpaceUserExtended) {
+        analyticsClient.trackAdminEvent("meeting.report.clicked", meetingOf(spaceUser.space));
+        openModerationModal(spaceUser.uuid, spaceUser.name);
+        close();
+    }
+
+    function visitCard(spaceUser: SpaceUserExtended) {
+        analyticsClient.trackAdminEvent("user.business_card.opened");
+        requestVisitCardsStore.set(spaceUser.visitCardUrl ?? null);
+        close();
+    }
+
+    function close() {
+        onClose();
+    }
+</script>
+
+<div
+    class="flex flex-col p-1 w-48 bg-contrast/80 backdrop-blur-md rounded-md max-h-max z-50 cursor-pointer select-none"
+    class:mt-[0.2rem]={!videoEnabled}
+    onclick={(event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        analyticsClient.trackAdminEvent("meeting.actions.opened", meetingOf(spaceUser.space));
+        toggleActionMenu(!moreActionOpened);
+    }}
+    role="button"
+    tabindex="0"
+    onkeydown={() => toggleActionMenu(!moreActionOpened)}
+    onmouseleave={() => close()}
+>
+    <!-- Volume control -->
+    <div
+        class="flex gap-2 items-center hover:bg-white/10 m-0 p-2 w-full text-sm rounded leading-4 text-left text-white disabled:opacity-50"
+        role="group"
+        aria-label="Volume control"
+    >
+        {#if $volumeStore === 0}
+            <button
+                onclick={(event) => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    volumeStore.set(1);
+                }}
+                class="p-0 m-0"
+            >
+                <IconMute class="w-4 h-4 text-white flex-shrink-0" />
+            </button>
+        {:else}
+            <button
+                onclick={(event) => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    volumeStore.set(0);
+                }}
+                class="p-0 m-0"
+            >
+                <IconUnMute class="w-4 h-4 text-white flex-shrink-0" />
+            </button>
+        {/if}
+        <div class="w-[80%] mx-auto">
+            <RangeSlider
+                min={0}
+                max={1}
+                step={0.01}
+                bind:value={$volumeStore}
+                valueFormatter={(v) => Math.round(v * 100).toString()}
+                unit="%"
+                variant="secondary"
+                wrapperMargins={false}
+            />
+        </div>
+    </div>
+
+    <!-- Mute audio user -->
+    {#if ($userIsAdminStore || $canAskToMuteAudioOrTurnOffVideo) && !isScreenSharing}
+        <button
+            class="action-button mute-audio-user flex gap-2 items-center hover:bg-white/10 m-0 p-2 w-full text-sm rounded leading-4 text-left text-white disabled:opacity-50"
+            onclick={(event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                muteAudio(spaceUser);
+            }}
+            disabled={!$isMicrophoneEnabled}
+        >
+            <img src={MicrophoneCloseSvg} class="w-4 h-4" alt="" draggable="false" />
+            {#if $userIsAdminStore}
+                {$LL.camera.menu.muteAudioUser()}
+            {:else}
+                {$LL.camera.menu.askToMuteAudioUser()}
+            {/if}
+        </button>
+    {/if}
+
+    <!-- Give the floor (to a user who raised their hand) -->
+    {#if canModerateFloor && !isScreenSharing && isHandRaised && !$hasFloor}
+        <button
+            class="action-button give-floor-user flex gap-2 items-center hover:bg-white/10 m-0 p-2 w-full text-sm rounded leading-4 text-left text-white"
+            data-testid="give-floor-user"
+            onclick={(event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                giveFloor(spaceUser);
+            }}
+        >
+            <IconMicrophone class="w-4 h-4 text-white flex-shrink-0" />
+            {$LL.camera.menu.giveFloor()}
+        </button>
+    {/if}
+
+    <!-- Revoke the floor (take it back from a current speaker) -->
+    {#if canModerateFloor && !isScreenSharing && $hasFloor}
+        <button
+            class="action-button revoke-floor-user flex gap-2 items-center hover:bg-white/10 m-0 p-2 w-full text-sm rounded leading-4 text-left text-white"
+            data-testid="revoke-floor-user"
+            onclick={(event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                revokeFloor(spaceUser);
+            }}
+        >
+            <IconMicrophoneOff class="w-4 h-4 text-white flex-shrink-0" />
+            {$LL.camera.menu.revokeFloor()}
+        </button>
+    {/if}
+
+    <!-- Mute audio every body -->
+    {#if $userIsAdminStore}
+        <button
+            class="action-button flex gap-2 items-center hover:bg-white/10 m-0 p-2 w-full text-sm rounded leading-4 text-left text-white"
+            onclick={(event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                muteAudioEveryBody(spaceUser);
+            }}
+        >
+            <img src={MicrophoneCloseSvg} class="w-4 h-4" alt="" draggable="false" />
+            {$LL.camera.menu.muteAudioEveryBody()}
+        </button>
+    {/if}
+
+    <!-- Mute video -->
+    {#if ($userIsAdminStore || $canAskToMuteAudioOrTurnOffVideo) && !isScreenSharing}
+        <button
+            id="mute-video-user"
+            class="action-button flex gap-2 items-center hover:bg-white/10 m-0 p-2 w-full text-sm rounded leading-4 text-left text-white disabled:opacity-50"
+            onclick={(event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                muteVideo(spaceUser);
+            }}
+            disabled={!$isVideoEnabled}
+        >
+            <img src={NoVideoSvg} class="w-4 h-4" alt="" draggable="false" />
+            {#if $userIsAdminStore}
+                {$LL.camera.menu.muteVideoUser()}
+            {:else}
+                {$LL.camera.menu.askToMuteVideoUser()}
+            {/if}
+        </button>
+    {/if}
+
+    <!-- Mute video every body -->
+    {#if $userIsAdminStore}
+        <button
+            class="action-button flex gap-2 items-center hover:bg-white/10 m-0 p-2 w-full text-sm rounded leading-4 text-left text-white"
+            onclick={(event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                muteVideoEveryBody(spaceUser);
+            }}
+        >
+            <img src={NoVideoSvg} class="w-4 h-4" alt="" draggable="false" />
+            {$LL.camera.menu.muteVideoEveryBody()}
+        </button>
+    {/if}
+
+    <!-- Send private message -->
+    <!--    <button-->
+    <!--        class="action-button flex flex-row items-center justify-center p-0 mx-1 cursor-pointer"-->
+    <!--        onclick={(event) => {-->
+    <!--            event.preventDefault();-->
+    <!--            event.stopPropagation();-->
+    <!--            analyticsClient.trackAdminEvent("meeting.private_message.clicked");-->
+    <!--            sendPrivateMessage();-->
+    <!--        }}-->
+    <!--    >-->
+    <!--        <img src={BubbleTalkPng} class="w-8 h-8" alt="" />-->
+    <!--        <Tooltip text={$LL.camera.menu.senPrivateMessage()} rightPosition="true" />-->
+    <!--    </button>-->
+
+    <!-- Show visit card-->
+    {#if spaceUser.visitCardUrl}
+        <button
+            class="action-button flex gap-2 items-center hover:bg-white/10 m-0 p-2 w-full text-sm rounded leading-4 text-left text-white"
+            onclick={(event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                visitCard(spaceUser);
+            }}
+        >
+            <IconUser />
+            {$LL.chat.menu.visitCard()}
+        </button>
+    {/if}
+    <!-- Block or report user -->
+    <button
+        class="action-button flex gap-2 items-center hover:bg-white/10 m-0 p-2 w-full text-sm rounded leading-4 text-left text-white"
+        onclick={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            openBlockOrReportPopup(spaceUser);
+        }}
+    >
+        <IconAlertTriangle />
+        {$LL.camera.menu.blockOrReportUser()}
+    </button>
+</div>

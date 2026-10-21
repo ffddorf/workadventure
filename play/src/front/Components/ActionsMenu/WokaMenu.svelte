@@ -1,0 +1,218 @@
+<script lang="ts">
+    import type { Unsubscriber } from "svelte/store";
+    import type { AvailabilityStatus } from "@workadventure/messages";
+    import { onDestroy, onMount } from "svelte";
+    import { wokaMenuStore, wokaMenuProgressStore } from "../../Stores/WokaMenuStore";
+    import ButtonClose from "../Input/ButtonClose.svelte";
+    import Button from "../UI/Button.svelte";
+    import VisitCard from "../VisitCard/VisitCard.svelte";
+    import WokaFromUserId from "../Woka/WokaFromUserId.svelte";
+    import { analyticsClient } from "../../Administration/AnalyticsClient";
+    import LL from "../../../i18n/i18n-svelte";
+    import { gameManager } from "../../Phaser/Game/GameManager";
+    import { getColorHexOfStatus, getStatusLabel } from "../../Utils/AvailabilityStatus";
+    import type { WokaMenuAction, WokaMenuData } from "../../Stores/WokaMenuStore";
+    import { startMovingEventName } from "../../Phaser/Player/Player";
+
+    let wokaMenuData: WokaMenuData | undefined = $state();
+    let sortedActions: WokaMenuAction[] | undefined = $state();
+    let remotePlayer: { chatID?: string; availabilityStatus: AvailabilityStatus } | undefined = $state();
+
+    let wokaMenuStoreUnsubscriber: Unsubscriber | null;
+
+    function onKeyDown(e: KeyboardEvent) {
+        if (e.key === "Escape") {
+            closeActionsMenu();
+        }
+    }
+
+    function closeActionsMenu() {
+        wokaMenuStore.clear();
+
+        // At the end of the actions menu, emit the ask position message to the server
+        const currentScerne = gameManager.getCurrentGameScene();
+        currentScerne.CurrentPlayer.emitAskPosition();
+    }
+
+    let buttonsLayout: "row" | "column" | "wrap" = $state("row");
+
+    wokaMenuStoreUnsubscriber = wokaMenuStore.subscribe((value) => {
+        wokaMenuData = value;
+        if (wokaMenuData) {
+            remotePlayer = gameManager
+                .getCurrentGameScene()
+                .getRemotePlayersRepository()
+                .getPlayers()
+                .get(wokaMenuData.userId);
+            sortedActions = [...wokaMenuData.actions.values()].sort((a, b) => {
+                const ap = a.priority ?? 0;
+                const bp = b.priority ?? 0;
+                if (ap > bp) {
+                    return -1;
+                }
+                if (ap < bp) {
+                    return 1;
+                } else {
+                    return 0;
+                }
+            });
+            const nbButtons = sortedActions.length + (wokaMenuData.wokaName ? 0 : 1) + (remotePlayer?.chatID ? 1 : 0);
+            if (nbButtons < 4) {
+                buttonsLayout = "row";
+            } else {
+                buttonsLayout = "wrap";
+            }
+        }
+    });
+
+    const onStartMoving = () => {
+        wokaMenuStore.clear();
+    };
+
+    onMount(() => {
+        gameManager.getCurrentGameScene().CurrentPlayer?.on(startMovingEventName, onStartMoving);
+    });
+
+    onDestroy(() => {
+        gameManager.getCurrentGameScene().CurrentPlayer?.off(startMovingEventName, onStartMoving);
+        if (wokaMenuStoreUnsubscriber) {
+            wokaMenuStoreUnsubscriber();
+        }
+    });
+</script>
+
+<svelte:window onkeydown={onKeyDown} />
+
+{#if wokaMenuData}
+    <div
+        class="m-auto my-0 h-fit min-h-fit max-w-lg min-w-48 max-sm:max-w-[89%] z-50 bg-contrast/80 transition-all backdrop-blur rounded-lg pointer-events-auto overflow-hidden md:mr-0"
+        data-testid="actions-menu"
+    >
+        <div>
+            <div class="w-full bg-cover relative">
+                <div class="absolute top-2 right-2">
+                    <ButtonClose onclick={closeActionsMenu} />
+                </div>
+
+                <div class="flex items-center justify-center p-2">
+                    <div class="text-white flex flex-col justify-center items-center font-bold text-xl">
+                        {#if wokaMenuData.userId != undefined && wokaMenuData.userId != -1}
+                            <div
+                                id="woka"
+                                class=" bt-3 overflow-hidden mt-9 border w-fit h-fit pt-3 rounded-lg cursor-not-allowed bg-[rgb(103,185,133)]"
+                            >
+                                <WokaFromUserId
+                                    userId={wokaMenuData.userId}
+                                    placeholderSrc="/assets/placeholder-woka.png"
+                                    customWidth="4rem"
+                                />
+                            </div>
+                        {/if}
+                        <div class=" w-max mt-[29px]">
+                            <h3>{wokaMenuData.wokaName}</h3>
+                        </div>
+                        {#if remotePlayer}
+                            <div class="my-2">
+                                <div class="text-xxs bold whitespace-nowrap select-none flex items-center">
+                                    <div
+                                        class="aspect-square h-2 w-2 rounded-full me-2.5"
+                                        style="background-color: {getColorHexOfStatus(remotePlayer.availabilityStatus)}"
+                                    ></div>
+                                    <div
+                                        style="color: {getColorHexOfStatus(
+                                            remotePlayer.availabilityStatus,
+                                        )};filter: brightness(200%);"
+                                        class="text-base font-bold"
+                                    >
+                                        {getStatusLabel(remotePlayer.availabilityStatus)}
+                                    </div>
+                                </div>
+                            </div>
+                        {/if}
+                    </div>
+                </div>
+
+                {#if wokaMenuData.visitCardUrl}
+                    <VisitCard
+                        visitCardUrl={wokaMenuData.visitCardUrl}
+                        isEmbedded={true}
+                        showSendMessageButton={false}
+                    />
+                {/if}
+
+                {#if $wokaMenuProgressStore}
+                    <div class="px-4 pb-4 pt-2">
+                        <div class="w-full bg-white/10 rounded-full h-2 mb-2">
+                            <div
+                                class="bg-primary h-2 rounded-full transition-all duration-300"
+                                style="width: {$wokaMenuProgressStore.progress}%"
+                            ></div>
+                        </div>
+                        <p class="text-white/80 text-sm text-center animate-pulse">
+                            {$wokaMenuProgressStore.message}
+                        </p>
+                    </div>
+                {/if}
+            </div>
+        </div>
+
+        {#if sortedActions}
+            <div
+                class="flex items-center bg-contrast w-full justify-center"
+                class:margin-close={!wokaMenuData.wokaName}
+                class:flex-row={buttonsLayout === "row"}
+                class:flex-wrap={buttonsLayout === "wrap"}
+            >
+                {#each sortedActions ?? [] as action (action.uuid)}
+                    <Button
+                        dataTestId={action.testId}
+                        variant="light"
+                        appearance="ghost"
+                        class="text-nowrap my-2 mx-1 min-w-0 {action.style ?? ''} {buttonsLayout === 'column'
+                            ? 'mx-2'
+                            : ''}"
+                        onclick={(event) => {
+                            analyticsClient.trackAdminEvent("map_editor.property.clicked", {
+                                name: action.actionName,
+                                style: action.style,
+                            });
+                            event.preventDefault();
+                            closeActionsMenu();
+                            action.callback();
+                        }}
+                    >
+                        <span class="flex flex-row gap-1 items-center justify-center">
+                            {#if action.actionIcon && typeof action.actionIcon === "string"}
+                                <div class="w-6 h-6">
+                                    <img src={action.actionIcon} class="w-full h-full" alt="" />
+                                </div>
+                            {:else if action.actionIcon && typeof action.actionIcon === "function"}
+                                {@const ActionIcon = action.actionIcon}
+                                <ActionIcon class="w-6 h-6" />
+                            {/if}
+                            {action.actionName}
+                        </span>
+                    </Button>
+                {/each}
+
+                {#if !wokaMenuData.wokaName}
+                    <Button
+                        variant="light"
+                        appearance="ghost"
+                        class="text-nowrap my-2 mx-1 w-fit"
+                        onclick={(event) => {
+                            event.preventDefault();
+                            event.stopPropagation();
+                            closeActionsMenu();
+                        }}
+                    >
+                        {$LL.actionbar.close()}
+                    </Button>
+                {/if}
+            </div>
+        {/if}
+    </div>
+{/if}
+
+<style>
+</style>

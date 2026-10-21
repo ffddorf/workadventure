@@ -1,0 +1,200 @@
+import type { DeepPartial } from "../DeepPartial";
+import type { Translation } from "../i18n-types";
+
+const menu: DeepPartial<Translation["menu"]> = {
+    title: "メニュー",
+    icon: {
+        open: {
+            menu: "メニューを開く",
+            invite: "招待状を見る",
+            register: "登録する",
+            chat: "チャットを開く",
+            userlist: "ユーザーリスト",
+            openEmoji: "絵文字選択画面を開く",
+            closeEmoji: "絵文字メニューを閉じる",
+            mobile: "モバイルメニューを開く",
+            calendar: "カレンダーを開く",
+            todoList: "タスクリストを開く",
+        },
+    },
+    visitCard: {
+        close: "閉じる",
+        sendMessage: "メッセージの送信",
+    },
+    profile: {
+        login: "ログイン",
+        logout: "ログアウト",
+        helpAndTips: "ヘルプとヒント",
+    },
+    settings: {
+        videoBandwidth: {
+            title: "ビデオの品質",
+            low: "低品質",
+            recommended: "推奨",
+            high: "High",
+        },
+        shareScreenBandwidth: {
+            title: "画面共有の品質",
+            low: "低品質",
+            recommended: "推奨",
+            high: "High",
+        },
+        bandwidthConstrainedPreference: {
+            title: "ネットワーク帯域が制限されている場合",
+            maintainFramerateTitle: "滑らかなアニメーションを維持",
+            maintainFramerateDescription:
+                "解像度よりフレームレートを優先します。ゲーム配信など、滑らかさが重要な場合に使用します。",
+            maintainResolutionTitle: "文字の読みやすさを維持",
+            maintainResolutionDescription:
+                "フレームレートより解像度を優先します。プレゼンテーションやコード共有など、文字の可読性が重要な場合に使用します。",
+            balancedTitle: "フレームレートと解像度のバランスを保つ",
+            balancedDescription: "フレームレートと解像度のバランスを保つようにします。",
+        },
+        microphone: {
+            title: "マイク設定",
+            autoGainControl: "自動ゲイン制御",
+            autoGainControlDescription: "マイクの音量を自動的に調整します。",
+            echoCancellation: "エコーキャンセル",
+            enableAdvancedNoiseReduction: "高度なノイズ低減を有効にする",
+            noiseSuppressionMode: "ノイズ抑制モード:",
+            workAdventureNoiseSuppression: "WorkAdventure ノイズ抑制",
+            workAdventureNoiseSuppressionDescription: "WorkAdventure のノイズ抑制でマイク音声を処理します。",
+            recommended: "推奨",
+            browserNoiseSuppression: "ブラウザーのノイズ抑制",
+            browserNoiseSuppressionDescription: "ブラウザー内蔵のノイズ抑制を使用します。",
+            voiceIsolation: "声の分離",
+            voiceIsolationDescription: "利用できる場合、ブラウザーと OS の声の分離を使用します。",
+        },
+        language: {
+            title: "言語",
+        },
+        privacySettings: {
+            title: "離席モード",
+            explanation:
+                "ブラウザの WorkAdventure タブが表示されていない間、WorkAdventure は離席モードに切り替わります。",
+            cameraToggle: "離席モードでカメラをアクティブに保つ",
+            microphoneToggle: "離席モードでマイクをアクティブに保つ",
+        },
+        save: "保存",
+        otherSettings: "その他の設定",
+        fullscreen: "全画面表示",
+        notifications: "通知",
+        enablePictureInPicture: "ピクチャーインピクチャーを有効にする",
+        chatSounds: "チャットサウンド",
+        cowebsiteTrigger: "ウェブサイトや Jitsi ルームを開く前に必ず確認する",
+        ignoreFollowRequest: "他のユーザをフォローするリクエストを無視する",
+        proximityDiscussionVolume: "近接ディスカッションの音量",
+        blockAudio: "環境音と音楽をブロックする",
+        disableAnimations: "マップタイルのアニメーションを無効にする",
+        bubbleSound: "バブルサウンド",
+        bubbleSoundOptions: {
+            ding: "ディング",
+            wobble: "ウォブル",
+        },
+        displayVideoQualityStats: "ビデオ品質統計を表示",
+    },
+    invite: {
+        description: "ルームのリンクを共有します",
+        copy: "コピー",
+        copied: "コピーしました",
+        share: "共有",
+        walkAutomaticallyToPosition: "自分の位置まで自動的に歩きます",
+        selectEntryPoint: "エントリポイントを選択します",
+        selectEntryPointSelect: "ユーザーが到着するエントリポイントを選択してください",
+    },
+    globalMessage: {
+        text: "テキスト",
+        audio: "オーディオ",
+        warning: "ワールドのすべてのルームに送信",
+        enter: "メッセージを入力してください",
+        send: "送信",
+    },
+    globalAudio: {
+        uploadInfo: "ファイルをアップロードします",
+        error: "ファイルが選択されていません。送信する前にファイルをアップロードする必要があります。",
+        errorUpload:
+            "ファイルのアップロードエラーです。ファイルを確認して、もう一度やり直してください。問題が解決しない場合は、管理者に連絡してください。",
+        dragAndDrop: "ファイルをアップロードするには、ドラッグアンドドロップするか、ここをクリックしてください 🎧",
+    },
+    contact: {
+        gettingStarted: {
+            title: "入門",
+            description:
+                "WorkAdventure を使用すると、他のユーザと自然にコミュニケーションできるオンラインスペースを作成することができます",
+        },
+        createMap: {
+            title: "マップを作成します",
+            description: "ドキュメントの手順に従って、独自のカスタムマップを作成することもできます",
+        },
+    },
+    about: {
+        mapInfo: "マップ情報",
+        mapLink: "このマップへのリンク",
+        copyrights: {
+            map: {
+                title: "マップの著作権",
+                empty: "マップの作成者はマップの著作権を宣言していません。",
+            },
+            tileset: {
+                title: "タイルセットの著作権",
+                empty: "マップの作成者はタイルセットの著作権を宣言していません。これは、タイルセットに著作権がないというわけではありません。",
+            },
+            audio: {
+                title: "オーディオファイルの著作権",
+                empty: "マップの作成者はオーディオファイルの著作権を宣言していません。これは、オーディオファイルに著作権がないというわけではありません。",
+            },
+        },
+    },
+    chat: {
+        matrixIDLabel: "あなたの Matrix ID",
+        settings: "設定",
+        resetKeyStorageUpButtonLabel: "キーストレージをリセット",
+        resetKeyStorageConfirmationModal: {
+            title: "キーストレージリセットの確認",
+            content: "キーストレージをリセットしようとしています。よろしいですか？",
+            warning:
+                "キーストレージをリセットすると、現在のセッションとすべての信頼できるユーザーが削除されます。過去のメッセージへのアクセスを失う可能性があり、信頼できるユーザーとして認識されなくなります。続行する前に、この操作の結果を完全に理解していることを確認してください。",
+            cancel: "キャンセル",
+            continue: "続行",
+        },
+    },
+    sub: {
+        profile: "プロファイル",
+        settings: "設定",
+        credit: "クレジット",
+        globalMessages: "グローバルメッセージ",
+        contact: "コンタクト",
+        report: "問題の報告",
+        chat: "チャット",
+        help: "ヘルプとチュートリアル",
+        contextualActions: "コンテキストアクション",
+        shortcuts: "ショートカット",
+    },
+    shortcuts: {
+        title: "キーボードショートカット",
+        keys: "ショートカット",
+        actions: "アクション",
+        moveUp: "上に移動",
+        moveDown: "下に移動",
+        moveLeft: "左に移動",
+        moveRight: "右に移動",
+        speedUp: "走る",
+        interact: "相互作用",
+        follow: "フォロー",
+        openChat: "チャットを開く",
+        openUserList: "ユーザーリストを開く",
+        toggleMapEditor: "マップエディターを表示/非表示",
+        rotatePlayer: "プレイヤーを回転",
+        emote1: "エモート 1",
+        emote2: "エモート 2",
+        emote3: "エモート 3",
+        emote4: "エモート 4",
+        emote5: "エモート 5",
+        emote6: "エモート 6",
+        openSayPopup: "言うポップアップを開く",
+        openThinkPopup: "考えるポップアップを開く",
+        walkMyDesk: "私の机に移動",
+    },
+};
+
+export default menu;

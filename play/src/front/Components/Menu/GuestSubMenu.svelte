@@ -1,0 +1,229 @@
+<script lang="ts">
+    import { onDestroy } from "svelte";
+    import { get } from "svelte/store";
+    import { analyticsClient } from "../../Administration/AnalyticsClient";
+    import { LL } from "../../../i18n/i18n-svelte";
+    import { gameManager } from "../../Phaser/Game/GameManager";
+    import type { GameScene } from "../../Phaser/Game/GameScene";
+    import { gameSceneStore } from "../../Stores/GameSceneStore";
+    import {
+        getInviteEntryPoint,
+        invitePreferencesStore,
+        setInviteEntryPoint,
+    } from "../../Stores/InvitePreferencesStore";
+    import InputSwitch from "../Input/InputSwitch.svelte";
+    import Select from "../Input/Select.svelte";
+    import Button from "../UI/Button.svelte";
+    import { IconCheck, IconShare } from "@wa-icons";
+
+    const TIMEOUT_COPY_LINK_BUTTON = 5000;
+
+    const initialPrefs = get(invitePreferencesStore);
+
+    let walkAutomatically = $state(initialPrefs.walkAutomatically);
+    let showZoneSelect = $state(initialPrefs.showZoneSelect);
+    let entryPoint = $state("");
+    let linkCopied = $state(false);
+    let timeout: ReturnType<typeof setTimeout> | null = null;
+
+    function getGameScene(): GameScene | null {
+        try {
+            return gameManager.getCurrentGameScene();
+        } catch {
+            return null;
+        }
+    }
+
+    let gameScene = $derived($gameSceneStore ?? getGameScene());
+    let startPositions = $derived(gameScene ? gameScene.getStartPositionNames() : []);
+    let playerPos = $derived(
+        gameScene
+            ? { x: Math.floor(gameScene.CurrentPlayer.x), y: Math.floor(gameScene.CurrentPlayer.y) }
+            : { x: 0, y: 0 },
+    );
+
+    let validEntryPointFromStore = $derived(
+        startPositions.length > 0
+            ? (() => {
+                  const saved = getInviteEntryPoint();
+                  return saved && startPositions.includes(saved) ? saved : (startPositions[0] ?? "");
+              })()
+            : "",
+    );
+
+    $effect(() => {
+        if (startPositions.length > 0 && (entryPoint === "" || !startPositions.includes(entryPoint))) {
+            entryPoint = validEntryPointFromStore;
+        }
+    });
+
+    function syncEntryPointToStore(value: string) {
+        setInviteEntryPoint(value);
+    }
+
+    function syncWalkAutomaticallyToStore(value: boolean) {
+        invitePreferencesStore.update((p) => ({ ...p, walkAutomatically: value }));
+    }
+
+    function syncShowZoneSelectToStore(value: boolean) {
+        invitePreferencesStore.update((p) => ({ ...p, showZoneSelect: value }));
+    }
+
+    function copyLink() {
+        // Analytics Client
+        analyticsClient.trackAdminEvent("invite.sent", { inviteType: "copy_link" });
+
+        const input: HTMLInputElement = document.getElementById("input-share-link") as HTMLInputElement;
+        input.focus();
+        input.select();
+        navigator.clipboard
+            .writeText(input.value)
+            .catch((err) => console.error("Navigator clipboard write text error: ", err));
+    }
+
+    function getLink() {
+        return `${location.origin}${location.pathname}#${entryPoint}${
+            walkAutomatically ? `&moveTo=${playerPos.x},${playerPos.y}` : ""
+        }`;
+    }
+
+    function updateInputFieldValue() {
+        const input = document.getElementById("input-share-link");
+        if (input) {
+            const value = getLink();
+            // Report the option, not the link it produces: the event records whether
+            // walk-to-me is on. The link carries the entry point and, when the option
+            // is on, the player's coordinates — none of which this event is about.
+            analyticsClient.trackAdminEvent("invite.walk_link_option_changed", { value: walkAutomatically });
+
+            (input as HTMLInputElement).value = value;
+        }
+    }
+
+    let canShare = navigator.share !== undefined;
+
+    async function shareLink() {
+        // Analytics Client
+        analyticsClient.trackAdminEvent("invite.sent", { inviteType: "copy_link" });
+
+        const shareData = { url: getLink() };
+
+        try {
+            await navigator.share(shareData);
+        } catch (err) {
+            console.error("Error: " + err);
+            copyLink();
+        }
+    }
+
+    function changeCopyLinkButtonStatus() {
+        linkCopied = true;
+
+        if (timeout) clearTimeout(timeout);
+
+        timeout = setTimeout(() => {
+            linkCopied = false;
+        }, TIMEOUT_COPY_LINK_BUTTON);
+    }
+
+    onDestroy(() => {
+        if (timeout) clearTimeout(timeout);
+    });
+</script>
+
+<section class="is-mobile p-4 bg-contrast/85 backdrop-blur rounded-lg">
+    <!-- <h3 class="bg-contrast font-bold text-lg p-4 flex items-center mb-7 m-l">
+            {$LL.menu.invite.description()}
+        </h3> -->
+    <input type="hidden" readonly value={location.toString()} />
+    <div class="w-full flex flex-col items-center justify-center gap-2">
+        {#if canShare}
+            <div class="py-4 w-full hidden mobile:block">
+                <div class="pb-4 text-lg font-semibold">
+                    {$LL.menu.invite.description()}
+                </div>
+                <Button variant="secondary" class="w-full" onclick={shareLink}>
+                    {#snippet icon()}
+                        <IconShare font-size="20" stroke="1.5" />
+                    {/snippet}
+                    <span class="text-lg font-bold">
+                        {$LL.menu.invite.share()}
+                    </span>
+                </Button>
+            </div>
+        {/if}
+        <div class="share-url w-full block mobile:hidden">
+            <div class="flex items-center relative">
+                <input
+                    type="text"
+                    readonly
+                    id="input-share-link"
+                    class="grow h-12 text-sm border-white bg-contrast rounded-md border border-solid border-white/20"
+                    value={location.toString()}
+                />
+                <Button
+                    variant={linkCopied ? "success" : "secondary"}
+                    size="sm"
+                    class="flex items-center absolute right-2 transition-all text-center"
+                    onclick={() => {
+                        changeCopyLinkButtonStatus();
+                        copyLink();
+                    }}
+                >
+                    {#snippet icon()}
+                        <span class="flex items-center justify-center {linkCopied ? '' : 'hidden'}">
+                            <IconCheck class="text-white" />
+                        </span>
+                    {/snippet}
+                    <div hidden={!linkCopied}>{$LL.menu.invite.copied()}</div>
+                    <div hidden={linkCopied}>{$LL.menu.invite.copy()}</div>
+                </Button>
+            </div>
+        </div>
+    </div>
+
+    <div>
+        <label for="showZoneSelect" class="flex cursor-pointer items-center relative">
+            <InputSwitch
+                id="showZoneSelect"
+                bind:value={showZoneSelect}
+                onchange={() => {
+                    syncShowZoneSelectToStore(showZoneSelect);
+                    updateInputFieldValue();
+                    linkCopied = false;
+                }}
+                label={$LL.menu.invite.selectEntryPoint()}
+            />
+        </label>
+        {#if showZoneSelect}
+            <div class="flex flex-col gap-2 pt-2">
+                <div class="flex items-center text-sm italic opacity-75 justify-start gap-2">
+                    {$LL.menu.invite.selectEntryPointSelect()}
+                </div>
+                <Select
+                    bind:value={entryPoint}
+                    onchange={() => {
+                        syncEntryPointToStore(entryPoint);
+                        updateInputFieldValue();
+                        linkCopied = false;
+                    }}
+                >
+                    {#each startPositions as entryPointName (entryPointName)}
+                        <option value={entryPointName}>{entryPointName}</option>
+                    {/each}
+                </Select>
+            </div>
+        {/if}
+        <label for="walkto" class="flex cursor-pointer items-center relative">
+            <InputSwitch
+                id="walkto"
+                bind:value={walkAutomatically}
+                onchange={() => {
+                    syncWalkAutomaticallyToStore(walkAutomatically);
+                    updateInputFieldValue();
+                }}
+                label={$LL.menu.invite.walkAutomaticallyToPosition()}
+            />
+        </label>
+    </div>
+</section>

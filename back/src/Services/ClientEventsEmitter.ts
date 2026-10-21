@@ -1,32 +1,13 @@
 import { EventEmitter } from "events";
-
-const clientJoinEvent = "clientJoin";
-const clientLeaveEvent = "clientLeave";
+import { Subject } from "rxjs";
+import type { Space } from "../Model/Space";
 
 class ClientEventsEmitter extends EventEmitter {
-    emitClientJoin(clientUUid: string, roomId: string): void {
-        this.emit(clientJoinEvent, clientUUid, roomId);
-    }
-
-    emitClientLeave(clientUUid: string, roomId: string): void {
-        this.emit(clientLeaveEvent, clientUUid, roomId);
-    }
-
-    registerToClientJoin(callback: (clientUUid: string, roomId: string) => void): void {
-        this.on(clientJoinEvent, callback);
-    }
-
-    registerToClientLeave(callback: (clientUUid: string, roomId: string) => void): void {
-        this.on(clientLeaveEvent, callback);
-    }
-
-    unregisterFromClientJoin(callback: (clientUUid: string, roomId: string) => void): void {
-        this.removeListener(clientJoinEvent, callback);
-    }
-
-    unregisterFromClientLeave(callback: (clientUUid: string, roomId: string) => void): void {
-        this.removeListener(clientLeaveEvent, callback);
-    }
+    public readonly spaceUpdatedSubject = new Subject<Space>();
+    public readonly newSpaceSubject = new Subject<Space>();
+    public readonly deleteSpaceSubject = new Subject<Space>();
+    public readonly clientJoinSubject = new Subject<{ clientUUid: string; roomId: string }>();
+    public readonly clientLeaveSubject = new Subject<{ clientUUid: string; roomId: string }>();
 }
 
 export const clientEventsEmitter = new ClientEventsEmitter();

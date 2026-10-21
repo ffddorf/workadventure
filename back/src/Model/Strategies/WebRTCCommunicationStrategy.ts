@@ -1,0 +1,352 @@
+import type { SpaceUser, MeetingConnectionRestartMessage } from "@workadventure/messages";
+import * as Sentry from "@sentry/node";
+import { v4 as uuidv4 } from "uuid";
+import type { ICommunicationStrategy } from "../Interfaces/ICommunicationStrategy";
+import type { ICommunicationSpace } from "../Interfaces/ICommunicationSpace";
+
+class ConnectionManager {
+    private connections: Map<string, Map<string, string>> = new Map();
+
+    addConnection(user1Id: string, user2Id: string, connectionId: string): void {
+        this.getOrCreateUserConnections(user1Id).set(user2Id, connectionId);
+    }
+
+    removeConnection(user1Id: string, user2Id: string): void {
+        this.connections.get(user1Id)?.delete(user2Id);
+    }
+
+    hasConnection(user1Id: string, user2Id: string): boolean {
+        return this.connections.get(user1Id)?.has(user2Id) ?? false;
+    }
+
+    getConnectionId(user1Id: string, user2Id: string): string | undefined {
+        return this.connections.get(user1Id)?.get(user2Id);
+    }
+
+    removeUser(userId: string): void {
+        this.connections.delete(userId);
+    }
+
+    removeUserToNotify(userId: string): void {
+        for (const connections of this.connections.values()) {
+            connections.delete(userId);
+        }
+    }
+
+    getAllConnections(): Array<[string, string]> {
+        const result: Array<[string, string]> = [];
+        for (const [userId, connections] of this.connections) {
+            for (const connectedId of connections.keys()) {
+                result.push([userId, connectedId]);
+            }
+        }
+        return result;
+    }
+
+    getConnections(userId: string): Set<string> {
+        return new Set(this.connections.get(userId)?.keys());
+    }
+
+    private getOrCreateUserConnections(userId: string): Map<string, string> {
+        if (!this.connections.has(userId)) {
+            this.connections.set(userId, new Map());
+        }
+        return this.connections.get(userId)!;
+    }
+
+    clear(): void {
+        this.connections.clear();
+    }
+}
+
+export class WebRTCCommunicationStrategy implements ICommunicationStrategy {
+    constructor(
+        private readonly _space: ICommunicationSpace,
+        private users: ReadonlyMap<string, SpaceUser>,
+        private usersToNotify: ReadonlyMap<string, SpaceUser>,
+        private readonly _connections: ConnectionManager = new ConnectionManager(),
+    ) {}
+    addUserReady(userId: string): void {}
+    canSwitch(): boolean {
+        return true;
+    }
+
+    public addUser(newUser: SpaceUser): Promise<void> {
+        // When someone enters the space, we don't need to try establishing the connection. We must wait for the user to watch
+        // the space for that.
+
+        if (!this.usersToNotify.has(newUser.spaceUserId)) {
+            return Promise.resolve();
+        }
+
+        for (const existingUser of this.usersToNotify.values()) {
+            if (existingUser.spaceUserId === newUser.spaceUserId) {
+                continue;
+            }
+            try {
+                if (this.shouldEstablishConnection(newUser, existingUser)) {
+                    this.establishConnection(newUser, existingUser);
+                }
+            } catch (error) {
+                console.error(
+                    "An error occurred while adding a new user to WebRTC discussion",
+                    newUser,
+                    existingUser,
+                    error,
+                );
+                Sentry.captureException(error);
+            }
+        }
+
+        return Promise.resolve();
+    }
+
+    public deleteUser(user: SpaceUser): void {
+        if (!this.usersToNotify.has(user.spaceUserId)) {
+            this.shutdownAllConnections(user);
+        }
+
+        for (const userToNotify of this.usersToNotify.values()) {
+            if (!this.users.has(userToNotify.spaceUserId)) {
+                this.shutdownConnection(user.spaceUserId, userToNotify.spaceUserId);
+            }
+        }
+
+        this.cleanupUserMessages(user.spaceUserId);
+    }
+
+    private shutdownAllConnections(user: SpaceUser): void {
+        const connections = this._connections.getConnections(user.spaceUserId);
+        connections.forEach((connection) => {
+            if (this._connections.hasConnection(connection, user.spaceUserId)) {
+                this.shutdownConnection(user.spaceUserId, connection);
+            }
+        });
+    }
+
+    public async addUserToNotify(user: SpaceUser): Promise<void> {
+        for (const userInFilter of this.users.values()) {
+            if (userInFilter.spaceUserId === user.spaceUserId) {
+                continue;
+            }
+            try {
+                if (this.shouldEstablishConnection(user, userInFilter)) {
+                    this.establishConnection(user, userInFilter);
+                }
+            } catch (error) {
+                console.error(
+                    "An error occurred while adding a user to notify in WebRTCCommunicationStrategy",
+                    user,
+                    userInFilter,
+                    error,
+                );
+                Sentry.captureException(error);
+            }
+        }
+
+        return Promise.resolve();
+    }
+    public deleteUserFromNotify(user: SpaceUser): void {
+        for (const userInFilter of this.users.values()) {
+            if (userInFilter.spaceUserId === user.spaceUserId) {
+                continue;
+            }
+            this.shutdownConnection(user.spaceUserId, userInFilter.spaceUserId);
+        }
+
+        this.cleanupUserToNotifyMessages(user.spaceUserId);
+    }
+
+    public updateUser(user: SpaceUser): void {
+        // TODO: remove the handleUserMediaUpdate function after testing
+        //this.handleUserMediaUpdate(user);
+    }
+    private shutdownConnection(user: string, otherUser: string): void {
+        try {
+            this.sendWebRTCDisconnect(user, otherUser);
+        } catch (error) {
+            console.error(
+                "An error occurred while sending a disconnect in WebRTCCommunicationStrategy shutdownConnection 1",
+                user,
+                otherUser,
+                error,
+            );
+            Sentry.captureException(error);
+        }
+        try {
+            this.sendWebRTCDisconnect(otherUser, user);
+        } catch (error) {
+            console.error(
+                "An error occurred while sending a disconnect in WebRTCCommunicationStrategy shutdownConnection 2",
+                otherUser,
+                user,
+                error,
+            );
+            Sentry.captureException(error);
+        }
+    }
+
+    private shouldEstablishConnection(user1: SpaceUser, user2: SpaceUser): boolean {
+        const hasExisting = this.hasExistingConnection(user1.spaceUserId, user2.spaceUserId);
+        // Only establish if we need media connection AND don't already have one
+        return !hasExisting;
+    }
+
+    private establishConnection(user1: SpaceUser, user2: SpaceUser): void {
+        const connectionId = uuidv4();
+        this.sendWebRTCStart(user1.spaceUserId, user2.spaceUserId, true, connectionId);
+        this.sendWebRTCStart(user2.spaceUserId, user1.spaceUserId, false, connectionId);
+    }
+
+    private cleanupUserMessages(userId: string): void {
+        this._connections.removeUser(userId);
+    }
+
+    private cleanupUserToNotifyMessages(userId: string): void {
+        this._connections.removeUserToNotify(userId);
+    }
+
+    private hasExistingConnection(userId1: string, userId2: string): boolean {
+        return this._connections.hasConnection(userId1, userId2);
+    }
+
+    private sendWebRTCStart(senderId: string, receiverId: string, isInitiator: boolean, connectionId: string): void {
+        this._connections.addConnection(senderId, receiverId, connectionId);
+
+        this._space.dispatchPrivateEvent({
+            spaceName: this._space.getSpaceName(),
+            receiverUserId: receiverId,
+            senderUserId: senderId,
+            spaceEvent: {
+                event: {
+                    $case: "webRtcStartMessage",
+                    webRtcStartMessage: {
+                        userId: senderId,
+                        initiator: isInitiator,
+                        connectionId: connectionId,
+                    },
+                },
+            },
+        });
+    }
+
+    private sendWebRTCDisconnect(senderId: string, receiverId: string): void {
+        if (!this._connections.hasConnection(senderId, receiverId)) {
+            // Nothing to tear down: don't notify the receiver of a connection that does not exist.
+            return;
+        }
+        this._connections.removeConnection(senderId, receiverId);
+        if (!this._space.getUser(senderId)) {
+            // The sender already left the space (its removal is what triggered this teardown).
+            // dispatchPrivateEvent would throw because it needs the sender, and the receiver is
+            // already told to drop the peer by the removeSpaceUserMessage broadcast.
+            return;
+        }
+        this._space.dispatchPrivateEvent({
+            spaceName: this._space.getSpaceName(),
+            receiverUserId: receiverId,
+            senderUserId: senderId,
+            spaceEvent: {
+                event: {
+                    $case: "webRtcDisconnectMessage",
+                    webRtcDisconnectMessage: {
+                        userId: senderId,
+                    },
+                },
+            },
+        });
+    }
+
+    initialize(users: ReadonlyMap<string, SpaceUser>, usersToNotify: ReadonlyMap<string, SpaceUser>): Promise<void> {
+        users.forEach((user1) => {
+            usersToNotify.forEach((user2) => {
+                if (user1.spaceUserId === user2.spaceUserId) {
+                    return;
+                }
+                try {
+                    if (!this.hasExistingConnection(user1.spaceUserId, user2.spaceUserId)) {
+                        this.establishConnection(user1, user2);
+                        return;
+                    }
+                } catch (error) {
+                    console.error(
+                        "An error occurred while initializing WebRTCCommunicationStrategy",
+                        user1,
+                        user2,
+                        error,
+                    );
+                    Sentry.captureException(error);
+                }
+            });
+        });
+        return Promise.resolve();
+    }
+
+    public handleMeetingConnectionRestartMessage(
+        meetingConnectionRestartMessage: MeetingConnectionRestartMessage,
+        senderUserId: string,
+    ) {
+        const receiverId = meetingConnectionRestartMessage.userId;
+        if (!receiverId) {
+            console.warn("No receiverId found for meetingConnectionRestartMessage ", meetingConnectionRestartMessage);
+            return;
+        }
+
+        // A connection is tracked in both directions with the same id, but a partial cleanup may
+        // leave only one direction, so look both ways to recover the currently tracked id.
+        const existingConnectionId =
+            this._connections.getConnectionId(senderUserId, receiverId) ??
+            this._connections.getConnectionId(receiverId, senderUserId);
+
+        if (existingConnectionId === undefined) {
+            // The tracking was lost (partial cleanup) but the front still expects a connection between
+            // these two users: silently ignoring would leave them without media until one reloads.
+            const sender = this.users.get(senderUserId) ?? this.usersToNotify.get(senderUserId);
+            const receiver = this.users.get(receiverId) ?? this.usersToNotify.get(receiverId);
+            if (!sender || !receiver) {
+                console.warn(
+                    "No existing connection found for meetingConnectionRestartMessage ",
+                    senderUserId,
+                    receiverId,
+                );
+                Sentry.captureMessage(
+                    `No existing connection found for meetingConnectionRestartMessage from ${senderUserId} to ${receiverId}`,
+                );
+                return;
+            }
+            this.establishConnection(receiver, sender);
+            return;
+        }
+
+        // Ignore stale restart requests that reference a connection we have already replaced.
+        if (
+            meetingConnectionRestartMessage.connectionId !== undefined &&
+            meetingConnectionRestartMessage.connectionId !== existingConnectionId
+        ) {
+            return;
+        }
+
+        const connectionId = uuidv4();
+        this.sendWebRTCStart(receiverId, senderUserId, true, connectionId);
+        this.sendWebRTCStart(senderUserId, receiverId, false, connectionId);
+    }
+
+    cleanup(): void {
+        for (const [senderId, receiverId] of this._connections.getAllConnections()) {
+            this._space.dispatchPrivateEvent({
+                spaceName: this._space.getSpaceName(),
+                receiverUserId: receiverId,
+                senderUserId: senderId,
+                spaceEvent: {
+                    event: {
+                        $case: "webRtcDisconnectMessage",
+                        webRtcDisconnectMessage: {
+                            userId: senderId,
+                        },
+                    },
+                },
+            });
+        }
+        this._connections.clear();
+    }
+}

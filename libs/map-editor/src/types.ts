@@ -1,0 +1,568 @@
+import { z } from "zod";
+import { CustomEntityDirection } from "@workadventure/messages";
+
+export type AtLeast<T, K extends keyof T> = Partial<T> & Pick<T, K>;
+
+export enum Direction {
+    Left = "Left",
+    Up = "Up",
+    Down = "Down",
+    Right = "Right",
+}
+
+export const CollectionUrl = z.object({
+    url: z.string(),
+    type: z.union([z.literal("file"), z.literal("marketplace")]),
+});
+
+export const PropertyBase = z.object({
+    id: z.string(),
+    buttonLabel: z.string().optional(),
+    hideButtonLabel: z.boolean().optional(),
+    resourceUrl: z.string().optional(),
+    serverData: z.unknown().optional(),
+});
+
+export const FocusablePropertyData = PropertyBase.extend({
+    type: z.literal("focusable"),
+    zoom_margin: z.number().optional(),
+});
+
+export const HighlightPropertyData = PropertyBase.extend({
+    type: z.literal("highlight"),
+    opacity: z.number().min(0).max(1).optional().default(0.6),
+    gradientWidth: z.number().min(0).optional().default(10),
+    duration: z.number().optional().default(250),
+    color: z.string().optional().default("#000000"),
+});
+
+export const JitsiRoomConfigData = z.object({
+    startWithAudioMuted: z.boolean().optional(),
+    startWithVideoMuted: z.boolean().optional(),
+});
+
+export const LivekitRoomConfigData = z
+    .object({
+        startWithAudioMuted: z.boolean(),
+        startWithVideoMuted: z.boolean(),
+        disableChat: z.boolean().optional().default(false),
+        // Whether attendees may raise their hand to ask for the floor. On by default, and absent from
+        // maps built before the option existed, hence `.optional()` on top of the default.
+        raiseHandEnabled: z.boolean().optional().default(true),
+    })
+    .optional();
+
+export const SilentPropertyData = PropertyBase.extend({
+    type: z.literal("silent"),
+});
+
+export const StartPropertyData = PropertyBase.extend({
+    type: z.literal("start"),
+    isDefault: z.boolean().optional(),
+});
+
+export const ExitPropertyData = PropertyBase.extend({
+    type: z.literal("exit"),
+    url: z.string(),
+    areaName: z.string(),
+});
+
+export const JitsiRoomPropertyData = PropertyBase.extend({
+    type: z.literal("jitsiRoomProperty"),
+    roomName: z.string(),
+    jitsiUrl: z.string().optional(),
+    closable: z.boolean().optional(),
+    trigger: z.union([z.literal("onenter"), z.literal("onaction"), z.literal("onicon")]).optional(),
+    triggerMessage: z.string().optional(),
+    noPrefix: z.boolean().optional(),
+    width: z.number().min(1).max(100).default(50).optional(),
+    jitsiRoomAdminTag: z.string().optional(),
+    jitsiRoomConfig: JitsiRoomConfigData,
+});
+
+export const PlayAudioPropertyData = PropertyBase.extend({
+    type: z.literal("playAudio"),
+    audioLink: z.string(),
+    volume: z.number().default(1).optional(),
+    triggerMessage: z.string().optional(),
+    /**
+     * Broadcast the sound to every player of the map instead of only the one who activates it.
+     * Entities only: on an area this would fire for anyone walking in.
+     */
+    playForAllUsers: z.boolean().optional(),
+    /**
+     * Distance in pixels beyond which a broadcast sound is not heard, the volume decreasing as it
+     * is approached. Null or undefined means the sound is heard at full volume anywhere on the map
+     * (an emptied number input is bound to null).
+     */
+    audibleRadius: z.number().min(0).nullable().optional(),
+});
+
+export const OpenWebsitePropertyData = PropertyBase.extend({
+    type: z.literal("openWebsite"),
+    link: z.string().nullable().default("https://workadventu.re"),
+    newTab: z.boolean().optional().default(false),
+    closable: z.boolean().optional(),
+    allowAPI: z.boolean().optional(),
+    trigger: z.union([z.literal("onenter"), z.literal("onaction"), z.literal("onicon")]).optional(),
+    triggerMessage: z.string().optional(),
+    width: z.number().min(1).max(100).default(50).optional(),
+    policy: z
+        .string()
+        .default("fullscreen; accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture")
+        .optional(),
+    position: z.number().optional(),
+    application: z.string().default("website"),
+    poster: z.string().optional(),
+    placeholder: z.string().optional(),
+    icon: z.string().optional(),
+    label: z.string().optional(),
+    regexUrl: z.string().optional(),
+    targetEmbedableUrl: z.string().optional(),
+    forceNewTab: z.boolean().optional().default(false),
+    hideUrl: z.boolean().optional().default(false),
+});
+
+export const OpenFilePropertyData = PropertyBase.extend({
+    type: z.literal("openFile"),
+    link: z.string().nullable().default("https://workadventu.re"),
+    name: z.string().nullable(),
+    newTab: z.boolean().optional().default(false),
+    closable: z.boolean().optional(),
+    trigger: z.union([z.literal("onenter"), z.literal("onaction"), z.literal("onicon")]).optional(),
+    triggerMessage: z.string().optional(),
+    width: z.number().min(1).max(100).default(50).optional(),
+    policy: z
+        .string()
+        .default("fullscreen; accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture")
+        .optional(),
+    position: z.number().optional(),
+    hideUrl: z.boolean().optional().default(false),
+});
+
+export const ExtensionModuleAreaProperty = PropertyBase.extend({
+    type: z.literal("extensionModule"),
+    subtype: z.string(),
+    data: z.unknown(),
+});
+
+export const SpeakerMegaphonePropertyData = PropertyBase.extend({
+    type: z.literal("speakerMegaphone"),
+    name: z.string(),
+    chatEnabled: z.boolean().default(false),
+    seeAttendees: z.boolean().default(false),
+});
+
+export const ListenerMegaphonePropertyData = PropertyBase.extend({
+    type: z.literal("listenerMegaphone"),
+    speakerZoneName: z.string(),
+    chatEnabled: z.boolean().default(false),
+    allowTalking: z.boolean().optional().default(false),
+    // Whether listeners may raise their hand to ask the speaker for the floor. On by default, and absent
+    // from maps built before the option existed, hence `.optional()` on top of the default.
+    raiseHandEnabled: z.boolean().optional().default(true),
+    waitingLink: z.string().optional(),
+});
+
+export const EntityDescriptionPropertyData = PropertyBase.extend({
+    type: z.literal("entityDescriptionProperties"),
+    description: z.string().optional(),
+    searchable: z.boolean().default(false),
+});
+
+export const AreaDescriptionPropertyData = PropertyBase.extend({
+    type: z.literal("areaDescriptionProperties"),
+    description: z.string().optional(),
+    searchable: z.boolean().default(false),
+});
+
+export const RestrictedRightsPropertyData = PropertyBase.extend({
+    type: z.literal("restrictedRightsPropertyData"),
+    writeTags: z.array(z.string()).default([]),
+    readTags: z.array(z.string()).default([]),
+});
+
+export const PersonalAreaAccessClaimMode = z.enum(["dynamic", "static"]);
+
+export const PersonalAreaPropertyData = PropertyBase.extend({
+    type: z.literal("personalAreaPropertyData"),
+    accessClaimMode: PersonalAreaAccessClaimMode,
+    allowedTags: z.array(z.string()).default([]),
+    ownerId: z.string().nullable(), //Proto handle null here. If something goes wrong with personal area, this may be the issue
+});
+
+export const MatrixRoomPropertyData = PropertyBase.extend({
+    type: z.literal("matrixRoomPropertyData"),
+    shouldOpenAutomatically: z.boolean(),
+    displayName: z.string(),
+    serverData: z
+        .object({
+            matrixRoomId: z.string().optional(),
+        })
+        .optional(),
+});
+
+export const TooltipPropertyData = PropertyBase.extend({
+    type: z.literal("tooltipPropertyData"),
+    id: z.string(),
+    content: z.string(),
+    duration: z.number().optional().default(5000),
+});
+
+export const LivekitRoomPropertyData = PropertyBase.extend({
+    type: z.literal("livekitRoomProperty"),
+    roomName: z.string(),
+    triggerMessage: z.string().optional(),
+    livekitRoomConfig: LivekitRoomConfigData,
+    livekitRoomAdminTag: z.string().optional(),
+});
+
+export const MaxUsersInAreaPropertyData = PropertyBase.extend({
+    type: z.literal("maxUsersInAreaPropertyData"),
+    /**
+     * Max users in area:
+     * - null | undefined: no limit
+     * - 0: refuse access (zone always "full")
+     * - 1+: maximum number of users allowed
+     */
+    maxUsers: z.number().min(0).nullable().optional(),
+});
+
+export const LockableAreaPropertyData = PropertyBase.extend({
+    type: z.literal("lockableAreaPropertyData"),
+    // Note: lock state is now stored in area property variables, not in the WAM
+    allowedTags: z.array(z.string()).optional(),
+});
+
+export const AreaDataProperty = z.discriminatedUnion("type", [
+    StartPropertyData,
+    ExitPropertyData,
+    FocusablePropertyData,
+    HighlightPropertyData,
+    SilentPropertyData,
+    JitsiRoomPropertyData,
+    PlayAudioPropertyData,
+    OpenWebsitePropertyData,
+    OpenFilePropertyData,
+    SpeakerMegaphonePropertyData,
+    ListenerMegaphonePropertyData,
+    AreaDescriptionPropertyData,
+    RestrictedRightsPropertyData,
+    PersonalAreaPropertyData,
+    ExtensionModuleAreaProperty,
+    MatrixRoomPropertyData,
+    TooltipPropertyData,
+    LivekitRoomPropertyData,
+    MaxUsersInAreaPropertyData,
+    LockableAreaPropertyData,
+]);
+
+export const AreaDataProperties = z.array(AreaDataProperty);
+
+export const AreaCoordinates = z.object({
+    x: z.number(),
+    y: z.number(),
+    width: z.number(),
+    height: z.number(),
+});
+
+export const AreaData = AreaCoordinates.extend({
+    id: z.string(),
+    x: z.number(),
+    y: z.number(),
+    width: z.number(),
+    height: z.number(),
+    visible: z.boolean(),
+    name: z.string(),
+    properties: AreaDataProperties,
+});
+
+export const EntityDataProperty = z.discriminatedUnion("type", [
+    JitsiRoomPropertyData,
+    PlayAudioPropertyData,
+    OpenWebsitePropertyData,
+    OpenFilePropertyData,
+    EntityDescriptionPropertyData,
+    LivekitRoomPropertyData,
+]);
+
+export const EntityDataProperties = z.array(EntityDataProperty);
+
+export const CollisionGrid = z.array(z.array(z.number()));
+
+export const EntityRawPrefab = z.object({
+    id: z.string(),
+    name: z.string(),
+    tags: z.array(z.string()),
+    imagePath: z.string(),
+    direction: z.enum(["Left", "Up", "Down", "Right"]),
+    color: z.string(),
+    collisionGrid: CollisionGrid.optional(),
+    depthOffset: z.number().optional(),
+    // UUID of the user who uploaded this custom entity. Stamped by map-storage from the
+    // authenticated user UUID, never from the client. Undefined on the built-in ("Default")
+    // collections and on custom entities uploaded before this field existed: those can only be
+    // modified or deleted by a user with map edit rights.
+    ownerId: z.string().optional(),
+});
+
+export const EntityPrefabType = z.union([z.literal("Default"), z.literal("Custom")]);
+
+export const EntityPrefab = EntityRawPrefab.extend({
+    collectionName: z.string(),
+    type: EntityPrefabType,
+});
+
+export const EntityPrefabRef = z.object({
+    collectionName: z.string(),
+    id: z.string(),
+});
+
+export const EntityCollection = z.object({
+    collectionName: z.string(),
+    tags: z.array(z.string()),
+    collection: z.array(EntityPrefab),
+});
+
+export const EntityCollectionRaw = z.object({
+    collectionName: z.string(),
+    tags: z.array(z.string()),
+    collection: z.array(EntityRawPrefab),
+    version: z.string().optional(),
+});
+
+// TODO: get rid of this type and use only WAMEntityData
+export const EntityData = z.object({
+    id: z.string(),
+    x: z.number(),
+    y: z.number(),
+    name: z.string().optional(),
+    properties: EntityDataProperties.optional(),
+    prefab: EntityRawPrefab,
+    prefabRef: EntityPrefabRef,
+});
+
+export const EntityDimensions = z.object({
+    width: z.number(),
+    height: z.number(),
+});
+
+export const EntityCoordinates = z.object({
+    x: z.number(),
+    y: z.number(),
+});
+
+export const WAMEntityData = EntityData.omit({ prefab: true, id: true });
+export type WAMEntityData = z.infer<typeof WAMEntityData>;
+
+export const WAMMetadata = z.object({
+    name: z.string().optional().nullable().describe("The name of the map."),
+    description: z
+        .string()
+        .optional()
+        .nullable()
+        .describe("A description of the map. Can be used in social networks when sharing a link to the map."),
+    copyright: z
+        .string()
+        .optional()
+        .nullable()
+        .describe(
+            "Copyright notice for this map. Can be a link to a license. Parts of this map like tilesets or images can have their own copyright.",
+        ),
+    thumbnail: z
+        .string()
+        .optional()
+        .nullable()
+        .describe(
+            "URL to a thumbnail image. This image will be used in social networks when sharing a link to the map.",
+        ),
+    areasSearchable: z
+        .number()
+        .optional()
+        .nullable()
+        .describe("Number of areas define as searchable by the map editor for the exploration mode."),
+    entitiesSearchable: z
+        .number()
+        .optional()
+        .nullable()
+        .describe("Number of entities define as searchable by the map editor for the exploration mode."),
+});
+export type WAMMetadata = z.infer<typeof WAMMetadata>;
+
+export const WAMVendor = z
+    .unknown()
+    .describe(
+        "Use this field to store data that is not handled directly by WorkAdventure. " +
+            "This is a good place to store data generated by an admin (like access rights)",
+    );
+
+export const MegaphoneRecordingSettings = z.object({
+    enabled: z.boolean(),
+    rights: z.array(z.string()).optional(),
+});
+
+export const MegaphoneSettings = z.object({
+    enabled: z.boolean(),
+    title: z.string().optional(),
+    scope: z.string().optional(),
+    rights: z.array(z.string()).optional(),
+    audienceVideoFeedbackActivated: z.boolean().optional(),
+    notificationSoundUrl: z.string().optional(),
+    enableSoundNotifications: z.boolean().optional(),
+    recording: MegaphoneRecordingSettings.optional(),
+});
+
+export type MegaphoneRecordingSettings = z.infer<typeof MegaphoneRecordingSettings>;
+export type MegaphoneSettings = z.infer<typeof MegaphoneSettings>;
+
+export const RecordingSettings = z.object({
+    rights: z.array(z.string()).optional(),
+    enableSounds: z.boolean().optional(),
+});
+
+export const WAMSettings = z.object({
+    megaphone: MegaphoneSettings.optional(),
+    recording: RecordingSettings.optional(),
+});
+
+export const WAMFileFormat = z.object({
+    version: z.string(),
+    mapUrl: z.string(),
+    entities: z.record(z.string(), WAMEntityData),
+    areas: z.array(AreaData),
+    entityCollections: z.array(CollectionUrl),
+    lastCommandId: z.string().optional(),
+    settings: WAMSettings.optional(),
+    metadata: WAMMetadata.optional().describe("Contains metadata about the map (name, description, copyright, etc.)"),
+    vendor: WAMVendor.optional(),
+});
+
+export const MapsCacheSingleMapFormat = z.object({
+    mapUrl: z.string(),
+    metadata: WAMMetadata.optional(),
+    vendor: WAMVendor.optional(),
+});
+export const MapsCacheFileFormat = z.object({
+    version: z.string(),
+    maps: z
+        .record(z.string(), MapsCacheSingleMapFormat)
+        .describe("The format of the output of the /maps API call on the map-storage container."),
+});
+
+export type EntityRawPrefab = z.infer<typeof EntityRawPrefab>;
+export type EntityPrefab = z.infer<typeof EntityPrefab>;
+export type EntityPrefabType = z.infer<typeof EntityPrefabType>;
+export type EntityCollection = z.infer<typeof EntityCollection>;
+export type EntityCollectionRaw = z.infer<typeof EntityCollectionRaw>;
+export type CollectionUrl = z.infer<typeof CollectionUrl>;
+export type CollisionGrid = z.infer<typeof CollisionGrid>;
+export type EntityData = z.infer<typeof EntityData>;
+export type EntityDimensions = z.infer<typeof EntityDimensions>;
+export type EntityCoordinates = z.infer<typeof EntityCoordinates>;
+export type EntityDataProperties = z.infer<typeof EntityDataProperties>;
+export type EntityDataProperty = z.infer<typeof EntityDataProperty>;
+export type EntityDataPropertiesKeys =
+    | "jitsiRoomProperty"
+    | "playAudio"
+    | "openWebsite"
+    | "openFile"
+    | "livekitRoomProperty";
+export type AreaCoordinates = z.infer<typeof AreaCoordinates>;
+export type AreaData = z.infer<typeof AreaData>;
+export type AreaDataProperties = z.infer<typeof AreaDataProperties>;
+export type AreaDataProperty = z.infer<typeof AreaDataProperty>;
+export type AreaDataPropertiesKeys = AreaDataProperty["type"];
+export type ActionsMenuData = z.infer<typeof PropertyBase>;
+export type ExitPropertyData = z.infer<typeof ExitPropertyData>;
+export type StartPropertyData = z.infer<typeof StartPropertyData>;
+export type SilentPropertyData = z.infer<typeof SilentPropertyData>;
+export type FocusablePropertyData = z.infer<typeof FocusablePropertyData>;
+export type HighlightPropertyData = z.infer<typeof HighlightPropertyData>;
+export type JitsiRoomConfigData = z.infer<typeof JitsiRoomConfigData>;
+export type LivekitRoomConfigData = z.infer<typeof LivekitRoomConfigData>;
+export type JitsiRoomPropertyData = z.infer<typeof JitsiRoomPropertyData>;
+export type LivekitRoomPropertyData = z.infer<typeof LivekitRoomPropertyData>;
+export type PlayAudioPropertyData = z.infer<typeof PlayAudioPropertyData>;
+export type OpenWebsitePropertyData = z.infer<typeof OpenWebsitePropertyData>;
+export type OpenFilePropertyData = z.infer<typeof OpenFilePropertyData>;
+export type WAMSettings = z.infer<typeof WAMSettings>;
+export type WAMFileFormat = z.infer<typeof WAMFileFormat>;
+export type MapsCacheSingleMapFormat = z.infer<typeof MapsCacheSingleMapFormat>;
+export type MapsCacheFileFormat = z.infer<typeof MapsCacheFileFormat>;
+export type SpeakerMegaphonePropertyData = z.infer<typeof SpeakerMegaphonePropertyData>;
+export type ListenerMegaphonePropertyData = z.infer<typeof ListenerMegaphonePropertyData>;
+export type EntityDescriptionPropertyData = z.infer<typeof EntityDescriptionPropertyData>;
+export type AreaDescriptionPropertyData = z.infer<typeof AreaDescriptionPropertyData>;
+export type RestrictedRightsPropertyData = z.infer<typeof RestrictedRightsPropertyData>;
+export type PersonalAreaPropertyData = z.infer<typeof PersonalAreaPropertyData>;
+export type RecordingSettings = z.infer<typeof RecordingSettings>;
+export type MatrixRoomPropertyData = z.infer<typeof MatrixRoomPropertyData>;
+export type PersonalAreaAccessClaimMode = z.infer<typeof PersonalAreaAccessClaimMode>;
+export type ExtensionModuleAreaPropertyData = z.infer<typeof ExtensionModuleAreaProperty>;
+export type TooltipPropertyData = z.infer<typeof TooltipPropertyData>;
+export type MaxUsersInAreaPropertyData = z.infer<typeof MaxUsersInAreaPropertyData>;
+export type LockableAreaPropertyData = z.infer<typeof LockableAreaPropertyData>;
+
+export enum GameMapProperties {
+    ALLOW_API = "allowApi",
+    AUDIO_LOOP = "audioLoop",
+    AUDIO_VOLUME = "audioVolume",
+    BBB_MEETING = "bbbMeeting",
+    COLLIDES = "collides",
+    DEFAULT = "default",
+    EXIT_URL = "exitUrl",
+    EXIT_SCENE_URL = "exitSceneUrl",
+    FONT_FAMILY = "font-family",
+    FOCUSABLE = "focusable",
+    JITSI_ADMIN_ROOM_TAG = "jitsiRoomAdminTag",
+    JITSI_CONFIG = "jitsiConfig",
+    JITSI_INTERFACE_CONFIG = "jitsiInterfaceConfig",
+    JITSI_ROOM = "jitsiRoom",
+    JITSI_TRIGGER = "jitsiTrigger",
+    JITSI_TRIGGER_MESSAGE = "jitsiTriggerMessage",
+    JITSI_URL = "jitsiUrl",
+    JITSI_WIDTH = "jitsiWidth",
+    JITSI_NO_PREFIX = "jitsiNoPrefix",
+    JITSI_CLOSABLE = "jitsiClosable",
+    LISTENER_MEGAPHONE = "listenerMegaphone",
+    NAME = "name",
+    OPEN_TAB = "openTab",
+    OPEN_WEBSITE = "openWebsite",
+    OPEN_WEBSITE_ALLOW_API = "openWebsiteAllowApi",
+    OPEN_WEBSITE_POLICY = "openWebsitePolicy",
+    OPEN_WEBSITE_WIDTH = "openWebsiteWidth",
+    OPEN_WEBSITE_POSITION = "openWebsitePosition",
+    OPEN_WEBSITE_CLOSABLE = "openWebsiteClosable",
+    OPEN_WEBSITE_TRIGGER = "openWebsiteTrigger",
+    OPEN_WEBSITE_TRIGGER_MESSAGE = "openWebsiteTriggerMessage",
+    OPEN_WEBSITE_HIDE_URL = "openWebsiteHideUrl",
+    PLAY_AUDIO = "playAudio",
+    PLAY_AUDIO_LOOP = "playAudioLoop",
+    POLICY = "policy",
+    READABLE_BY = "readableBy",
+    SCRIPT = "script",
+    SCRIPT_DISABLE_MODULE_SUPPORT = "scriptDisableModuleSupport",
+    SILENT = "silent",
+    SPEAKER_MEGAPHONE = "speakerMegaphone",
+    START = "start",
+    START_LAYER = "startLayer",
+    URL = "url",
+    WRITABLE_BY = "writableBy",
+    ZONE = "zone",
+    ZOOM_MARGIN = "zoomMargin",
+}
+
+export const mapCustomEntityDirectionToDirection = (uploadEntityMessageDirection: CustomEntityDirection) => {
+    switch (uploadEntityMessageDirection) {
+        case CustomEntityDirection.Up:
+            return Direction.Up;
+        case CustomEntityDirection.Right:
+            return Direction.Right;
+        case CustomEntityDirection.Down:
+            return Direction.Down;
+        case CustomEntityDirection.Left:
+            return Direction.Left;
+        default:
+            return Direction.Down;
+    }
+};

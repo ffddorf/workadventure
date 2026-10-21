@@ -1,0 +1,299 @@
+import type {
+    HandleRecordingWebhookRequest,
+    MeetingConnectionRestartMessage,
+    SpaceUser,
+} from "@workadventure/messages";
+import * as Sentry from "@sentry/node";
+import type { ICommunicationSpace } from "../Interfaces/ICommunicationSpace";
+import type { IRecordableStrategy } from "../Interfaces/ICommunicationStrategy";
+import type { LiveKitService, RecordingStartInfo } from "../Services/LivekitService";
+
+export class LivekitCommunicationStrategy implements IRecordableStrategy {
+    private usersReady: Set<string> = new Set();
+    private createRoomPromise: Promise<void> | null = null;
+
+    private streamingUsers: Map<string, SpaceUser> = new Map<string, SpaceUser>();
+    private receivingUsers: Map<string, SpaceUser> = new Map<string, SpaceUser>();
+
+    /**
+     * Queue of pending operations per user to prevent race conditions
+     * when users rapidly move between zones.
+     */
+    private pendingOperations: Map<string, Promise<void>> = new Map();
+
+    constructor(
+        private space: ICommunicationSpace,
+        private livekitService: LiveKitService,
+    ) {}
+
+    /**
+     * Queues an operation for a specific user to ensure sequential execution.
+     * This prevents race conditions when addUser/deleteUser are called in rapid succession.
+     */
+    private queueUserOperation(userId: string, operation: () => Promise<void>): Promise<void> {
+        const previousOperation = this.pendingOperations.get(userId) ?? Promise.resolve();
+
+        const newOperation = previousOperation
+            .catch(() => {
+                // Ignore errors from previous operations to continue the queue
+            })
+            .then(async () => {
+                await operation();
+            });
+
+        this.pendingOperations.set(userId, newOperation);
+
+        // Clean up the map when the operation completes
+        newOperation
+            .finally(() => {
+                if (this.pendingOperations.get(userId) === newOperation) {
+                    this.pendingOperations.delete(userId);
+                }
+            })
+            .catch(() => {
+                // Ignore cleanup errors
+            });
+
+        return newOperation;
+    }
+
+    async addUser(user: SpaceUser): Promise<void> {
+        return this.queueUserOperation(user.spaceUserId, async () => {
+            // Check if the user is already streaming
+            if (this.streamingUsers.has(user.spaceUserId)) {
+                console.warn("User already streaming in the room", user.spaceUserId);
+                Sentry.captureMessage(`User already streaming in the room ${user.spaceUserId}`);
+                return;
+            }
+
+            // Ensure the Livekit room is created (only once)
+            if (!this.createRoomPromise) {
+                this.createRoomPromise = this.livekitService.createRoom(this.space.getSpaceName());
+            }
+
+            await this.createRoomPromise;
+
+            // Send invitation to all receiving users if this is the first room creation
+            if (this.receivingUsers.size > 0 && this.streamingUsers.size === 0) {
+                for (const receivingUser of this.receivingUsers.values()) {
+                    this.sendLivekitInvitationMessage(receivingUser).catch((error) => {
+                        console.error(
+                            `Error generating token for user ${receivingUser.spaceUserId} in Livekit:`,
+                            error,
+                        );
+                        Sentry.captureException(error);
+                    });
+                }
+            }
+            // Register the user as streaming
+            this.streamingUsers.set(user.spaceUserId, user);
+
+            // Send invitation to the new user if not already receiving
+            if (!this.receivingUsers.has(user.spaceUserId)) {
+                this.sendLivekitInvitationMessage(user).catch((error) => {
+                    console.error(`Error generating token for user ${user.spaceUserId} in Livekit:`, error);
+                    Sentry.captureException(error);
+                });
+            }
+        });
+    }
+
+    private sendLivekitDisconnectMessage(user: SpaceUser): void {
+        try {
+            this.space.dispatchPrivateEvent({
+                spaceName: this.space.getSpaceName(),
+                receiverUserId: user.spaceUserId,
+                senderUserId: user.spaceUserId,
+                spaceEvent: {
+                    event: {
+                        $case: "livekitDisconnectMessage",
+                        livekitDisconnectMessage: {},
+                    },
+                },
+            });
+        } catch (error) {
+            console.error(`Error dispatching livekitDisconnectMessage for user ${user.spaceUserId}:`, error);
+            Sentry.captureException(error);
+        }
+    }
+
+    deleteUser(user: SpaceUser): void {
+        this.queueUserOperation(user.spaceUserId, async () => {
+            const deleted = this.streamingUsers.delete(user.spaceUserId);
+
+            if (!deleted) {
+                console.warn("User to delete not found in streaming users", user.spaceUserId);
+            }
+
+            // Let's only disconnect from Livekit if the user is not watching in the room anymore
+            if (!this.receivingUsers.has(user.spaceUserId)) {
+                this.sendLivekitDisconnectMessage(user);
+            }
+
+            if (this.streamingUsers.size === 0) {
+                try {
+                    await this.space.stopRecordingByServer();
+                } catch (error) {
+                    console.error(`Error stopping recording for space ${this.space.getSpaceName()}:`, error);
+                    Sentry.captureException(error);
+                }
+
+                this.createRoomPromise = null;
+                for (const receivingUser of this.receivingUsers.values()) {
+                    this.sendLivekitDisconnectMessage(receivingUser);
+                }
+
+                await this.livekitService.deleteRoom(this.space.getSpaceName());
+            }
+        }).catch((error) => {
+            console.error(`Error in deleteUser for ${user.spaceUserId}:`, error);
+            Sentry.captureException(error);
+        });
+    }
+
+    updateUser(user: SpaceUser): void {}
+
+    async initialize(
+        users: ReadonlyMap<string, SpaceUser>,
+        usersToNotify: ReadonlyMap<string, SpaceUser>,
+    ): Promise<void> {
+        for (const user of users.values()) {
+            // We want to add users sequentially
+            // The first user will trigger the room creation (which is async) but for other users, the
+            // room will already be created, and the execution will not wait at all.
+            // eslint-disable-next-line no-await-in-loop
+            await this.addUser(user).catch((error) => {
+                console.error(`Error adding user ${user.spaceUserId} to Livekit:`, error);
+                Sentry.captureException(error);
+            });
+        }
+
+        for (const user of usersToNotify.values()) {
+            // We want to add users sequentially
+            // The first user will trigger the room creation (which is async) but for other users, the
+            // room will already be created, and the execution will not wait at all.
+            // eslint-disable-next-line no-await-in-loop
+            await this.addUserToNotify(user).catch((error) => {
+                console.error(`Error adding user ${user.spaceUserId} to Livekit:`, error);
+                Sentry.captureException(error);
+            });
+        }
+    }
+
+    addUserReady(userId: string): void {
+        this.usersReady.add(userId);
+    }
+
+    canSwitch(): boolean {
+        return this.usersReady.size === this.space.getAllUsers().length;
+    }
+
+    async addUserToNotify(user: SpaceUser): Promise<void> {
+        return this.queueUserOperation(user.spaceUserId, async () => {
+            if (this.receivingUsers.has(user.spaceUserId)) {
+                console.warn("User already receiving in the room", user.spaceUserId);
+                Sentry.captureMessage(`User already receiving in the room ${user.spaceUserId}`);
+                return;
+            }
+
+            this.receivingUsers.set(user.spaceUserId, user);
+
+            if (!this.createRoomPromise) {
+                return;
+            }
+            await this.createRoomPromise;
+
+            // Let's only send the invitation if the user is not already streaming in the room
+            if (!this.streamingUsers.has(user.spaceUserId)) {
+                await this.sendLivekitInvitationMessage(user);
+            }
+        });
+    }
+
+    deleteUserFromNotify(user: SpaceUser): void {
+        this.queueUserOperation(user.spaceUserId, () => {
+            const deleted = this.receivingUsers.delete(user.spaceUserId);
+            if (!deleted) {
+                console.warn("User to delete not found in receiving users", user.spaceUserId);
+            }
+
+            // Let's only disconnect from Livekit if the user is not streaming in the room anymore
+            if (!this.streamingUsers.has(user.spaceUserId)) {
+                this.sendLivekitDisconnectMessage(user);
+            }
+            return Promise.resolve();
+        }).catch((error) => {
+            console.error(`Error in deleteUserFromNotify for ${user.spaceUserId}:`, error);
+            Sentry.captureException(error);
+        });
+    }
+
+    private async sendLivekitInvitationMessage(user: SpaceUser): Promise<void> {
+        const token = await this.livekitService.generateToken(this.space.getSpaceName(), user);
+
+        this.space.dispatchPrivateEvent({
+            spaceName: this.space.getSpaceName(),
+            receiverUserId: user.spaceUserId,
+            senderUserId: user.spaceUserId,
+            spaceEvent: {
+                event: {
+                    $case: "livekitInvitationMessage",
+                    livekitInvitationMessage: {
+                        token: token,
+                        serverUrl: this.livekitService.getLivekitFrontendUrl(),
+                    },
+                },
+            },
+        });
+    }
+
+    public handleMeetingConnectionRestartMessage(
+        meetingConnectionRestartMessage: MeetingConnectionRestartMessage,
+        senderUserId: string,
+    ): void {
+        const senderUser = this.space.getUser(senderUserId);
+        if (!senderUser) {
+            console.warn("User not found in space", senderUserId);
+            return;
+        }
+        this.sendLivekitInvitationMessage(senderUser).catch((error) => {
+            console.error(`Error generating token for user ${senderUser.spaceUserId} in Livekit:`, error);
+            Sentry.captureException(error);
+        });
+    }
+
+    cleanup(): void {
+        for (const user of this.streamingUsers.values()) {
+            this.deleteUser(user);
+        }
+        for (const user of this.receivingUsers.values()) {
+            this.deleteUserFromNotify(user);
+        }
+        this.livekitService.deleteRoom(this.space.getSpaceName()).catch((error) => {
+            console.error(error);
+            Sentry.captureException(error);
+        });
+    }
+    async startRecording(user: SpaceUser, recordingSessionId: string): Promise<RecordingStartInfo> {
+        if (!this.createRoomPromise) {
+            console.warn("Room not created yet");
+            Sentry.captureMessage("[LivekitCommunicationStrategy] Room not created yet when starting recording");
+            throw new Error("Livekit room not created yet");
+        }
+
+        await this.createRoomPromise;
+        return await this.livekitService.startRecording(this.space.getSpaceName(), user, user.uuid, recordingSessionId);
+    }
+    async stopRecording(egressId?: string): Promise<void> {
+        await this.livekitService.stopRecording(egressId);
+    }
+
+    async handleLivekitWebhook(
+        rawBody: Buffer | Uint8Array,
+        authorizationHeader: string | undefined,
+        spaceName: string,
+        recordingSessionId: string,
+    ): Promise<HandleRecordingWebhookRequest | "ignored"> {
+        return this.livekitService.handleLivekitWebhook(rawBody, authorizationHeader, spaceName, recordingSessionId);
+    }
+}

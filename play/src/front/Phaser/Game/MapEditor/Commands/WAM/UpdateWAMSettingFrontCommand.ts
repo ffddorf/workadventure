@@ -1,0 +1,95 @@
+import {
+    MegaphoneSettings,
+    UpdateWAMSettingCommand,
+    type WAMFileFormat,
+    WAMSettingsUtils,
+} from "@workadventure/map-editor";
+
+import type { UpdateWAMSettingsMessage } from "@workadventure/messages/src/ts-proto-generated/messages";
+import type { FrontCommandInterface } from "../FrontCommandInterface";
+import type { RoomConnection } from "../../../../../Connection/RoomConnection";
+import { localUserStore } from "../../../../../Connection/LocalUserStore";
+import { megaphoneCanBeUsedStore, megaphoneSpaceSettingsStore } from "../../../../../Stores/MegaphoneStore";
+
+export class UpdateWAMSettingFrontCommand extends UpdateWAMSettingCommand implements FrontCommandInterface {
+    public constructor(
+        wam: WAMFileFormat,
+        updateWAMSettingsMessage: UpdateWAMSettingsMessage,
+        private userTags: string[],
+        private roomUrl: string,
+        id?: string,
+    ) {
+        super(wam, updateWAMSettingsMessage, id);
+    }
+
+    public getUndoCommand(): UpdateWAMSettingFrontCommand {
+        if (this.updateWAMSettingsMessage.message?.$case === "updateMegaphoneSettingMessage") {
+            const previousMegaphone = this.oldConfig?.megaphone;
+            return new UpdateWAMSettingFrontCommand(
+                this.wam,
+                {
+                    message: {
+                        $case: "updateMegaphoneSettingMessage",
+                        updateMegaphoneSettingMessage: {
+                            settings: previousMegaphone ? { ...previousMegaphone } : undefined,
+                        },
+                    },
+                },
+                this.userTags,
+                this.roomUrl,
+            );
+        }
+        if (this.updateWAMSettingsMessage.message?.$case === "updateRecordingSettingMessage") {
+            const previousRecording = this.oldConfig?.recording;
+            return new UpdateWAMSettingFrontCommand(
+                this.wam,
+                {
+                    message: {
+                        $case: "updateRecordingSettingMessage",
+                        updateRecordingSettingMessage: {
+                            settings: previousRecording ? { ...previousRecording } : undefined,
+                        },
+                    },
+                },
+                this.userTags,
+                this.roomUrl,
+            );
+        }
+
+        return this;
+    }
+
+    public async execute(): Promise<void> {
+        await super.execute();
+
+        const message: UpdateWAMSettingsMessage["message"] = this.updateWAMSettingsMessage.message;
+        if (message?.$case === "updateMegaphoneSettingMessage" || message?.$case === "updateRecordingSettingMessage") {
+            const megaphoneSettings = MegaphoneSettings.optional().parse(this.wam.settings?.megaphone);
+
+            megaphoneCanBeUsedStore.set(WAMSettingsUtils.canUseMegaphone(this.wam.settings, this.userTags));
+
+            const megaphoneSpaceName = WAMSettingsUtils.getMegaphoneUrl(
+                this.wam.settings,
+                new URL(this.roomUrl).host,
+                this.roomUrl,
+            );
+            if (!megaphoneSpaceName || !megaphoneSettings) {
+                megaphoneSpaceSettingsStore.set(undefined);
+            } else {
+                megaphoneSpaceSettingsStore.set({
+                    spaceName: megaphoneSpaceName,
+                    audienceVideoFeedbackActivated: megaphoneSettings.audienceVideoFeedbackActivated ?? false,
+                    canRecord: WAMSettingsUtils.canStartRecordingMegaphone(
+                        this.wam.settings,
+                        this.userTags,
+                        localUserStore.isLogged(),
+                    ),
+                });
+            }
+        }
+    }
+
+    public emitEvent(roomConnection: RoomConnection): void {
+        roomConnection.emitUpdateWAMSettingMessage(this.commandId, this.updateWAMSettingsMessage);
+    }
+}

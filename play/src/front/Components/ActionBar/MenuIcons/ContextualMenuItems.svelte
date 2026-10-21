@@ -1,0 +1,84 @@
+<script lang="ts">
+    import { getContext } from "svelte";
+
+    import { gameManager } from "../../../Phaser/Game/GameManager";
+    import { audioManagerVisibilityStore } from "../../../Stores/AudioManagerStore";
+    import { bottomActionBarVisibilityStore } from "../../../Stores/BottomActionBarStore";
+    import { inLivekitStore } from "../../../Stores/MediaStore";
+    import { inExternalServiceStore } from "../../../Stores/MyMediaStore";
+    import { raiseHandAvailableStore } from "../../../Stores/RaiseHandAvailabilityStore";
+    import { onboardingStore } from "../../../Stores/OnboardingStore";
+    import { followStateStore } from "../../../Stores/FollowStore";
+    import { requestedMegaphoneStore } from "../../../Stores/MegaphoneStore";
+    import { currentPlayerLockableAreasStore } from "../../../Stores/CurrentPlayerAreaLockStore";
+    import { currentPlayerGroupLockStateStore } from "../../../Stores/CurrentPlayerGroupStore";
+    import { localUserStore } from "../../../Connection/LocalUserStore";
+    import LL from "../../../../i18n/i18n-svelte";
+
+    import AppsMenuItem from "./AppsMenuItem.svelte";
+    import FollowMenuItem from "./FollowMenuItem.svelte";
+    import EmojiMenuItem from "./EmojiMenuItem.svelte";
+    import LockDiscussionMenuItem from "./LockDiscussionMenuItem.svelte";
+    import MusicMenuItem from "./MusicMenuItem.svelte";
+    import HeaderMenuItem from "./HeaderMenuItem.svelte";
+    import MegaphoneMenuItem from "./MegaphoneMenuItem.svelte";
+    import RaiseHandMenuItem from "./RaiseHandMenuItem.svelte";
+    import RecordingMenuItem from "./RecordingMenuItem.svelte";
+    import { createRecordingMenuStateStore } from "./RecordingMenuUtils";
+
+    const inProfileMenu = getContext("profileMenu");
+
+    const gameScene = gameManager.getCurrentGameScene();
+    const recording = gameManager.currentStartedRoom.recording;
+    const recordingMenuState = createRecordingMenuStateStore(gameScene.spaceRegistry, {
+        canStartRecording: localUserStore.isLogged() && recording?.buttonState === "enabled",
+        isUserLoggedIn: localUserStore.isLogged(),
+        roomButtonState: recording?.buttonState,
+    });
+
+    // These menu items are displayed to the left of the camera/microphone icons.
+    // They switch automatically to the profile menu when the screen is small.
+</script>
+
+{#if inProfileMenu && ($audioManagerVisibilityStore !== "hidden" || $bottomActionBarVisibilityStore)}
+    <HeaderMenuItem label={$LL.menu.sub.contextualActions()} />
+{/if}
+
+{#if $audioManagerVisibilityStore !== "hidden"}
+    <MusicMenuItem />
+{/if}
+
+{#if !inProfileMenu}
+    <EmojiMenuItem />
+    <AppsMenuItem />
+{/if}
+
+{#if ($bottomActionBarVisibilityStore && !$inLivekitStore) || $followStateStore !== "off"}
+    <!-- <ChangeLayoutMenuItem /> -->
+
+    <FollowMenuItem />
+{/if}
+
+{#if $currentPlayerLockableAreasStore.length > 0 || ($bottomActionBarVisibilityStore && !$inLivekitStore && $currentPlayerGroupLockStateStore !== undefined) || $onboardingStore === "lockBubble"}
+    <LockDiscussionMenuItem />
+{/if}
+
+{#if $recordingMenuState.shouldDisplayButton}
+    <RecordingMenuItem {recordingMenuState} />
+{/if}
+
+{#if $requestedMegaphoneStore}
+    <MegaphoneMenuItem />
+{/if}
+
+<!-- Single control for the whole "ask to speak" lifecycle: shown to raise the hand in every remote conversation
+     (meeting room, megaphone audience, proximity bubble — a zone can turn it off), and kept on stage (green "live"
+     state) once the floor is granted so the user can hand it back. See raiseHandAvailableStore. -->
+{#if !$inExternalServiceStore && $raiseHandAvailableStore}
+    <RaiseHandMenuItem />
+{/if}
+
+{#if inProfileMenu}
+    <!-- In the profile menu, the apps submenu is displayed at the end (because it contains a heading) -->
+    <AppsMenuItem />
+{/if}

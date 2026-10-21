@@ -1,19 +1,14 @@
-# typescript build
-FROM node:14.15.4-buster-slim@sha256:cbae886186467bbfd274b82a234a1cdfbbd31201c2a6ee63a6893eefcf3c6e76 as builder2
-WORKDIR /usr/src
-COPY uploader/yarn.lock uploader/package.json ./
-RUN yarn install
-COPY uploader .
-ENV NODE_ENV=production
-RUN yarn run tsc
-
 # final production image
-FROM node:14.15.4-buster-slim@sha256:cbae886186467bbfd274b82a234a1cdfbbd31201c2a6ee63a6893eefcf3c6e76
+FROM node:24-trixie-slim
+EXPOSE 8080
 WORKDIR /usr/src
-COPY uploader/yarn.lock uploader/package.json ./
-COPY --from=builder2 /usr/src/dist /usr/src/dist
+RUN apt-get update && apt-get install -y git
+COPY package.json package-lock.json ./
+COPY uploader/package.json uploader/package.json
 ENV NODE_ENV=production
-RUN yarn install --production
+RUN npm ci --omit=dev --workspace workadventureuploader
+COPY uploader uploader
 
+WORKDIR /usr/src/uploader
 USER node
-CMD ["yarn", "run", "runprod"]
+CMD ["npm", "run", "start"]

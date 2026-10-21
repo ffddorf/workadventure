@@ -1,0 +1,143 @@
+services:
+  # overrides for e2e tests to be closer to production
+  # use with command:
+  # docker-compose -f docker-compose.yaml -f docker-compose.e2e.yml up -d --build
+  reverse-proxy:
+    depends_on:
+      play:
+        condition: service_healthy
+      back:
+        condition: service_healthy
+
+  play:
+    image: ghcr.io/workadventure/play-dev-build:amd64-${GITHUB_SHA}
+    build:
+      context: ./
+      dockerfile: play/Dockerfile
+      cache_from:
+        - ghcr.io/workadventure/play-dev-build:amd64-${GITHUB_SHA}
+      args:
+        BUILDKIT_INLINE_CACHE: 1
+    working_dir: /usr/src/play
+    command: npm run start
+    volumes: []
+    environment:
+      ENABLE_OPENAPI_ENDPOINT: "true"
+      STARTUP_COMMAND_0: ""
+      STARTUP_COMMAND_1: ""
+      STARTUP_COMMAND_2: ""
+      STARTUP_COMMAND_3: ""
+      STARTUP_COMMAND_4: ""
+      STARTUP_COMMAND_5: ""
+      MAP_EDITOR_ALLOWED_USERS: ""
+      MAP_EDITOR_ALLOW_ALL_USERS: "false"
+      OPID_SCOPE: profile openid email tags-scope
+      # The production image serves its own assets (no Vite dev server here)
+      ASSETS_URL: ""
+      ASSETS_INTERNAL_URL: ""
+      # Increasing Woka speed to make tests faster
+      WOKA_SPEED: 27
+      # Disable tutorial
+      ENABLE_TUTORIAL: "false"
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.play.rule=Host(`play.workadventure.localhost`)"
+      - "traefik.http.routers.play.entryPoints=web"
+      - "traefik.http.routers.play.priority=1"
+      - "traefik.http.routers.play.service=play"
+      - "traefik.http.services.play.loadbalancer.server.port=3000"
+      - "traefik.http.routers.play-ws.rule=Host(`play.workadventure.localhost`) && PathPrefix(`/ws/`)"
+      - "traefik.http.routers.play-ws.entryPoints=web"
+      - "traefik.http.routers.play-ws.priority=2"
+      - "traefik.http.routers.play-ws.service=play-ws"
+      - "traefik.http.services.play-ws.loadbalancer.server.port=3001"
+      - "traefik.http.services.play-ws.loadbalancer.sticky.cookie=true"
+      - "traefik.http.services.play-ws.loadbalancer.sticky.cookie.name=wa_ws_affinity"
+      - "traefik.http.services.play-ws.loadbalancer.sticky.cookie.httpOnly=true"
+      - "traefik.http.services.play-ws.loadbalancer.sticky.cookie.sameSite=lax"
+  back:
+    image: ghcr.io/workadventure/back-dev-build:amd64-${GITHUB_SHA}
+    build:
+      context: ./
+      dockerfile: back/Dockerfile
+      cache_from:
+        - ghcr.io/workadventure/back-dev-build:amd64-${GITHUB_SHA}
+      args:
+        BUILDKIT_INLINE_CACHE: 1
+    command: npm run runprod
+    working_dir: /usr/src/back
+    volumes: []
+    environment:
+      ENABLE_OPENAPI_ENDPOINT: "false"
+      STARTUP_COMMAND_0: ""
+      STARTUP_COMMAND_1: ""
+      STARTUP_COMMAND_2: ""
+
+  map-storage:
+    image: ghcr.io/workadventure/map-storage-dev-build:amd64-${GITHUB_SHA}
+    build:
+      context: ./
+      dockerfile: map-storage/Dockerfile
+      cache_from:
+        - ghcr.io/workadventure/map-storage-dev-build:amd64-${GITHUB_SHA}
+      args:
+        BUILDKIT_INLINE_CACHE: 1
+    working_dir: /usr/src/map-storage
+    command: npm run start
+    volumes: []
+    environment:
+      STARTUP_COMMAND_1: ""
+      STARTUP_COMMAND_2: ""
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:3000/ping" ]
+      interval: 5s
+      timeout: 5s
+      start_period: 3s
+      retries: 20
+
+  maps:
+    image: ghcr.io/workadventure/maps-dev-build:amd64-${GITHUB_SHA}
+    build:
+      context: maps/
+      cache_from:
+        - ghcr.io/workadventure/maps-dev-build:amd64-${GITHUB_SHA}
+      args:
+        BUILDKIT_INLINE_CACHE: 1
+    volumes: []
+    environment:
+      STARTUP_COMMAND_0: ""
+      STARTUP_COMMAND_1: ""
+
+  uploader:
+    image: ghcr.io/workadventure/uploader-dev-build:amd64-${GITHUB_SHA}
+    build:
+      context: ./
+      dockerfile: uploader/Dockerfile
+      cache_from:
+        - ghcr.io/workadventure/uploader-dev-build:amd64-${GITHUB_SHA}
+      args:
+        BUILDKIT_INLINE_CACHE: 1
+    working_dir: /usr/src/uploader
+    command: npm run start
+    volumes: []
+    environment:
+      ENABLE_OPENAPI_ENDPOINT: "false"
+      STARTUP_COMMAND_1: ""
+
+  synapse:
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:8008" ]
+      interval: 5s
+      timeout: 5s
+      start_period: 3s
+      retries: 20
+
+  everything_started:
+    image: alpine:3.14
+    command: echo "Everything started"
+    depends_on:
+      # Actually, we only check the start of the map-storage because this is the first thing we need (to upload the maps)
+      map-storage:
+        condition: service_healthy
+      synapse:
+        condition: service_healthy

@@ -1,0 +1,165 @@
+<script lang="ts">
+    import { onMount } from "svelte";
+    import { gameManager } from "../../../Phaser/Game/GameManager";
+    import type { ChatUser } from "../../Connection/ChatConnection";
+    import { LL } from "../../../../i18n/i18n-svelte";
+    import { chatSearchBarValue, shownRoomListStore } from "../../Stores/ChatStore";
+    import type { UserProviderMerger } from "../../UserProviderMerger/UserProviderMerger";
+    import { inviteUserActivated } from "../../../Stores/MenuStore";
+    import { analyticsClient } from "../../../Administration/AnalyticsClient";
+    import GuestSubMenu from "../../../Components/Menu/GuestSubMenu.svelte";
+    import { showFloatingUi } from "../../../Utils/svelte-floatingui-show";
+    import ChatHeader from "../ChatHeader.svelte";
+    import UserList from "./UserList.svelte";
+    import { IconChevronUp, IconUserPlus } from "@wa-icons";
+
+    interface Props {
+        userProviderMerger: UserProviderMerger;
+    }
+
+    let { userProviderMerger }: Props = $props();
+
+    const USERS_BY_ROOM_LIMITATION = 200;
+
+    const gameScene = gameManager.getCurrentGameScene();
+    const isMatrixChatEnabled = gameScene.room.isMatrixChatEnabled;
+
+    onMount(() => {
+        if ($shownRoomListStore.length === 0) shownRoomListStore.set([gameScene.roomUrl]);
+    });
+
+    function toggleRoomList(playUri: string) {
+        const expanded = $shownRoomListStore;
+        if (expanded.includes(playUri)) {
+            shownRoomListStore.set(expanded.filter((uri) => uri !== playUri));
+        } else {
+            shownRoomListStore.set([...expanded, playUri]);
+        }
+    }
+
+    let usersByRoom = $derived(userProviderMerger.usersByRoomStore);
+
+    let roomsWithUsers = $derived(
+        Array.from($usersByRoom.entries())
+            .reduce(
+                (roomsWithUsersAcc, [currentPlayUri, currentRoomWithUsers]) => {
+                    let roomName =
+                        currentRoomWithUsers.roomName ??
+                        (currentPlayUri
+                            ? new URL(currentPlayUri, window.location.href).pathname
+                            : $LL.chat.userList.disconnected());
+
+                    if (currentPlayUri === gameManager?.getCurrentGameScene()?.roomUrl)
+                        roomName = $LL.chat.userList.isHere();
+
+                    const mySpaceUserId = gameManager.getCurrentGameScene().connection?.getSpaceUserId();
+
+                    const users = currentRoomWithUsers.users
+                        .filter(({ username }) => {
+                            return username
+                                ? username.toLocaleLowerCase().includes($chatSearchBarValue.toLocaleLowerCase())
+                                : false;
+                        })
+                        .sort((chatUserA: ChatUser, chatUserB: ChatUser) => {
+                            if (chatUserA.spaceUserId === mySpaceUserId) return -1;
+                            if (chatUserB.spaceUserId === mySpaceUserId) return 1;
+                            return chatUserA.username?.localeCompare(chatUserB.username || "") || -1;
+                        })
+                        .slice(0, USERS_BY_ROOM_LIMITATION);
+
+                    if (users.length > 0) roomsWithUsersAcc.push([currentPlayUri ?? "", roomName, users]);
+
+                    return roomsWithUsersAcc;
+                },
+                [] as [string, string, ChatUser[]][],
+            )
+            .sort(([, aKey]: [string, string, ChatUser[]], [, bKey]: [string, string, ChatUser[]]) => {
+                if (aKey === $LL.chat.userList.disconnected()) return 1;
+                if (bKey === $LL.chat.userList.disconnected()) return -1;
+
+                if (aKey === $LL.chat.userList.isHere()) return -1;
+                if (bKey === $LL.chat.userList.isHere()) return 1;
+
+                return aKey.localeCompare(bKey);
+            }),
+    );
+
+    let inviteButtonElement: HTMLButtonElement | undefined = $state();
+    let closeInviteFloatingUi: (() => void) | undefined = undefined;
+    let isInviteMenuOpen = false;
+
+    function toggleInviteMenu() {
+        if (isInviteMenuOpen) {
+            closeInviteFloatingUi?.();
+            closeInviteFloatingUi = undefined;
+            isInviteMenuOpen = false;
+        } else if (inviteButtonElement) {
+            analyticsClient.trackAdminEvent("invite.opened");
+            closeInviteFloatingUi = showFloatingUi(
+                inviteButtonElement,
+                GuestSubMenu,
+                {},
+                { placement: "bottom" },
+                12,
+                true,
+                true,
+                () => {
+                    isInviteMenuOpen = false;
+                    closeInviteFloatingUi = undefined;
+                },
+            );
+            isInviteMenuOpen = true;
+        }
+    }
+</script>
+
+<div class="flex flex-col h-full">
+    <ChatHeader />
+    <div class="flex-1 min-h-0 overflow-x-hidden overflow-y-auto">
+        {#each roomsWithUsers as [playUri, roomName, userInRoom] (playUri)}
+            <div class=" users flex flex-col shrink-0 relative first:pt-[12px]">
+                <button
+                    class="group relative px-3 gap-2 rounded-none text-white/75 hover:text-white h-11 hover:bg-contrast-200/10 w-full flex space-x-2 items-center border border-solid border-x-0 border-t border-b-0 border-white/10 text-white outline-none border-y-0 appearance-none m-0"
+                    data-testid={roomName === $LL.chat.userList.isHere() ? "user-list-room-here" : undefined}
+                    onclick={() => toggleRoomList(playUri)}
+                >
+                    {#if roomName !== $LL.chat.userList.disconnected()}
+                        <div
+                            class="{roomName !== $LL.chat.userList.disconnected()
+                                ? 'bg-white/10'
+                                : 'bg-gray'} text-white min-w-[20px] h-5 text-sm font-semibold flex items-center justify-center rounded-sm"
+                        >
+                            {userInRoom.length}
+                        </div>
+                    {/if}
+                    <div class="text-white text-sm font-bold tracking-widest uppercase grow text-start">
+                        {roomName}
+                    </div>
+                    <div
+                        class="transition-all group-hover:bg-white/10 p-1 rounded aspect-square flex items-center justify-center text-white"
+                    >
+                        <IconChevronUp
+                            class={`transform transition ${$shownRoomListStore.includes(playUri) ? "" : "rotate-180"}`}
+                        />
+                    </div>
+                </button>
+                {#if $shownRoomListStore.includes(playUri)}
+                    <div class="flex flex-col flex-1 h-fit">
+                        <UserList userList={userInRoom} {isMatrixChatEnabled} />
+                    </div>
+                {/if}
+            </div>
+        {/each}
+    </div>
+    {#if $inviteUserActivated}
+        <button
+            bind:this={inviteButtonElement}
+            class="flex items-center gap-2 px-3 py-2.5 mx-2 mt-2 mb-2 rounded-lg bg-white/10 hover:bg-white/20 text-white text-sm font-medium transition-colors shrink-0"
+            onclick={toggleInviteMenu}
+            data-testid="user-list-invite-button"
+        >
+            <IconUserPlus font-size="18" />
+            {$LL.chat.userList.invite()}
+        </button>
+    {/if}
+</div>

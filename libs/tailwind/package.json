@@ -1,0 +1,26 @@
+{
+  "name": "@workadventure/tailwind",
+  "version": "1.0.0",
+  "description": "Tailwind Theme for WorkAdventure",
+  "type": "module",
+  "style": "./style/index.css",
+  "exports": {
+    ".": "./style/index.css",
+    "./style.css": "./style/index.css",
+    "./style/index.css": "./style/index.css"
+  },
+  "author": "WorkAdventure",
+  "license": "ISC",
+  "sideEffects": [
+    "*.css",
+    "style/*.css"
+  ],
+  "dependencies": {
+    "@tailwindcss/forms": "^0.5.11",
+    "@workadventure/design-system": "^3.0.1",
+    "tailwindcss": "^4.3.0"
+  },
+  "files": [
+    "style/index.css"
+  ]
+}

@@ -1,0 +1,185 @@
+import { fileURLToPath } from "url";
+import type { Page } from "@playwright/test";
+import { expect } from "@playwright/test";
+import { gameToBrowserCanvasCoordinates } from "../gameCoordinates";
+import Map from "../map";
+
+class EntityEditor {
+    async selectEntity(page: Page, nb: number, search?: string) {
+        if (search != undefined) {
+            await page.getByPlaceholder("Search").click();
+            await page.getByPlaceholder("Search").fill(search);
+        }
+
+        // Wait for the entity to be displayed
+        await expect(page.getByTestId("entity-item").nth(nb)).toHaveCount(1, { timeout: 30000 });
+        // Click on the entity to select it
+        await page.getByTestId("entity-item").nth(nb).click();
+
+        // That's bad, but we need to wait a bit for the canvas to put the object.
+        // eslint-disable-next-line playwright/no-wait-for-timeout
+        await page.waitForTimeout(1000);
+    }
+
+    async searchEntity(page: Page, search: string) {
+        const startTime = Date.now();
+        const timeout = 5000; // 5 seconds
+
+        // Initial search
+        await page.getByPlaceholder("Search").click();
+        await page.getByPlaceholder("Search").fill(search);
+        await this.wait2Frames(page);
+
+        while (Date.now() - startTime < timeout) {
+            // Check if we find at least one entity
+            const count = await page.getByTestId("entity-item").count();
+            if (count > 0) {
+                return page.getByTestId("entity-item").nth(0);
+            }
+
+            // Nothing found? Maybe it's a race condition (we are after an upload and the entity list is not yet updated).
+            // Let's wait a bit and try again.
+            await page.getByPlaceholder("Search").click();
+            await page.getByPlaceholder("Search").fill("");
+            await this.wait2Frames(page);
+            await page.getByPlaceholder("Search").fill(search);
+            await this.wait2Frames(page);
+            // eslint-disable-next-line playwright/no-wait-for-timeout
+            await page.waitForTimeout(100); // Wait a bit before trying again
+        }
+
+        // If we arrive here, we had no success.
+        return page.getByTestId("entity-item").nth(0);
+    }
+
+    async moveAndClick(page: Page, x: number, y: number) {
+        await this.wait2Frames(page);
+        const coordinates = { x, y };
+        const browserCoordinates = await gameToBrowserCanvasCoordinates(page, coordinates);
+        await page.locator("#game canvas").click({
+            position: browserCoordinates,
+        });
+
+        await this.wait2Frames(page);
+    }
+
+    /**
+     * Walks the avatar to (x, y), approaching it from straight above so that it ends up facing down.
+     *
+     * Entity activation is directional: ActivatablesManager tests a point shifted 24px towards the
+     * direction the avatar faces, so an avatar standing right next to an entity but facing sideways
+     * never triggers it. A single pathfinding move ends facing whichever way its last leg went, and
+     * that depends on where the avatar spawned, hence the teleport straight above the target first.
+     */
+    async walkToFacingDown(page: Page, x: number, y: number) {
+        await Map.teleportToPosition(page, x, y - 2 * 32);
+        await Map.walkToPosition(page, x, y);
+        await this.wait2Frames(page);
+    }
+
+    async clearEntitySelection(page: Page) {
+        await page.getByTestId("clearEntitySelection").click();
+        await expect(page.getByTestId("clearEntitySelection")).toHaveCount(0);
+        await this.wait2Frames(page);
+    }
+
+    async addProperty(page: Page, property: string) {
+        await page.getByTestId(property).click();
+    }
+
+    async setEntityName(page: Page, name: string) {
+        await page.getByPlaceholder("MyObject").click();
+        await page.getByPlaceholder("MyObject").fill(name);
+        await page.getByPlaceholder("MyObject").press("Enter");
+    }
+
+    async setEntityDescription(page: Page, Description: string) {
+        await page.getByText("+ Add description field").click();
+        await page.getByPlaceholder("My object is a...").click();
+        await page.getByPlaceholder("My object is a...").fill(Description);
+        await page.getByPlaceholder("My object is a...").press("Enter");
+    }
+
+    async setEntitySearcheable(page: Page, value: boolean) {
+        await expect(page.getByTestId("searchable")).toBeVisible();
+        await page.getByTestId("searchable").click();
+        await page.locator(".map-editor .sidebar input#searchable").setChecked(value);
+    }
+
+    async uploadTestAsset(page: Page) {
+        await page
+            .getByTestId("uploadCustomAsset")
+            .setInputFiles(fileURLToPath(new URL(`../../assets/${this.getTestAssetFile()}`, import.meta.url)));
+        await page.getByTestId("floatingObject").click();
+        await this.applyEntityModifications(page);
+    }
+
+    async uploadTestAssetWithOddSize(page: Page) {
+        await page
+            .getByTestId("uploadCustomAsset")
+            .setInputFiles(
+                fileURLToPath(new URL(`../../assets/${this.getTestAssetFileWithOddSize()}`, import.meta.url)),
+            );
+        await page.getByTestId("floatingObject").click();
+        await this.applyEntityModifications(page);
+    }
+
+    async openEditEntityForm(page: Page) {
+        await page.getByTestId("editEntity").click();
+    }
+
+    async applyEntityModifications(page: Page) {
+        await page.getByTestId("applyEntityModifications").click();
+        // Wait for a bit for the image to be uploaded.
+        // TODO: find a way to be sure upload succeeded
+        // eslint-disable-next-line playwright/no-wait-for-timeout
+        await page.waitForTimeout(1000);
+        if (await page.getByTestId("entityImageLoader").isVisible({ timeout: 2000 })) {
+            // Check loader end
+            await expect(page.getByTestId("entityImageLoader")).toHaveCount(0, { timeout: 30000 });
+        }
+        // Verify that there is no error message
+        await expect(page.getByTestId("entityImageError")).toHaveCount(0);
+        // Verify that the image uploaded is displayed in the list
+        if (await page.getByTestId("clearCurrentSelection").isVisible()) {
+            // Back to the main list
+            await page.getByTestId("clearCurrentSelection").click();
+        }
+    }
+
+    async removeEntity(page: Page) {
+        await page.getByTestId("removeEntity").click();
+    }
+
+    async setOpenLinkProperty(page: Page, link: string) {
+        await page.locator(".map-editor .sidebar .properties-container input#tabLink").fill(link);
+    }
+
+    async setOpenFileProperty(page: Page) {
+        const fileChooserPromise = page.waitForEvent("filechooser");
+        await page.locator(".map-editor .sidebar .properties-container span#chooseUpload").click();
+        const fileChooser = await fileChooserPromise;
+        await fileChooser.setFiles(fileURLToPath(new URL(`../../assets/ipsum-lorem.pdf`, import.meta.url)));
+    }
+
+    getTestAssetFile() {
+        return `${this.getTestAssetName()}.png`;
+    }
+
+    getTestAssetFileWithOddSize() {
+        return `${this.getTestAssetName()}OddSize.png`;
+    }
+
+    getTestAssetName() {
+        return "testAsset";
+    }
+
+    private async wait2Frames(page: Page) {
+        await page.evaluate(async () => {
+            await window.e2eHooks.waitForNextFrame();
+            await window.e2eHooks.waitForNextFrame();
+        });
+    }
+}
+
+export default new EntityEditor();

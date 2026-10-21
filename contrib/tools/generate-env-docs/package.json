@@ -1,0 +1,19 @@
+{
+  "name": "@workadventure/generate-env-docs",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Generate environment variables documentation from Zod schemas",
+  "scripts": {
+    "generate": "tsx src/generate.ts",
+    "check": "tsx src/check.ts"
+  },
+  "dependencies": {
+    "@types/node": "^25.9.1",
+    "@workadventure/messages": "1.0.0",
+    "@workadventure/shared-utils": "1.0.0",
+    "tsx": "^4.22.3",
+    "typescript": "^5.9.3",
+    "zod": "^3.25.76"
+  }
+}

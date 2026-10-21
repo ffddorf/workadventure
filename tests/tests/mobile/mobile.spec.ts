@@ -1,0 +1,112 @@
+import { expect, test } from "@playwright/test";
+import Menu from "../utils/menu";
+import Map from "../utils/map";
+import { play_url, publicTestMapUrl } from "../utils/urls";
+import { getPage } from "../utils/auth";
+import { isMobileViewport } from "../utils/isMobile";
+
+test.setTimeout(240_000); // Fix Webkit that can take more than 60s
+test.use({
+    baseURL: play_url,
+});
+
+test.describe("Mobile @nowebkit @nodesktop", () => {
+    test.beforeEach(async ({ viewport, browserName }) => {
+        test.skip(!isMobileViewport(viewport) || browserName === "webkit", "Run only on mobile Chromium");
+    });
+
+    test("Successfully bubble discussion with mobile device", async ({ browser }) => {
+        await using page = await getPage(browser, "Bob", Map.url("empty"));
+
+        const positionToDiscuss = {
+            x: 3 * 32,
+            y: 4 * 32,
+        };
+
+        // walk on the position for the test
+        // TODO: find a solution to test Joystick
+        await Map.walkToPosition(page, positionToDiscuss.x, positionToDiscuss.y);
+        // Text open menu
+        await Menu.openMenu(page);
+        // Text close menu
+        await Menu.closeMenu(page);
+
+        // Second browser
+        await using pageAlice = await getPage(browser, "Alice", Map.url("empty"));
+        await pageAlice.evaluate(() => localStorage.setItem("debug", "*"));
+
+        // Move Alice and create a bubble with another user
+        // TODO: find a solution to test Joystick
+        await Map.walkToPosition(pageAlice, positionToDiscuss.x, positionToDiscuss.y);
+
+        await expect(pageAlice.getByText("Bob").first()).toBeVisible();
+        // check if we can still open and close burgerMenu when 2 in proximity chat with cam on
+        await Menu.openMenu(pageAlice);
+        await Menu.closeMenu(pageAlice);
+
+        // check if we can zoom the camera of other user
+        await pageAlice.locator("#cameras-container").locator("button.full-screen-button").nth(1).click();
+
+        // Second browser
+        await using pageJohn = await getPage(browser, "John", Map.url("empty"));
+        await pageJohn.evaluate(() => localStorage.setItem("debug", "*"));
+
+        // Move John and create a bubble with another user
+        // TODO: find a solution to test Joystick
+        await Map.walkToPosition(pageJohn, positionToDiscuss.x, positionToDiscuss.y);
+
+        const box = pageJohn.getByTestId("resize-handle");
+        const boxBoundingBox = box.boundingBox();
+
+        // Ensure the resize handle is visible and get its bounding box
+        await expect(box).toBeVisible();
+        const boundingBox = await boxBoundingBox;
+        expect(boundingBox).not.toBeNull();
+
+        const startX = boundingBox.x + boundingBox.width / 2;
+        const startY = boundingBox.y + boundingBox.height / 2;
+
+        await pageJohn.mouse.move(startX, startY);
+        await pageJohn.mouse.down();
+
+        await pageJohn.mouse.move(startX, startY + 400, { steps: 10 });
+
+        await pageJohn.mouse.up();
+
+        // Expect to see camera of users
+        await expect(pageJohn.getByText("Bob").first()).toBeVisible();
+        await expect(pageJohn.getByText("Alice").first()).toBeVisible();
+
+        // check if we can still open and close burgerMenu when 2 in proximity chat with cam on
+        await Menu.openMenu(pageJohn);
+        await Menu.closeMenu(pageJohn);
+
+        await pageJohn.locator("#cameras-container").locator("button.full-screen-button").nth(1).click();
+    });
+
+    test("Successfully jitsi cowebsite with mobile device", async ({ browser }) => {
+        await using page = await getPage(
+            browser,
+            "Bob",
+            publicTestMapUrl("tests/CoWebsite/cowebsite_jitsiroom.json", "mobile"),
+        );
+
+        // Move to open a cowebsite
+        await page.locator("#body").press("ArrowDown", { delay: 200 });
+        await page.locator("#body").press("ArrowRight", { delay: 3000 });
+        // Now, let's move player 2 to the speaker zone
+
+        // Click on the button to close the cowebsite
+        await page.getByTestId("tab1").getByRole("button", { name: "Close" }).click();
+
+        // Click on the button to close the Jitsi
+        await page.getByTestId("tab1").getByRole("button", { name: "Close" }).click();
+
+        // Check that the cowebsite is hidden
+        await expect(page.getByTestId("tab1").getByRole("button", { name: "Close" })).toBeHidden({
+            timeout: 10000,
+        });
+    });
+
+    // TODO: create test to interact with another object
+});

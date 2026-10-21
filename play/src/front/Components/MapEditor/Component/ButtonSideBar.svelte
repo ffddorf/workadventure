@@ -1,0 +1,72 @@
+<script lang="ts">
+    import type { LocalizedString } from "typesafe-i18n";
+    import type { EditorToolName } from "../../../Phaser/Game/MapEditor/MapEditorModeManager";
+    import { mapEditorSelectedToolStore } from "../../../Stores/MapEditorStore";
+    import { createFloatingUiActions } from "../../../Utils/svelte-floatingui";
+
+    interface Props {
+        tool: { toolName: EditorToolName; img: string; tooltiptext: LocalizedString };
+        onclick?: () => void;
+    }
+
+    let { tool, onclick }: Props = $props();
+
+    let activeTooltip = $state(false);
+
+    const [floatingUiRef, floatingUiContent, arrowAction] = createFloatingUiActions(
+        {
+            placement: "left",
+            //strategy: 'fixed',
+        },
+        16,
+    );
+</script>
+
+<!-- svelte-ignore a11y_no_static_element_interactions -->
+<div
+    class="tool-button"
+    use:floatingUiRef
+    onmouseenter={() => (activeTooltip = true)}
+    onmouseleave={() => (activeTooltip = false)}
+>
+    <button
+        class="p-3 aspect-square w-12 rounded {$mapEditorSelectedToolStore === tool.toolName
+            ? 'bg-secondary'
+            : 'hover:bg-white/10'}"
+        id={tool.toolName}
+        class:active={$mapEditorSelectedToolStore === tool.toolName}
+        onclick={(event) => {
+            event.preventDefault();
+            onclick?.();
+        }}
+        type="button"
+    >
+        <img draggable="false" class="h-6 w-6" src={tool.img} alt="open tool {tool.toolName}" />
+    </button>
+    {#if activeTooltip}
+        <div
+            use:floatingUiContent
+            class="absolute tooltip bg-contrast/80 backdrop-blur rounded p-2 text-white text-sm text-nowrap"
+        >
+            <div class="!top-[30%] !-translate-x-1/2" use:arrowAction></div>
+            {tool.tooltiptext}
+        </div>
+    {/if}
+</div>
+
+<style>
+    .tooltip {
+        opacity: 0;
+        transition: opacity 0.3s ease-in-out;
+        animation: fadeIn 0.3s forwards;
+    }
+
+    @keyframes fadeIn {
+        from {
+            opacity: 0;
+        }
+        to {
+            opacity: 1;
+        }
+    }
+</style>

@@ -1,0 +1,88 @@
+import type { Readable, Writable } from "svelte/store";
+import type { RemoteVideoTrack } from "livekit-client";
+import type { WorkAdventureComponent } from "../../types/component";
+import type { PeerStatus } from "../WebRtc/RemotePeer";
+import type { WebRtcStats } from "../Components/Video/WebRtcStats";
+import type { LocalEncoderStats } from "../WebRtc/LocalEncoderStats";
+import type { VideoConfig } from "../Api/Events/Ui/PlayVideoEvent";
+
+export interface LivekitStreamable {
+    type: "livekit";
+    remoteVideoTrack: Readable<RemoteVideoTrack | undefined>;
+    readonly streamStore: Readable<MediaStream | undefined>;
+    readonly isBlocked: Readable<boolean>;
+    acquireVideoSubscription: () => () => void;
+}
+
+export interface WebRtcStreamable {
+    type: "webrtc";
+    readonly streamStore: Readable<MediaStream | undefined>;
+    readonly isBlocked: Readable<boolean>;
+    /**
+     * Called when the display dimensions of the video change.
+     * Used for adaptive bitrate and resolution control.
+     * Implementations that don't support adaptive video can leave this as a no-op.
+     */
+    setDimensions: (width: number, height: number) => void;
+}
+
+export interface ScriptingVideoStreamable {
+    type: "scripting";
+    url: string;
+    config: VideoConfig;
+    readonly isBlocked: Readable<boolean>;
+}
+
+export interface ComponentStreamable {
+    type: "component";
+    component: WorkAdventureComponent;
+    readonly isBlocked: Readable<boolean>;
+}
+
+export type StreamCategory = "video" | "screenSharing" | "scripting" | "component";
+
+// Our own screen capture: local preview + the outgoing peers that send it.
+export const LOCAL_SCREEN_SHARING_STREAM_ID = "localScreenSharingStream";
+
+export interface Streamable {
+    readonly uniqueId: string;
+    readonly media: LivekitStreamable | WebRtcStreamable | ScriptingVideoStreamable | ComponentStreamable;
+    readonly volumeStore: Readable<number[] | undefined> | undefined;
+    /**
+     * True when this streamable currently has a video stream that should be displayed.
+     * Note: this value is tied to the real transport (WebRTC, Livekit, ...), not to the spaceUser cameraState
+     */
+    readonly hasVideo: Readable<boolean>;
+    /**
+     * True when this streamable currently has audio, symmetrically to hasVideo.
+     * Note: this value is tied to the real transport (WebRTC, Livekit, ...), not to the spaceUser microphoneState
+     */
+    readonly hasAudio: Readable<boolean>;
+    readonly statusStore: Readable<PeerStatus>;
+    readonly name: Readable<string>;
+    readonly showVoiceIndicator: Readable<boolean>;
+    readonly flipX: boolean;
+    // If set to true, the video will be muted (no sound will come out, even if the underlying stream has an audio track attached).
+    // This does not prevent the volume bar from being displayed.
+    // We use this for local camera feedback or for seeAttendees feature (listeners are muted).
+    readonly muteAudio: Writable<boolean>;
+    // In fit mode, the video will fit into the container and be fully visible, even if it does not fill the full container
+    // In cover mode, the video will cover the full container, even if it means that some parts of the video are not visible
+    readonly displayMode: "fit" | "cover";
+    readonly displayInPictureInPictureMode: boolean;
+    readonly usePresentationMode: boolean;
+    readonly spaceUserId: string | undefined;
+    readonly closeStreamable: () => void;
+    /**
+     * Returns true when the VideoBox can safely call closeStreamable() on destroy.
+     * LiveKit and other managed streamables must return false (lifecycle is managed elsewhere).
+     */
+    readonly canCloseStreamable: () => boolean;
+    readonly volume: Writable<number>;
+    readonly videoType: StreamCategory;
+    readonly webrtcStats: Readable<WebRtcStats | undefined> | undefined;
+    /**
+     * Health of our own encoder(s), set on the local camera / screen share feedback tiles only.
+     */
+    readonly senderStats?: Readable<LocalEncoderStats | undefined>;
+}

@@ -1,0 +1,74 @@
+<script lang="ts">
+    import AvatarBox from "../../../Components/UI/Avatar.svelte";
+    import Avatar from "../Avatar.svelte";
+    import type { PictureStore } from "../../../Stores/PictureStore";
+
+    interface Props {
+        typingMembers: { id: string; name: string | null; pictureStore: PictureStore }[];
+    }
+
+    let { typingMembers }: Props = $props();
+    const NUMBER_OF_TYPING_MEMBER_TO_DISPLAY = 3;
+</script>
+
+<div class="flex items-end w-full text-gray-300 text-sm m-0 px-2 my-2">
+    {#each typingMembers
+        .map((typingMember, index) => ({ ...typingMember, index }))
+        .slice(0, NUMBER_OF_TYPING_MEMBER_TO_DISPLAY) as typingMember (typingMember.id)}
+        {#if typingMember}
+            <AvatarBox id={`typing-user-${typingMember.id}`} class="overflow-hidden shrink-0">
+                <Avatar
+                    compact
+                    isChatAvatar={true}
+                    pictureStore={typingMember.pictureStore}
+                    fallbackName={typingMember.name ? typingMember.name : "Unknown"}
+                />
+            </AvatarBox>
+        {/if}
+    {/each}
+
+    {#if typingMembers.length > NUMBER_OF_TYPING_MEMBER_TO_DISPLAY}
+        <div
+            class="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-gray-400/90 text-center text-xs font-semibold uppercase text-white -ml-1 chatAvatar"
+        >
+            +{typingMembers.length - NUMBER_OF_TYPING_MEMBER_TO_DISPLAY}
+        </div>
+    {/if}
+    <div
+        class="message rounded-md px-3 py-1.5 rounded-bl-none bg-contrast/90 gap-1 flex items-center justify-center text-sm ml-1"
+    >
+        <div class="animate-bounce-1 h-1 w-1 bg-white/50 rounded-full"></div>
+        <div class="animate-bounce-2 h-1 w-1 bg-white/50 rounded-full"></div>
+        <div class="animate-bounce-3 h-1 w-1 bg-white/50 rounded-full"></div>
+    </div>
+</div>
+
+<style>
+    @keyframes bounce {
+        0%,
+        100% {
+            transform: translateY(0);
+        }
+        50% {
+            transform: translateY(-50%);
+        }
+    }
+
+    .animate-bounce-1 {
+        animation: bounce 1s infinite;
+    }
+
+    .animate-bounce-2 {
+        animation: bounce 1s infinite 0.1s;
+    }
+
+    .animate-bounce-3 {
+        animation: bounce 1s infinite 0.2s;
+    }
+
+    .message {
+        min-width: 0;
+        overflow-wrap: anywhere;
+        position: relative;
+    }
+</style>

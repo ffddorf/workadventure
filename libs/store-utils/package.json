@@ -1,0 +1,44 @@
+{
+  "name": "@workadventure/store-utils",
+  "version": "1.0.0",
+  "description": "Useful Svelte store-related utility Class",
+  "type": "module",
+  "main": "./src/index.ts",
+  "scripts": {
+    "build": "tsc",
+    "lint": "eslint \"{src,apps,libs,test}/**/*.ts\"",
+    "lint-fix": "eslint \"{src,apps,libs,test}/**/*.ts\" --fix",
+    "svelte-check": "svelte-check",
+    "precommit": "lint-staged",
+    "pretty": "prettier --write \"src/**/*.ts\" \"tests/**/*.ts\"",
+    "pretty-check": "prettier --check 'src/**/*.{ts,tsx}' 'tests/**/*.{ts,tsx}'",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest watch",
+    "test:cov": "vitest run --coverage"
+  },
+  "author": "WorkAdventure",
+  "license": "ISC",
+  "devDependencies": {
+    "@types/debug": "^4.1.13",
+    "@types/node": "^25.9.1",
+    "@workadventure/eslint-config": "1.0.0",
+    "eslint": "^9.39.4",
+    "lint-staged": "^17.0.5",
+    "svelte": "^5.55.9",
+    "svelte-check": "^4.4.8",
+    "prettier": "^3.8.3",
+    "typescript": "^5.9.3",
+    "rxjs": "^7.8.2",
+    "vitest": "^4.1.7"
+  },
+  "files": [
+    "src"
+  ],
+  "lint-staged": {
+    "*.ts": [
+      "eslint --fix",
+      "prettier --write"
+    ]
+  }
+}

@@ -1,0 +1,81 @@
+import type { Readable } from "svelte/store";
+import { readable, writable } from "svelte/store";
+import { MapStore } from "@workadventure/store-utils";
+import type {
+    ChatConnectionInterface,
+    ChatRoom,
+    CreateRoomOptions,
+    RoomFolder,
+    ConnectionStatus,
+    ChatUser,
+    ChatRoomMembershipManagement,
+    ChatRoomModeration,
+    ChatRoomNotificationControl,
+} from "./ChatConnection";
+
+export class VoidChatConnection implements ChatConnectionInterface {
+    directRoomsUsers: Readable<ChatUser[]> = readable([]);
+    connectionStatus: Readable<ConnectionStatus> = writable("OFFLINE");
+    directRooms: Readable<
+        (ChatRoom & ChatRoomMembershipManagement & ChatRoomModeration & ChatRoomNotificationControl)[]
+    > = writable([]);
+    rooms: Readable<(ChatRoom & ChatRoomMembershipManagement & ChatRoomModeration & ChatRoomNotificationControl)[]> =
+        writable([]);
+    invitations: Readable<(ChatRoom & ChatRoomMembershipManagement)[]> = writable([]);
+    roomFolders: MapStore<RoomFolder["id"], RoomFolder> = new MapStore();
+    roomCreationInProgress: Readable<boolean> = writable(false);
+    isEncryptionRequiredAndNotSet: Readable<boolean> = writable(false);
+    isGuest: Readable<boolean> = writable(false);
+    hasUnreadMessages: Readable<boolean> = writable(false);
+    folders: Readable<RoomFolder[]> = writable([]);
+    shouldRetrySendingEvents: Readable<boolean> = writable(false);
+    nbUnreadRoomsMessages: Readable<number> = writable(0);
+    nbUnreadDirectRoomsMessages: Readable<number> = writable(0);
+    nbUnreadInvitationsMessages: Readable<number> = writable(0);
+    retrySendingEvents: () => Promise<void> = () => Promise.resolve();
+
+    createRoom(roomOptions: CreateRoomOptions): Promise<{ room_id: string }> {
+        throw new Error("VoidChatConnection: createRoom is not implemented.");
+    }
+
+    createFolder(roomOptions: CreateRoomOptions): Promise<{ room_id: string }> {
+        throw new Error("VoidChatConnection: createFolder is not implemented.");
+    }
+
+    createDirectRoom(userChatId: string): Promise<(ChatRoom & ChatRoomMembershipManagement) | undefined> {
+        throw new Error("VoidChatConnection: createDirectRoom is not implemented.");
+    }
+
+    getDirectRoomFor(userChatId: string): Promise<(ChatRoom & ChatRoomMembershipManagement) | undefined> {
+        return Promise.resolve(undefined);
+    }
+
+    searchAccessibleRooms(searchText: string): Promise<{ id: string; name: string | undefined }[]> {
+        return Promise.resolve([]);
+    }
+
+    joinRoom(roomId: string): Promise<ChatRoom | undefined> {
+        return Promise.resolve(undefined);
+    }
+
+    getRoomByID(roomId: string): ChatRoom {
+        throw new Error("Method not implemented.");
+    }
+
+    searchChatUsers(searchText: string): Promise<{ id: string; name: string | undefined }[] | undefined> {
+        return Promise.resolve(undefined);
+    }
+
+    initEndToEndEncryption(): Promise<void> {
+        return Promise.resolve();
+    }
+
+    isUserExist(userId: string): Promise<boolean> {
+        return Promise.resolve(false);
+    }
+
+    destroy(): Promise<void> {
+        return Promise.resolve();
+    }
+    clearListener(): void {}
+}

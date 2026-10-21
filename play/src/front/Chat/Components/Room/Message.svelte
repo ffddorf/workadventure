@@ -1,0 +1,283 @@
+<script lang="ts">
+    import { derived, readable } from "svelte/store";
+    import type { Readable } from "svelte/store";
+    import type {
+        ChatMessage,
+        ChatMessageType,
+        ChatRoomMember,
+        ChatThreadSummary,
+    } from "../../Connection/ChatConnection";
+    import type { WorkAdventureComponent } from "../../../../types/component";
+    import LL, { locale } from "../../../../i18n/i18n-svelte";
+    import AvatarBox from "../../../Components/UI/Avatar.svelte";
+    import Avatar from "../Avatar.svelte";
+
+    import { resolveChatUserColor } from "../../Connection/Matrix/services/WaMatrixProfileService";
+    import { getMatrixClientForChatTint } from "../../Utils";
+    import { selectedChatMessageToEdit, selectedChatMessageToReply } from "../../Stores/ChatStore";
+    import { selectedRoomStore } from "../../Stores/SelectRoomStore";
+    import { isThreadPanelEnabledStore, selectedThreadStore } from "../../Stores/SelectedThreadStore";
+    import { roomSidePanelStore } from "../../Stores/RoomSidePanelStore";
+    import MessageOptions from "./MessageOptions.svelte";
+    import MessageImage from "./Message/MessageImage.svelte";
+    import MessageText from "./Message/MessageText.svelte";
+    import MessageFile from "./Message/MessageFile.svelte";
+    import MessageAudioFile from "./Message/MessageAudioFile.svelte";
+    import MessageVideoFile from "./Message/MessageVideoFile.svelte";
+    import MessageEdition from "./MessageEdition.svelte";
+    import MessageReactions from "./MessageReactions.svelte";
+    import MessageIncoming from "./Message/MessageIncoming.svelte";
+    import MessageOutcoming from "./Message/MessageOutcoming.svelte";
+    import Message from "./Message.svelte";
+    import ThreadSummary from "./ThreadSummary.svelte";
+    import { IconTrash } from "@wa-icons";
+
+    interface Props {
+        message: ChatMessage;
+        replyDepth?: number;
+        showHeader?: boolean;
+        /** Matrix rooms: member avatars follow Matrix profile (same pipeline as DM row / room list). */
+        membersForMessageAvatars?: Readable<readonly ChatRoomMember[]>;
+        /** Root message reply preview; hide inside an open thread timeline (main room only). */
+        showThreadSummary?: boolean;
+    }
+
+    let {
+        message,
+        replyDepth = 0,
+        showHeader = true,
+        membersForMessageAvatars = undefined,
+        showThreadSummary = true,
+    }: Props = $props();
+
+    let messageRef: HTMLDivElement | undefined = $state();
+
+    let {
+        id,
+        sender,
+        isMyMessage,
+        date,
+        content,
+        quotedMessage,
+        isQuotedMessage,
+        type,
+        isDeleted,
+        isModified,
+        reactions,
+    } = $derived(message);
+
+    let messageFromSystem = $derived(type === "incoming" || type === "outcoming");
+
+    const messageType: { [key in ChatMessageType]: WorkAdventureComponent } = {
+        image: MessageImage,
+        text: MessageText,
+        file: MessageFile,
+        audio: MessageAudioFile,
+        video: MessageVideoFile,
+        incoming: MessageIncoming,
+        outcoming: MessageOutcoming,
+        proximity: MessageText,
+    };
+
+    let reactionsWithUsers = $derived(
+        derived(
+            [reactions, ...Array.from(reactions.values()).map((reaction) => reaction.users)],
+            ([$reactions, ...$users]) => {
+                return Array.from($reactions.values()).filter((reaction) => reaction.users.size > 0);
+            },
+        ),
+    );
+    const emptyThreadSummary = readable<ChatThreadSummary | null>(null);
+
+    let messageSenderAvatarColor = $derived(
+        resolveChatUserColor(message.sender?.chatId ?? "", message.sender?.color, getMatrixClientForChatTint()),
+    );
+
+    let roomMembersList = $derived(membersForMessageAvatars ? $membersForMessageAvatars : undefined);
+    let memberForSender = $derived(
+        roomMembersList && message.sender?.chatId
+            ? roomMembersList.find((m) => m.id === message.sender!.chatId)
+            : undefined,
+    );
+    let messageAvatarPictureStore = $derived(memberForSender?.pictureStore ?? message.sender?.pictureStore);
+    let waParensStore = $derived(memberForSender?.waDisplayNameIfDifferent);
+    let waDisplayNameParens = $derived($waParensStore ? $waParensStore : undefined);
+    let threadSummary = $derived(message.threadSummary ?? emptyThreadSummary);
+    let hasThreadSummary = $derived(
+        showThreadSummary && replyDepth === 0 && !isQuotedMessage && !!$threadSummary && $threadSummary.replyCount > 0,
+    );
+
+    async function openThread() {
+        const thread = await message.openThread?.();
+        if (!thread) {
+            return;
+        }
+
+        selectedChatMessageToReply.set(null);
+
+        if ($isThreadPanelEnabledStore) {
+            selectedRoomStore.set(thread.parentRoom);
+            roomSidePanelStore.open("threads");
+            selectedThreadStore.set(thread);
+            return;
+        }
+
+        selectedThreadStore.clear();
+        selectedRoomStore.set(thread);
+    }
+</script>
+
+<div
+    id="message"
+    tabindex="-1"
+    class={`${isMyMessage && "self-end flex-row-reverse relative"} ${
+        messageFromSystem && "justify-center"
+    } select-text block-user-action messageContainer items-center`}
+    bind:this={messageRef}
+>
+    <div
+        style={replyDepth === 0 ? "max-width: calc( 100% - 50px );" : "padding-left: 0"}
+        class="flex gap-2 justify-start overflow-visible relative {replyDepth === 0
+            ? 'max-w-[calc(100% - 100px)]'
+            : ''} {!$isDeleted ? 'group-hover/message:pb-4' : ''} {isMyMessage
+            ? 'justify-end grid-container-inverted pr-4'
+            : 'justify-start pl-3'}"
+    >
+        {#if (!isMyMessage || isQuotedMessage) && sender !== undefined && replyDepth === 0 && showHeader}
+            <AvatarBox class="overflow-hidden mt-4 shrink-0">
+                <Avatar
+                    compact
+                    pictureStore={messageAvatarPictureStore}
+                    fallbackName={sender?.username}
+                    color={messageSenderAvatarColor}
+                />
+            </AvatarBox>
+        {/if}
+
+        <div class="flex flex-col justify-end max-w-full {replyDepth === 0 && !showHeader ? 'ml-12' : ''}">
+            {#if replyDepth <= 0 && showHeader}
+                <div
+                    class="w-full h-fit text-xs px-2 flex justify-between items-end gap-2 overflow-x-hidden"
+                    class:flex-row-reverse={isMyMessage}
+                    hidden={isQuotedMessage || messageFromSystem}
+                >
+                    <span
+                        hidden={messageFromSystem}
+                        class="text-nowrap text-sm font-bold {!isMyMessage ? 'text-white' : 'text-white/75'}"
+                        >{isMyMessage ? $LL.chat.you() : sender?.username}{#if waDisplayNameParens}<span
+                                class="text-xs font-normal opacity-75 ml-0.5">({waDisplayNameParens})</span
+                            >{/if}</span
+                    >
+                    <span class={`text-xs font-condensed text-nowrap opacity-75 ${isMyMessage ? "mr-1" : "ml-1"}`}
+                        >{date?.toLocaleTimeString($locale, {
+                            hour: "2-digit",
+                            minute: "2-digit",
+                        })}</span
+                    >
+                </div>
+            {/if}
+            <div
+                class="message rounded-md
+                    {$isDeleted && !isMyMessage && !messageFromSystem && replyDepth === 0 ? 'bg-white/10' : ''}
+                    {$isDeleted && isMyMessage && !messageFromSystem && replyDepth === 0 ? 'bg-white/10' : ''}
+                    {!isMyMessage && !messageFromSystem && !$isDeleted && replyDepth === 0
+                    ? 'bg-contrast/90 rounded-bl-none'
+                    : ''}
+                    {isMyMessage && !messageFromSystem && !$isDeleted && replyDepth === 0
+                    ? 'bg-secondary/90 rounded-br-none'
+                    : ''}
+                    {$reactionsWithUsers.length > 0 && !$isDeleted && replyDepth === 0 ? 'mb-4 p-0.5' : ''}
+                    {!isQuotedMessage ? 'my' : ''}"
+            >
+                {#if $isDeleted}
+                    <p class="py-2 px-2 m-0 text-xs flex items-center italic gap-2 opacity-50">
+                        <IconTrash font-size={12} />
+                        {$LL.chat.messageDeleted()}
+                    </p>
+                {:else if $selectedChatMessageToEdit !== null && $selectedChatMessageToEdit.id === id}
+                    <MessageEdition message={$selectedChatMessageToEdit} />
+                {:else}
+                    {#if replyDepth > 0}
+                        <div class="px-2 pt-1 text-xxs font-bold">
+                            {isMyMessage ? $LL.chat.you() : sender?.username}{#if waDisplayNameParens}<span
+                                    class="text-xxs font-normal opacity-75 ml-0.5">({waDisplayNameParens})</span
+                                >{/if}
+                        </div>
+                    {/if}
+
+                    {@const MessageComponent = messageType[type]}
+                    <MessageComponent {content} />
+
+                    {#if $reactionsWithUsers.length > 0}
+                        <MessageReactions
+                            classes={isMyMessage ? "bg-secondary/30 right-2" : "bg-contrast/30"}
+                            reactions={$reactionsWithUsers}
+                        />
+                    {/if}
+                    {#if $isModified}
+                        <div class="text-white/50 text-xxs p-0 m-0 px-2 pb-1 text-right">
+                            ({$LL.chat.messageEdited()})
+                        </div>
+                    {/if}
+                {/if}
+
+                {#if quotedMessage && replyDepth < 1 && !$isDeleted}
+                    <div class="p-1 opacity-80">
+                        <div class="response bg-white/10 rounded">
+                            <Message replyDepth={replyDepth + 1} message={quotedMessage} {membersForMessageAvatars} />
+                        </div>
+                    </div>
+                {/if}
+            </div>
+            {#if !isQuotedMessage && !$isDeleted && message.type !== "proximity" && message.type !== "incoming" && message.type !== "outcoming" && ($selectedChatMessageToEdit === null || $selectedChatMessageToEdit.id !== id)}
+                <div
+                    class="options -top-2 absolute z-50 rounded p-1 {!isMyMessage
+                        ? 'right-2 bg-contrast/80'
+                        : 'right-6 bg-secondary/80'}"
+                >
+                    <MessageOptions {message} {messageRef} onOpenThread={openThread} />
+                </div>
+            {/if}
+
+            {#if hasThreadSummary && $threadSummary}
+                <ThreadSummary summary={$threadSummary} {openThread} />
+            {/if}
+        </div>
+    </div>
+</div>
+
+<style>
+    #message {
+        display: flex;
+        align-items: flex-start;
+        position: relative;
+    }
+
+    #message:hover .options {
+        display: flex;
+        flex-direction: row;
+        gap: 2px;
+        transition-delay: 0.15s;
+        opacity: 1;
+    }
+
+    .options {
+        transition: all 0.2s ease-in-out;
+        opacity: 0;
+    }
+
+    .message {
+        min-width: 180px;
+        overflow-wrap: anywhere;
+        position: relative;
+        transition: all 0.2s ease-in-out 0s;
+    }
+
+    .message.my:hover {
+        transition-delay: 0.5s;
+    }
+    .avatar {
+        display: flex;
+        background: none;
+    }
+</style>

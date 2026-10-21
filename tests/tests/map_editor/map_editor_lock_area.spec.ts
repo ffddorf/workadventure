@@ -1,0 +1,259 @@
+import { expect, test } from "@playwright/test";
+import Map from "../utils/map";
+import AreaEditor from "../utils/map-editor/areaEditor";
+import { resetWamMaps } from "../utils/map-editor/uploader";
+import MapEditor from "../utils/mapeditor";
+import Menu from "../utils/menu";
+import { map_storage_url } from "../utils/urls";
+import { getPage } from "../utils/auth";
+import { isMobile } from "../utils/isMobile";
+import EntityEditor from "../utils/map-editor/entityEditor";
+
+test.setTimeout(240_000); // Fix Webkit that can take more than 60s
+test.use({
+    baseURL: map_storage_url,
+});
+
+test.describe("Map editor lockable area @oidc @nomobile @nowebkit", () => {
+    test.beforeEach("Ignore tests on mobile because map editor not available for mobile devices", ({ page }) => {
+        // Map Editor not available on mobile
+        test.skip(isMobile(page), "Map editor is not available on mobile");
+    });
+
+    test.beforeEach("Ignore tests on webkit because of issue with camera and microphone", ({ browserName }) => {
+        // WebKit has issue with camera
+        test.skip(browserName === "webkit", "WebKit has issues with camera/microphone");
+    });
+
+    test("Lock area prevents entry, unlocks when empty, and can be admin-unlocked with SPACE", async ({
+        browser,
+        request,
+    }) => {
+        await resetWamMaps(request);
+        await using page = await getPage(browser, "Admin1", Map.url("empty"));
+        const areaLeftBoundX = 1 * 32;
+
+        // Create an area just to the right of the spawn and make it lockable.
+        await Menu.openMapEditor(page);
+        await MapEditor.openAreaEditor(page);
+        await AreaEditor.drawArea(page, { x: 1 * 32, y: 1 * 32 }, { x: 7 * 32, y: 7 * 32 });
+        await AreaEditor.addProperty(page, "lockableAreaPropertyData");
+        await Menu.closeMapEditor(page);
+
+        // Move admin in the area and lock it.
+        await Map.teleportToPosition(page, 4 * 32, 4 * 32);
+        await expect(page.getByTestId("lock-button")).toBeVisible();
+        await page.getByTestId("lock-button").click();
+        await expect(page.getByTestId("lock-button")).toHaveClass(/bg-danger/);
+
+        // Alice tries to enter the locked area with keyboard and is blocked with the correct message.
+        await using page2 = await getPage(browser, "Alice", Map.url("empty"));
+        const aliceStartPosition = await Map.getPosition(page2);
+        await Map.walkTo(page2, "ArrowRight", 1000);
+
+        await expect(page2.getByText("This area is locked. You cannot enter.")).toBeAttached();
+
+        // Alice tries to enter using a right-click and is also blocked with the correct message.
+        await Map.walkToPosition(page2, 4 * 32, 4 * 32)
+            .then(() => {
+                throw new Error("Alice should not be able to move into the locked area");
+            })
+            .catch(() => {
+                // Expected to fail because area is locked
+            });
+
+        // Admin unlocks the area and Alice can now enter it.
+        await page.getByTestId("lock-button").click();
+        await expect(page.getByTestId("lock-button")).not.toHaveClass(/bg-danger/);
+
+        await Map.walkTo(page2, "ArrowRight", 500);
+        const alicePositionAfterUnlock = await Map.getPosition(page2);
+        expect(alicePositionAfterUnlock.x).toBeGreaterThan(areaLeftBoundX);
+
+        // Reset Alice position before checking auto-unlock when the area becomes empty.
+        await Map.teleportToPosition(page2, aliceStartPosition.x, aliceStartPosition.y);
+
+        // Admin locks again, then leaves the area: lock should auto-clear when area is empty.
+        await page.getByTestId("lock-button").click();
+        await expect(page.getByTestId("lock-button")).toHaveClass(/bg-danger/);
+        await Map.teleportToPosition(page, 0, 3 * 32);
+
+        await Map.walkTo(page2, "ArrowRight", 500);
+        const alicePositionAfterAutoUnlock = await Map.getPosition(page2);
+        expect(alicePositionAfterAutoUnlock.x).toBeGreaterThan(areaLeftBoundX);
+
+        // Alice locks the area again.
+        await Map.teleportToPosition(page2, 4 * 32, 4 * 32);
+        await expect(page2.getByTestId("lock-button")).toBeVisible();
+        await page2.getByTestId("lock-button").click();
+        await expect(page2.getByTestId("lock-button")).toHaveClass(/bg-danger/);
+
+        // Admin is blocked, sees the admin-specific unlock message, then unlocks with SPACE.
+        await Map.walkTo(page, "ArrowRight", 500);
+        await expect(page.getByText(/unlock this area\./i)).toBeAttached();
+        await page.keyboard.press("Space");
+
+        // After unlocking with SPACE, admin can enter the area.
+        await Map.walkTo(page, "ArrowRight", 500);
+        const adminPositionAfterSpaceUnlock = await Map.getPosition(page);
+        expect(adminPositionAfterSpaceUnlock.x).toBeGreaterThan(areaLeftBoundX);
+        // Admin restricts lock permissions to users with only the "admin" tag.
+        await Map.teleportToPosition(page, 0, 3 * 32);
+        await Menu.openMapEditor(page);
+        await MapEditor.openAreaEditor(page);
+        await EntityEditor.moveAndClick(page, 4 * 32, 4 * 32);
+        await expect(page.getByText("Tags allowed to lock/unlock")).toBeVisible();
+        const lockableTagsInput = page.getByPlaceholder("Select rights").first();
+        await lockableTagsInput.click();
+        await lockableTagsInput.fill("admin");
+        await lockableTagsInput.press("Enter");
+        await Menu.closeMapEditor(page);
+        await Map.teleportToPosition(page, 0, 0);
+
+        // Alice is in the area but cannot lock/unlock anymore.
+        await expect(page2.getByTestId("lock-button")).toHaveClass(/opacity-50/);
+
+        // Admin goes back to the area and locks it.
+        await Map.teleportToPosition(page, 6 * 32, 2 * 32);
+        await expect(page.getByTestId("lock-button")).toBeVisible();
+        await page.getByTestId("lock-button").click();
+        await expect(page.getByTestId("lock-button")).toHaveClass(/bg-danger/);
+
+        // Admin opens map editor, selects the area again, and moves the area down by 5 tiles. Nobody should be
+        // left in the area after the move, so it should be automatically unlocked and Alice should be able to enter it again.
+        await Menu.openMapEditor(page);
+        await MapEditor.openAreaEditor(page);
+        await EntityEditor.moveAndClick(page, 4 * 32, 4 * 32);
+        await expect(page.getByText("Tags allowed to lock/unlock")).toBeVisible();
+
+        await AreaEditor.moveArea(page, { x: 1 * 32, y: 1 * 32 }, { x: 7 * 32, y: 2 * 32 }, { x: 0, y: 5 * 32 });
+        await Menu.closeMapEditor(page);
+
+        await Map.walkTo(page2, "ArrowDown", 2000);
+        const alicePositionAfterAreaMove = await Map.getPosition(page2);
+        expect(alicePositionAfterAreaMove.y).toBeGreaterThan(6 * 32);
+        await expect(page2.getByText("This area is locked. You cannot enter.")).toBeHidden();
+    });
+
+    test("Lock area also blocks pathfinding moves of a user allowed to edit the map", async ({ browser, request }) => {
+        await resetWamMaps(request);
+        await using page = await getPage(browser, "Admin1", Map.url("empty"));
+        const areaLeftBoundX = 1 * 32;
+
+        // Create an area just to the right of the spawn and make it lockable.
+        await Menu.openMapEditor(page);
+        await MapEditor.openAreaEditor(page);
+        await AreaEditor.drawArea(page, { x: 1 * 32, y: 1 * 32 }, { x: 7 * 32, y: 7 * 32 });
+        await AreaEditor.addProperty(page, "lockableAreaPropertyData");
+        await Menu.closeMapEditor(page);
+
+        // Admin1 stays out of the area, Alice enters it and locks it.
+        await Map.teleportToPosition(page, 0, 3 * 32);
+        await using page2 = await getPage(browser, "Alice", Map.url("empty"));
+        await Map.teleportToPosition(page2, 4 * 32, 4 * 32);
+        await expect(page2.getByTestId("lock-button")).toBeVisible();
+        await page2.getByTestId("lock-button").click();
+        await expect(page2.getByTestId("lock-button")).toHaveClass(/bg-danger/);
+        // Give the lock broadcast time to reach Admin1's page before he starts his pathfinding move.
+        // eslint-disable-next-line playwright/no-wait-for-timeout
+        await page.waitForTimeout(500);
+
+        // Admin1 can edit the map, which used to remove every area from his pathfinding collision grid. He must not
+        // be able to walk into the locked area with a pathfinding move, which is the code path used by the "talk to"
+        // action of the chat, by a right click on the map and by the scripting API.
+        await Map.walkToPosition(page, 4 * 32, 4 * 32).catch(() => {
+            // Expected: no path can be found into a locked area.
+        });
+        const adminPositionWhileLocked = await Map.getPosition(page);
+        expect(adminPositionWhileLocked.x).toBeLessThan(areaLeftBoundX);
+
+        // Once Alice unlocks the area, the very same move brings Admin1 inside: editing rights are still enough to
+        // enter an area he is not allowed to enter otherwise.
+        await page2.getByTestId("lock-button").click();
+        await expect(page2.getByTestId("lock-button")).not.toHaveClass(/bg-danger/);
+
+        // The unlock broadcast reaches Admin1's client a bit after it has updated Alice's lock button, and a
+        // move started before it arrives runs on a stale collision grid: since #6480 it walks up to the
+        // still-locked area and resolves there, leaving Admin1 outside. Retry the move until his grid has
+        // caught up instead of guessing how long the broadcast takes.
+        await expect
+            .poll(
+                async () => {
+                    await Map.walkToPosition(page, 4 * 32, 4 * 32).catch(() => {
+                        // Still locked on Admin1's side: retry.
+                    });
+                    return (await Map.getPosition(page)).x;
+                },
+                { timeout: 10_000 },
+            )
+            .toBeGreaterThan(areaLeftBoundX);
+    });
+
+    test("Locking an area mid-walk stops or reroutes a pathfinding move", async ({ browser, request }) => {
+        await resetWamMaps(request);
+        await using page = await getPage(browser, "Admin1", Map.url("empty"));
+
+        // A vertical lockable wall covering columns 3-5, leaving row 0 and rows 7-9 free.
+        await Menu.openMapEditor(page);
+        await MapEditor.openAreaEditor(page);
+        await AreaEditor.drawArea(page, { x: 3 * 32, y: 1 * 32 }, { x: 6 * 32, y: 7 * 32 });
+        await AreaEditor.addProperty(page, "lockableAreaPropertyData");
+        await Menu.closeMapEditor(page);
+
+        // The admin stays inside the area to be able to lock it while Alice walks. He stands at the top
+        // of the wall, far from Alice's lane: if the two wokas get close enough, a proximity bubble
+        // forms (even through the wall) and the lock button then opens a picker instead of toggling.
+        await Map.teleportToPosition(page, 4 * 32 + 16, 1 * 32 + 16);
+        await expect(page.getByTestId("lock-button")).toBeVisible();
+
+        await using page2 = await getPage(browser, "Alice", Map.url("empty"));
+        await Map.teleportToPosition(page2, 16, 6 * 32 + 16);
+
+        // Alice starts a slow pathfinding walk towards the vertical middle of the wall (speed 2 ≈
+        // 40px/s, the area border is ~2s away): every neighbouring tile of the destination is inside
+        // the wall too, so once locked the destination is unreachable even for the nearest-available
+        // fallback. The admin locks the area while she is on her way.
+        await Map.startMoveTo(page2, 4 * 32 + 16, 3 * 32 + 16, 2);
+        await page.getByTestId("lock-button").click();
+        await expect(page.getByTestId("lock-button")).toHaveClass(/bg-danger/);
+
+        // Alice walks up to the border, stops there and gets warned. She came from the left, so
+        // stopping outside the area means stopping left of column 3.
+        const stopResult = await Map.waitForMoveToResult(page2);
+        expect(stopResult.cancelled).toBe(true);
+        const alicePositionAfterStop = await Map.getPosition(page2);
+        expect(alicePositionAfterStop.x).toBeLessThan(3 * 32);
+        await expect(page2.getByText("This area is locked. You cannot enter.")).toBeAttached();
+
+        // Alice goes back to her starting point, then the admin unlocks. She then walks towards the
+        // other side of the wall and the admin locks it again while she is on her way.
+        await Map.teleportToPosition(page2, 16, 6 * 32 + 16);
+        await page.getByTestId("lock-button").click();
+        await expect(page.getByTestId("lock-button")).not.toHaveClass(/bg-danger/);
+        // Give the unlock broadcast time to reach Alice's page before she starts her pathfinding move.
+        // eslint-disable-next-line playwright/no-wait-for-timeout
+        await page2.waitForTimeout(500);
+
+        await Map.startMoveTo(page2, 8 * 32 + 16, 6 * 32 + 16, 2);
+        await page.getByTestId("lock-button").click();
+        await expect(page.getByTestId("lock-button")).toHaveClass(/bg-danger/);
+
+        // Alice is rerouted around the locked area and still reaches her destination.
+        const rerouteResult = await Map.waitForMoveToResult(page2);
+        expect(rerouteResult.cancelled).toBe(false);
+        const alicePositionAfterReroute = await Map.getPosition(page2);
+        expect(alicePositionAfterReroute.x).toBeGreaterThan(6 * 32);
+
+        // Walking towards an ALREADY locked area must not be a silent no-op: Alice goes back to her
+        // starting point and walks towards the middle of the wall (still locked). She walks up to the
+        // border, stops there and gets the warning.
+        await Map.teleportToPosition(page2, 16, 6 * 32 + 16);
+        await Map.startMoveTo(page2, 4 * 32 + 16, 3 * 32 + 16, 2);
+        const alreadyLockedResult = await Map.waitForMoveToResult(page2);
+        expect(alreadyLockedResult.cancelled).toBe(true);
+        const alicePositionAfterPreLockedWalk = await Map.getPosition(page2);
+        expect(alicePositionAfterPreLockedWalk.x).toBeGreaterThan(1 * 32);
+        expect(alicePositionAfterPreLockedWalk.x).toBeLessThan(3 * 32);
+        await expect(page2.getByText("This area is locked. You cannot enter.")).toBeAttached();
+    });
+});

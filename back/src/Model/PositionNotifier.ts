@@ -8,19 +8,22 @@
  * The PositionNotifier is important for performance. It allows us to send the position of players only to a restricted
  * number of players around the current player.
  */
-import {
+import type { EmoteEventMessage, SetPlayerDetailsMessage } from "@workadventure/messages";
+import type { Movable } from "@workadventure/shared-utils";
+import type { PositionInterface } from "../Model/PositionInterface";
+import type { RoomSocket } from "../RoomManager";
+import { User } from "../Model/User";
+import type {
     EmoteCallback,
     EntersCallback,
+    GroupUsersUpdatedCallback,
     LeavesCallback,
+    LockGroupCallback,
     MovesCallback,
     PlayerDetailsUpdatedCallback,
-    Zone,
 } from "./Zone";
-import { Movable } from "_Model/Movable";
-import { PositionInterface } from "_Model/PositionInterface";
-import { ZoneSocket } from "../RoomManager";
-import { User } from "../Model/User";
-import { EmoteEventMessage, SetPlayerDetailsMessage } from "../Messages/generated/messages_pb";
+import { Zone } from "./Zone";
+import type { Group } from "./Group";
 
 interface ZoneDescriptor {
     i: number;
@@ -44,13 +47,15 @@ export class PositionNotifier {
     private zones: Zone[][] = [];
 
     constructor(
-        private zoneWidth: number,
-        private zoneHeight: number,
+        private readonly zoneWidth: number,
+        private readonly zoneHeight: number,
         private onUserEnters: EntersCallback,
         private onUserMoves: MovesCallback,
         private onUserLeaves: LeavesCallback,
         private onEmote: EmoteCallback,
-        private onPlayerDetailsUpdated: PlayerDetailsUpdatedCallback
+        private onLockGroup: LockGroupCallback,
+        private onPlayerDetailsUpdated: PlayerDetailsUpdatedCallback,
+        private onGroupUsersUpdated: GroupUsersUpdatedCallback,
     ) {}
 
     private getZoneDescriptorFromCoordinates(x: number, y: number): ZoneDescriptor {
@@ -111,22 +116,24 @@ export class PositionNotifier {
                 this.onUserMoves,
                 this.onUserLeaves,
                 this.onEmote,
+                this.onLockGroup,
                 this.onPlayerDetailsUpdated,
+                this.onGroupUsersUpdated,
                 i,
-                j
+                j,
             );
             this.zones[j][i] = zone;
         }
         return zone;
     }
 
-    public addZoneListener(call: ZoneSocket, x: number, y: number): Set<Movable> {
+    public addZoneListener(call: RoomSocket, x: number, y: number): Set<Movable> {
         const zone = this.getZone(x, y);
         zone.addListener(call);
         return zone.getThings();
     }
 
-    public removeZoneListener(call: ZoneSocket, x: number, y: number): void {
+    public removeZoneListener(call: RoomSocket, x: number, y: number): void {
         const zone = this.getZone(x, y);
         zone.removeListener(call);
     }
@@ -135,6 +142,18 @@ export class PositionNotifier {
         const zoneDesc = this.getZoneDescriptorFromCoordinates(user.getPosition().x, user.getPosition().y);
         const zone = this.getZone(zoneDesc.i, zoneDesc.j);
         zone.emitEmoteEvent(emoteEventMessage);
+    }
+
+    public emitLockGroupEvent(user: User, groupId: number) {
+        const zoneDesc = this.getZoneDescriptorFromCoordinates(user.getPosition().x, user.getPosition().y);
+        const zone = this.getZone(zoneDesc.i, zoneDesc.j);
+        zone.emitLockGroupEvent(groupId);
+    }
+
+    public emitGroupUsersUpdatedEvent(group: Group) {
+        const zoneDesc = this.getZoneDescriptorFromCoordinates(group.getPosition().x, group.getPosition().y);
+        const zone = this.getZone(zoneDesc.i, zoneDesc.j);
+        zone.emitGroupUsersUpdatedEvent(group);
     }
 
     public *getAllUsersInSquareAroundZone(zone: Zone): Generator<User> {

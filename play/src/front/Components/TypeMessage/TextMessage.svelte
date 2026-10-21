@@ -1,0 +1,59 @@
+<script lang="ts">
+    import { fade } from "svelte/transition";
+    import { QuillDeltaToHtmlConverter } from "quill-delta-to-html";
+    import type { Message } from "../../Stores/TypeMessageStore/MessageStore";
+    import { textMessageStore } from "../../Stores/TypeMessageStore/TextMessageStore";
+    import ButtonClose from "../Input/ButtonClose.svelte";
+
+    interface Props {
+        /* eslint-disable svelte/no-at-html-tags */
+        message: Message;
+    }
+
+    let { message }: Props = $props();
+
+    let content = $derived(JSON.parse(message.text));
+    let converter = $derived(new QuillDeltaToHtmlConverter(content.ops, { inlineStyles: true }));
+
+    function closeTextMessage() {
+        textMessageStore.clearMessageById(message.id);
+    }
+
+    function onKeyDown(e: KeyboardEvent) {
+        if (e.key === "Escape") {
+            closeTextMessage();
+        }
+    }
+</script>
+
+<svelte:window onkeydown={onKeyDown} />
+
+<div
+    class="main-text-message bg-contrast/85 rounded backdrop-blur-md flex gap-3 w-3/5 py-3 pl-5 pr-2 max-h-64 shadow-xl pointer-events-auto animate-bounce-in z-[800]"
+    out:fade={{ duration: 150 }}
+>
+    <div class="icon mt-3 text-white text-xl">💬</div>
+    <div class="content-text-message flex text-white max-h-60 w-full overflow-auto mr-6">
+        {@html converter.convert()}
+    </div>
+    <ButtonClose onclick={closeTextMessage} />
+</div>
+
+<style>
+    @keyframes bounce-in {
+        0% {
+            transform: scale(0.5);
+            opacity: 0;
+        }
+        60% {
+            transform: scale(1.05);
+            opacity: 1;
+        }
+        100% {
+            transform: scale(1);
+        }
+    }
+    .animate-bounce-in {
+        animation: bounce-in 0.5s ease-out;
+    }
+</style>

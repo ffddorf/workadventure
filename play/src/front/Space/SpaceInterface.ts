@@ -1,0 +1,221 @@
+import type { Observable, Subject } from "rxjs";
+import type {
+    BackEventMessage,
+    FilterType,
+    InitSpaceUsersMessage,
+    PrivateSpaceEvent,
+    SpaceEvent,
+    SpaceKind,
+    SpaceUser,
+    UpdateSpaceMetadataMessage,
+    VideoQualityReportMessage,
+} from "@workadventure/messages";
+import type { MapStore } from "@workadventure/store-utils";
+import type { Readable } from "svelte/store";
+import type { FloorHolderEntry, RaisedHandEntry } from "@workadventure/shared-utils";
+import type { SimplePeerConnectionInterface, SpacePeerManager } from "./SpacePeerManager/SpacePeerManager";
+import type { VideoBox } from "./VideoBox";
+import type { SpaceStateManager } from "./SpaceStateManager";
+
+/**
+ * An entry of the "raised hands" queue of the space state, in the order hands were raised.
+ * Carries the name because a megaphone speaker without seeAttendees has no SpaceUser for the listeners.
+ */
+export type RaisedHand = RaisedHandEntry;
+
+/**
+ * A user who currently holds the floor (is streaming as a speaker, `megaphoneState === true`) in a meeting.
+ * Used by the host panel to offer taking the floor back. Carries the name for the same reason as RaisedHand.
+ */
+export type FloorSpeaker = FloorHolderEntry;
+
+/**
+ * The raised hands and floor holders of one space, as the "raised hands" panel shows them: one section per space,
+ * so a bubble's queue never mixes with the queue of a megaphone the same user listens to.
+ */
+export interface RaisedHandSection {
+    space: SpaceInterface;
+    hands: RaisedHand[];
+    /** The users holding the floor, the local user excepted. */
+    speakers: FloorSpeaker[];
+    /**
+     * Whether the local user is on air in this space as its host, not as a guest given the floor: the front-side
+     * counterpart of the back's `megaphoneState && !isPromotedGuest` (RaiseHandManager.assertCanModerate).
+     */
+    onAirHere: boolean;
+}
+
+export type PublicSpaceEvent = NonNullable<SpaceEvent["event"]>;
+
+export type PublicEventsObservables = {
+    [K in PublicSpaceEvent["$case"]]?: Subject<
+        Extract<PublicSpaceEvent, { $case: K }> & { spaceName: string; sender: string }
+    >;
+};
+
+export type InnerPrivateSpaceEvent = NonNullable<PrivateSpaceEvent["event"]>;
+
+export type PrivateEvents = {
+    [K in InnerPrivateSpaceEvent["$case"]]: Extract<InnerPrivateSpaceEvent, { $case: K }> & {
+        spaceName: string;
+        sender: string;
+    };
+};
+
+export type PrivateEventsObservables = {
+    [K in InnerPrivateSpaceEvent["$case"]]?: Subject<
+        Extract<InnerPrivateSpaceEvent, { $case: K }> & { spaceName: string; sender: SpaceUserExtended }
+    >;
+};
+
+export type SpaceUserUpdate = Omit<Partial<SpaceUser>, "id">;
+
+export interface UpdateSpaceUserEvent {
+    newUser: SpaceUserExtended;
+    changes: Partial<SpaceUser>;
+    updateMask: string[];
+}
+
+export interface SpaceInterface {
+    getName(): string;
+    setMetadata(metadata: Map<string, unknown>): void;
+    getMetadata(): Map<string, unknown>;
+    setCanRecord(canRecord: boolean): void;
+    //stopWatching(spaceFilter: SpaceFilterInterface): void;
+    observeMetadataProperty(key: string): Subject<unknown>;
+    observePublicEvent<K extends keyof PublicEventsObservables>(key: K): NonNullable<PublicEventsObservables[K]>;
+    observePrivateEvent<K extends keyof PrivateEventsObservables>(key: K): NonNullable<PrivateEventsObservables[K]>;
+    emitPublicMessage(message: NonNullable<SpaceEvent["event"]>): void;
+    emitPrivateMessage(
+        message: NonNullable<PrivateSpaceEvent["event"]>,
+        receiverUserId: SpaceUser["spaceUserId"],
+    ): void;
+    emitBackEvent(message: NonNullable<BackEventMessage["backEvent"]>): void;
+    emitVideoQualityReport(message: VideoQualityReportMessage): void;
+    emitUpdateUser(spaceUser: SpaceUserUpdate): void;
+    emitUpdateSpaceMetadata(metadata: Map<string, unknown>): void;
+    /** The server-owned state of the space (hands, floor, polls, questions, recording) and the changes to it. */
+    readonly state: SpaceStateManager;
+    /** What this client joined the space as (known locally from the start; the back learns it through the state). */
+    readonly kind: SpaceKind | undefined;
+    watchSpaceMetadata(): Observable<UpdateSpaceMetadataMessage>;
+    watchInitSpaceUsersMessage(): Observable<InitSpaceUsersMessage>;
+    videoStreamStore: Readable<Map<string, VideoBox>>;
+    screenShareStreamStore: Readable<Map<string, VideoBox>>;
+
+    allVideoStreamStore: MapStore<string, VideoBox>;
+    allScreenShareStreamStore: MapStore<string, VideoBox>;
+    getScreenSharingPeerVideoBox(id: SpaceUser["spaceUserId"]): VideoBox | undefined;
+    getVideoPeerVideoBox(id: SpaceUser["spaceUserId"]): VideoBox | undefined;
+    /**
+     * Sets the users currently speaking, most active first (as reported by the video transport),
+     * and reorders the video boxes accordingly.
+     */
+    setActiveSpeakers(spaceUserIds: SpaceUser["spaceUserId"][]): void;
+
+    getSpaceUserBySpaceUserId(id: SpaceUser["spaceUserId"]): SpaceUserExtended | undefined;
+    getSpaceUserByUserId(id: number): SpaceUserExtended | undefined;
+    getSpaceUserByUuid(uuid: string): SpaceUserExtended | undefined;
+    simplePeer: SimplePeerConnectionInterface | undefined;
+    readonly onLeaveSpace: Observable<void>;
+    get spacePeerManager(): SpacePeerManager;
+    dispatchSound(url: URL): Promise<void>;
+    readonly usersStore: Readable<Map<string, SpaceUserExtended>>;
+    /**
+     * Start streaming the local camera and microphone to other users in the space.
+     * This will trigger an error if the filter type is ALL_USERS (because everyone is always streaming in a ALL_USERS space).
+     */
+    startStreaming(): void;
+
+    /**
+     * Stop streaming the local camera and microphone to other users in the space.
+     * This will trigger an error if the filter type is ALL_USERS (because everyone is always streaming in a ALL_USERS space).
+     */
+    stopStreaming(): void;
+
+    /**
+     * Start streaming as a listener (for seeAttendees feature).
+     * This enables video streaming WITHOUT setting megaphoneState to true.
+     * The listener's video will only be visible to speakers, not to other listeners.
+     */
+    startListenerStreaming(): void;
+
+    /**
+     * Stop streaming as a listener (for seeAttendees feature).
+     */
+    stopListenerStreaming(): void;
+
+    /**
+     * This store returns true if the local user is currently streaming their camera to other users in the space.
+     * In a ALL_USERS space that syncs video/audio-related properties, this store will always return true.
+     * In a LIVE_STREAMING_USERS, this store will return true when the startStreaming() method has been called, and false when the stopStreaming() method has been called.
+     * In a LIVE_STREAMING_USERS_WITH_FEEDBACK, this store will return true when the startStreaming()/startListenerStreaming() method has been called, and false when the stopStreaming()/stopListenerStreaming() method has been called.
+     */
+    readonly isStreamingVideoStore: Readable<boolean>;
+
+    /**
+     * This store returns true if the local user is currently streaming their microphone to other users in the space.
+     * In a ALL_USERS space that syncs video/audio-related properties, this store will always return true.
+     * In a LIVE_STREAMING_USERS, this store will return true when the startStreaming() method has been called, and false when the stopStreaming() method has been called.
+     * In a LIVE_STREAMING_USERS_WITH_FEEDBACK, this store will return true when the startStreaming() method has been called, and false when the stopStreaming() method has been called.
+     */
+    readonly isStreamingAudioStore: Readable<boolean>;
+
+    /**
+     * True while at least one user *other than the local one* has `megaphoneState` — someone
+     * is on air in this space. The local user's own airtime is `isStreamingAudioStore`.
+     *
+     * Use this rather than deriving it from `usersStore`: that store only re-emits when a user
+     * is added or removed, never when one is updated, so a `megaphoneState` toggled mid-stay
+     * would go unseen. This one is refreshed on all three.
+     */
+    readonly hasRemoteSpeakerStore: Readable<boolean>;
+    readonly canAskToMuteAudioOrTurnOffVideo: Readable<boolean>;
+    readonly shouldPublishScreenShareStore: Readable<boolean>;
+
+    /**
+     * Use this observer to get a description of new users.
+     * It can be easier than subscribing to the usersStore and trying to deduce who the new user is.
+     */
+    readonly observeUserJoined: Observable<SpaceUserExtended>;
+    /**
+     * Use this observer to get a description of users who left.
+     * It can be easier than subscribing to the usersStore and trying to deduce who the gone user is.
+     */
+    readonly observeUserLeft: Observable<SpaceUserExtended>;
+    /**
+     * Use this observer to get a description of users who have been updated.
+     * It can be easier than subscribing to every single property of every single user.
+     */
+    readonly observeUserUpdated: Observable<UpdateSpaceUserEvent>;
+    readonly observeMetadata: Observable<Map<string, unknown>>;
+    readonly filterType: FilterType;
+    get mySpaceUserId(): SpaceUser["spaceUserId"];
+    getUsers(options?: { signal: AbortSignal }): Promise<Map<string, Readonly<SpaceUserExtended>>>;
+    waitForSpaceUser(spaceUserId: SpaceUser["spaceUserId"], timeoutMs: number): Promise<SpaceUserExtended>;
+
+    /**
+     * In megaphone see-attendees space (LIVE_STREAMING_USERS_WITH_FEEDBACK), only the speaker should publish screen share.
+     * Returns true when the local user may publish/send screen share, false when they are a listener in see-attendees mode.
+     */
+    shouldPublishScreenShare(): boolean;
+
+    readonly destroyed: boolean;
+}
+
+export type ReactiveSpaceUser = {
+    [K in keyof Omit<SpaceUser, "spaceUserId" | "playUri" | "roomName">]: Readonly<Readable<SpaceUser[K]>>;
+} & {
+    spaceUserId: string;
+    playUri: string | undefined;
+    roomName: string | undefined;
+};
+
+export type SpaceUserExtended = SpaceUser & {
+    pictureStore: Readable<string | undefined>;
+    emitPrivateEvent: (message: NonNullable<PrivateSpaceEvent["event"]>) => void;
+    space: Pick<SpaceInterface, "emitPublicMessage" | "canAskToMuteAudioOrTurnOffVideo" | "filterType" | "getName"> & {
+        state: Pick<SpaceStateManager, "giveFloor" | "revokeFloor">;
+    };
+    reactiveUser: ReactiveSpaceUser;
+};

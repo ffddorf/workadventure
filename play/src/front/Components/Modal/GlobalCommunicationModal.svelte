@@ -1,0 +1,538 @@
+<script lang="ts">
+    import { onDestroy } from "svelte";
+    import { showModalGlobalComminucationVisibilityStore } from "../../Stores/ModalStore";
+    import { requestedScreenSharingState } from "../../Stores/ScreenSharingStore";
+    import {
+        cameraListStore,
+        displayedMegaphoneScreenStore,
+        localVolumeStore,
+        microphoneListStore,
+        requestedCameraDeviceIdStore,
+        requestedCameraState,
+        requestedMicrophoneDeviceIdStore,
+        requestedMicrophoneState,
+        streamingMegaphoneStore,
+        localStreamStore,
+        usedCameraDeviceIdStore,
+        usedMicrophoneDeviceIdStore,
+    } from "../../Stores/MediaStore";
+    import LL from "../../../i18n/i18n-svelte";
+    import microphoneImg from "../images/mic.svg";
+    import cameraImg from "../images/cam.svg";
+    import TextGlobalMessage, { type TextGlobalMessageHandle } from "../Menu/TextGlobalMessage.svelte";
+    import AudioGlobalMessage, { type AudioGlobalMessageHandle } from "../Menu/AudioGlobalMessage.svelte";
+    import { srcObject } from "../Video/utils";
+    import SoundMeterWidget from "../SoundMeterWidget.svelte";
+    import { localUserStore } from "../../Connection/LocalUserStore";
+    import { StringUtils } from "../../Utils/StringUtils";
+    import { analyticsClient } from "../../Administration/AnalyticsClient";
+    import { megaphoneCanBeUsedStore, requestedMegaphoneStore } from "../../Stores/MegaphoneStore";
+    import { userIsAdminStore } from "../../Stores/GameStore";
+    import { startMegaphoneLive, stopMegaphoneLive } from "../ActionBar/MenuIcons/megaphoneActions";
+    import Tooltip from "../Util/Tooltip.svelte";
+    import ButtonClose from "../Input/ButtonClose.svelte";
+    import Select from "../Input/Select.svelte";
+    import InputCheckbox from "../Input/InputCheckbox.svelte";
+    import Button from "../UI/Button.svelte";
+    import { IconAlertTriangle, IconInfoCircle, IconMessageShare, IconMusicShare, IconSpeakerPhone } from "@wa-icons";
+
+    let inputSendTextActive = $state(false);
+    let uploadAudioActive = $state(false);
+    let broadcastToWorld = $state(false);
+    let handleSendText: TextGlobalMessageHandle | undefined = $state();
+    let handleSendAudio: AudioGlobalMessageHandle | undefined = $state();
+    let stream: MediaStream | undefined = $state();
+
+    const unsubscribeLocalStreamStore = localStreamStore.subscribe((value) => {
+        if (value.type === "success") {
+            stream = value.stream;
+        } else {
+            stream = undefined;
+        }
+    });
+
+    onDestroy(() => {
+        unsubscribeLocalStreamStore();
+        displayedMegaphoneScreenStore.set(false);
+    });
+
+    function close() {
+        streamingMegaphoneStore.set(false);
+        showModalGlobalComminucationVisibilityStore.set(false);
+    }
+
+    function onKeyDown(e: KeyboardEvent) {
+        if (e.key === "Escape") {
+            close();
+        }
+    }
+
+    function activateLiveMessage() {
+        streamingMegaphoneStore.set(true);
+        displayedMegaphoneScreenStore.set(true);
+        inputSendTextActive = false;
+        uploadAudioActive = false;
+        analyticsClient.trackAdminEvent("megaphone.opened");
+    }
+
+    function activateInputText() {
+        displayedMegaphoneScreenStore.set(false);
+        inputSendTextActive = true;
+        uploadAudioActive = false;
+        analyticsClient.trackAdminEvent("global_message.opened", { source: "action_bar" });
+    }
+
+    function activateUploadAudio() {
+        displayedMegaphoneScreenStore.set(false);
+        inputSendTextActive = false;
+        uploadAudioActive = true;
+        analyticsClient.trackAdminEvent("global_audio.opened");
+    }
+
+    function back() {
+        displayedMegaphoneScreenStore.set(false);
+        inputSendTextActive = false;
+        uploadAudioActive = false;
+    }
+
+    function send(): void {
+        if (inputSendTextActive) {
+            analyticsClient.trackAdminEvent("global_message.text_sent");
+            handleSendText?.sendTextMessage(broadcastToWorld);
+        }
+        if (uploadAudioActive) {
+            analyticsClient.trackAdminEvent("global_message.sound_sent");
+            handleSendAudio?.sendAudioMessage(broadcastToWorld);
+        }
+        close();
+    }
+
+    // function to play video
+    function playVideo(event: Event) {
+        if (!(event.target instanceof HTMLVideoElement)) return;
+        // play video
+        event.target.play().catch(() => console.error("error playing video"));
+    }
+
+    // function to stop video
+    function stopVideo(event: Event) {
+        if (!(event.target instanceof HTMLVideoElement)) return;
+        // stop video
+        event.target.pause();
+    }
+
+    // function to put full screen video
+    function fullScreenVideo(event: MouseEvent) {
+        if (!(event.target instanceof HTMLVideoElement)) return;
+        // full screen video
+        event.target.requestFullscreen().catch(() => console.error("error playing video"));
+    }
+
+    // Sync with MediaSettingsList: prefer used store, then requested, then current stream
+    let cameraSelectValue = $derived(
+        $usedCameraDeviceIdStore ??
+            $requestedCameraDeviceIdStore ??
+            stream?.getVideoTracks()[0]?.getSettings()?.deviceId,
+    );
+
+    let microphoneSelectValue = $derived(
+        $usedMicrophoneDeviceIdStore ??
+            $requestedMicrophoneDeviceIdStore ??
+            stream?.getAudioTracks()[0]?.getSettings()?.deviceId,
+    );
+
+    function selectCamera(deviceId: string) {
+        requestedCameraDeviceIdStore.set(deviceId);
+        localUserStore.setPreferredVideoInputDevice(deviceId);
+    }
+
+    function selectMicrophone(deviceId: string) {
+        requestedMicrophoneDeviceIdStore.set(deviceId);
+        localUserStore.setPreferredAudioInputDevice(deviceId);
+    }
+
+    function onCameraSelectChange(e: Event) {
+        const target = e.target as HTMLSelectElement;
+        if (target?.value) selectCamera(target.value);
+    }
+
+    function onMicrophoneSelectChange(e: Event) {
+        const target = e.target as HTMLSelectElement;
+        if (target?.value) selectMicrophone(target.value);
+    }
+
+    function startLive() {
+        startMegaphoneLive();
+        //close();
+    }
+
+    function stopLive() {
+        stopMegaphoneLive();
+        close();
+    }
+</script>
+
+<svelte:window onkeydown={onKeyDown} />
+
+<div
+    class="absolute z-[308] rounded-xxl w-full h-full top-0 left-0 right-0 bottom-0 flex items-center justify-center overflow-hidden"
+>
+    <div
+        class="h-full md:h-auto md:top-auto md:left-auto md:right-auto md:bottom-auto bg-contrast/80 backdrop-blur rounded-md max-h-screen overflow-y-auto w-full lg:w-11/12"
+    >
+        <!-- transition:fly={{ x: 1000, duration: 500 }} -->
+        <!-- <div class="bg-contrast/80 ml-2 -right-20 top-4 transition-all backdrop-blur rounded-lg p-2 aspect-square">
+            <button type="button" class="close-window h-[16px] w-[16px] bg-red-500 justify-center" onclick|preventDefault|stopPropagation={close}
+                >&times</button
+            >
+        </div> -->
+        <header class="flex flex-row items-start justify-between p-2">
+            <div class="flex flex-col gap-2 p-4">
+                <h2 class="text-center text-white mobile text-base md:text-xl lg:text-2xl">
+                    {$LL.megaphone.modal.title()}
+                </h2>
+
+                {#if $displayedMegaphoneScreenStore || inputSendTextActive || uploadAudioActive}
+                    <!-- svelte-ignore a11y_invalid_attribute -->
+                    <a
+                        href="#"
+                        class="px-4 py-2 text-white no-underline bg-white/10 rounded hover:bg-white/20 flex flex-row items-center text-xs m-0 w-fit"
+                        onclick={(event) => {
+                            event.preventDefault();
+                            event.stopPropagation();
+                            back();
+                        }}
+                    >
+                        <svg
+                            xmlns="http://www.w3.org/2000/svg"
+                            width="12px"
+                            height="12px"
+                            fill="none"
+                            viewBox="0 0 24 24"
+                            stroke="currentColor"
+                            stroke-width="2"
+                            stroke-linecap="round"
+                            stroke-linejoin="round"
+                            class="feather feather-arrow-left cursor-pointer"
+                            ><line x1="19" y1="12" x2="5" y2="12" /><polyline points="12 19 5 12 12 5" /></svg
+                        >
+                        <span class="ml-1 cursor-pointer">{$LL.megaphone.modal.backToSelectCommunication()}</span>
+                    </a>
+                {/if}
+            </div>
+            <div class="group/btn-chat transition-all" id="btn-chat">
+                <ButtonClose onclick={close} />
+            </div>
+        </header>
+        <div class="px-5 h-full">
+            {#if !$displayedMegaphoneScreenStore && !inputSendTextActive && !uploadAudioActive}
+                <div class="flex flex-col md:flex-row md:justify-center h-full">
+                    <div
+                        id="content-liveMessage"
+                        class="flex flex-col md:w-1/3 w-full px-5 mb-6 h-full justify-between"
+                    >
+                        <h4 class="text-white mb-2">
+                            <IconSpeakerPhone class="h-8 w-8 mr-1 inline" font-size="22" />
+                            {$LL.megaphone.modal.liveMessage.title()}
+                        </h4>
+
+                        <Button
+                            variant="light"
+                            appearance="border"
+                            size="lg"
+                            class="mt-2 mb-4"
+                            onclick={activateLiveMessage}
+                            disabled={!$megaphoneCanBeUsedStore}
+                        >
+                            {$LL.megaphone.modal.liveMessage.button()}
+                        </Button>
+
+                        {#if !$megaphoneCanBeUsedStore}
+                            <p class="help-text !text-danger-800">
+                                <IconInfoCircle class="mr-2 mb-1 min-w-6" font-size="18" />
+                                {$LL.megaphone.modal.audioMessage.noAccess()}
+                            </p>
+                        {/if}
+
+                        <p class="text-white text-sm whitespace-pre-line">
+                            {$LL.megaphone.modal.liveMessage.notice()}
+                        </p>
+
+                        <div class="mt-auto pt-4">
+                            <video
+                                src="https://workadventure-chat-uploads.s3.eu-west-1.amazonaws.com/upload/video/global_live_message.mp4"
+                                class="w-full cursor-pointer rounded"
+                                controls
+                                muted
+                                onmouseover={playVideo}
+                                onmouseout={stopVideo}
+                                onfocus={playVideo}
+                                onblur={stopVideo}
+                                onclick={fullScreenVideo}
+                            ></video>
+                        </div>
+                    </div>
+
+                    <div
+                        id="content-textMessage"
+                        class="flex flex-col md:w-1/3 w-full px-5 mb-6 h-full justify-between"
+                    >
+                        <h4 class="text-white mb-2">
+                            <IconMessageShare class="h-8 w-8 mr-1 inline" />
+                            {$LL.megaphone.modal.textMessage.title()}
+                        </h4>
+
+                        <Button
+                            variant="light"
+                            appearance="border"
+                            size="lg"
+                            class="mb-4"
+                            onclick={activateInputText}
+                            disabled={!$userIsAdminStore}
+                        >
+                            {$LL.megaphone.modal.textMessage.button()}
+                        </Button>
+
+                        {#if !$userIsAdminStore}
+                            <p class="help-text !text-danger-800">
+                                <IconInfoCircle class="mr-2 mb-1 min-w-6" font-size="18" />
+                                {$LL.megaphone.modal.textMessage.noAccess()}
+                            </p>
+                        {/if}
+
+                        <p class="text-white text-sm whitespace-pre-line">
+                            {$LL.megaphone.modal.textMessage.notice()}
+                        </p>
+
+                        <div class="mt-auto pt-4">
+                            <video
+                                src="https://workadventure-chat-uploads.s3.eu-west-1.amazonaws.com/upload/video/global_text_message.mp4"
+                                class="w-full cursor-pointer rounded"
+                                controls
+                                muted
+                                onmouseover={playVideo}
+                                onmouseout={stopVideo}
+                                onfocus={playVideo}
+                                onblur={stopVideo}
+                                onclick={fullScreenVideo}
+                            ></video>
+                        </div>
+                    </div>
+
+                    <div
+                        id="content-soundMessage"
+                        class="flex flex-col md:w-1/3 w-full px-5 mb-6 h-full justify-between"
+                    >
+                        <h4 class="text-white mb-2">
+                            <IconMusicShare class="h-8 w-8 mr-1 inline" />
+                            {$LL.megaphone.modal.audioMessage.title()}
+                        </h4>
+
+                        <Button
+                            variant="light"
+                            appearance="border"
+                            size="lg"
+                            class="mb-4"
+                            onclick={activateUploadAudio}
+                            disabled={!$userIsAdminStore}
+                        >
+                            {$LL.megaphone.modal.audioMessage.button()}
+                        </Button>
+
+                        {#if !$userIsAdminStore}
+                            <p class="help-text !text-danger-800">
+                                <IconInfoCircle class="mr-2 mb-1 min-w-6" font-size="18" />
+                                {$LL.megaphone.modal.audioMessage.noAccess()}
+                            </p>
+                        {/if}
+
+                        <p class="text-white text-sm whitespace-pre-line">
+                            {$LL.megaphone.modal.audioMessage.notice()}
+                        </p>
+
+                        <div class="mt-auto pt-4">
+                            <video
+                                src="https://workadventure-chat-uploads.s3.eu-west-1.amazonaws.com/upload/video/global_audio_message.mp4"
+                                class="w-full cursor-pointer rounded"
+                                controls
+                                muted
+                                onmouseover={playVideo}
+                                onmouseout={stopVideo}
+                                onfocus={playVideo}
+                                onblur={stopVideo}
+                                onclick={fullScreenVideo}
+                            ></video>
+                        </div>
+                    </div>
+                </div>
+            {/if}
+
+            {#if inputSendTextActive || uploadAudioActive}
+                <div id="active-globalMessage" class="flex flex-col p-5">
+                    {#if inputSendTextActive}
+                        <h3 class="text-white mb-2">
+                            <textMessageIcon class="h-8 w-8 mr-1" font-size="22"></textMessageIcon>
+                            {$LL.megaphone.modal.textMessage.title()}
+                        </h3>
+                        <TextGlobalMessage bind:handleSending={handleSendText} />
+                    {/if}
+
+                    {#if uploadAudioActive}
+                        <div class="flex flex-col justify-center items-center">
+                            <h3 class="text-white">
+                                <IconMessageShare class="h-8 w-8 mr-1" font-size="22" />
+                                {$LL.megaphone.modal.audioMessage.title()}
+                            </h3>
+                            <div class="text-white">
+                                <AudioGlobalMessage bind:handleSending={handleSendAudio} />
+                            </div>
+                        </div>
+                    {/if}
+                    <div class="flex justify-center">
+                        <InputCheckbox label={$LL.menu.globalMessage.warning()} bind:value={broadcastToWorld} />
+                    </div>
+                    <div class="flex justify-center">
+                        <section class="centered-column">
+                            <Button
+                                variant="light"
+                                onclick={(event) => {
+                                    event.preventDefault();
+                                    send();
+                                }}
+                            >
+                                {$LL.menu.globalMessage.send()}
+                            </Button>
+                        </section>
+                    </div>
+                </div>
+            {/if}
+            {#if $displayedMegaphoneScreenStore}
+                <div id="active-liveMessage" class="flex flex-col p-5 text-white">
+                    <div>
+                        <h3>
+                            <IconSpeakerPhone class="h-8 w-8 mr-1 text-white" font-size="22" />
+                            {$LL.megaphone.modal.liveMessage.title()}
+                        </h3>
+                    </div>
+
+                    <div class="flex flex-col md:flex-row justify-center">
+                        <div class="flex flex-col mr-5">
+                            <video
+                                class="h-full w-full md:object-cover rounded"
+                                class:object-contain={stream}
+                                class:max-h-[230px]={stream}
+                                style="-webkit-transform: scaleX(-1);transform: scaleX(-1);"
+                                use:srcObject={stream}
+                                autoplay
+                                muted
+                                playsinline
+                            ></video>
+                            <div class="z-[251] mt-3 w-full p-4 flex items-center justify-center scale-150">
+                                <SoundMeterWidget
+                                    volume={$localVolumeStore}
+                                    cssClass="!bg-none !bg-transparent scale-150"
+                                    barColor="blue"
+                                />
+                            </div>
+                        </div>
+                        <div class="flex flex-col pl-6">
+                            <h3 class="text-white">{$LL.megaphone.modal.liveMessage.settings()}</h3>
+                            <p class="text-white text-sm">
+                                {#if !$requestedCameraState && !$requestedMicrophoneState && !$requestedScreenSharingState}
+                                    {$LL.warning.megaphoneNeeds()}
+                                {:else}
+                                    {$LL.megaphone.modal.liveMessage.goingToStream()}
+                                    {$requestedCameraState ? $LL.megaphone.modal.liveMessage.yourCamera() : ""}
+                                    {$requestedCameraState && $requestedMicrophoneState && !$requestedScreenSharingState
+                                        ? $LL.megaphone.modal.liveMessage.and()
+                                        : ""}
+                                    {$requestedCameraState && $requestedMicrophoneState && $requestedScreenSharingState
+                                        ? ","
+                                        : ""}
+                                    {$requestedMicrophoneState ? $LL.megaphone.modal.liveMessage.yourMicrophone() : ""}
+                                    {($requestedCameraState || $requestedMicrophoneState) &&
+                                    $requestedScreenSharingState
+                                        ? $LL.megaphone.modal.liveMessage.and()
+                                        : ""}
+                                    {$requestedScreenSharingState ? $LL.megaphone.modal.liveMessage.yourScreen() : ""}
+                                    {$LL.megaphone.modal.liveMessage.toAll()}.
+                                {/if}
+                            </p>
+                            <div class="flex flex-row items-center gap-3">
+                                <img
+                                    src={cameraImg}
+                                    style="padding: 2px; height: 32px; width: 32px;"
+                                    alt="Turn off microphone"
+                                />
+                                <div class="w-full">
+                                    <Select value={cameraSelectValue} onchange={onCameraSelectChange}>
+                                        {#if $requestedCameraState && $cameraListStore && $cameraListStore.length > 0}
+                                            {#each $cameraListStore as camera (camera.deviceId)}
+                                                <option value={camera.deviceId}>
+                                                    {StringUtils.normalizeDeviceName(camera.label)}
+                                                </option>
+                                            {/each}
+                                        {/if}
+                                    </Select>
+                                </div>
+                            </div>
+                            <div class="flex flex-row items-center gap-3">
+                                <img
+                                    src={microphoneImg}
+                                    style="padding: 2px; height: 32px; width: 32px; "
+                                    alt="Turn off microphone"
+                                />
+                                <div class="w-full">
+                                    <Select value={microphoneSelectValue} onchange={onMicrophoneSelectChange}>
+                                        {#if $requestedMicrophoneState && $microphoneListStore && $microphoneListStore.length > 0}
+                                            {#each $microphoneListStore as microphone (microphone.deviceId)}
+                                                <option value={microphone.deviceId}>
+                                                    {StringUtils.normalizeDeviceName(microphone.label)}
+                                                </option>
+                                            {/each}
+                                        {/if}
+                                    </Select>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="flex flew-row justify-center">
+                        {#if !$requestedCameraState && !$requestedMicrophoneState && !$requestedScreenSharingState}
+                            <span class="err text-warning-900 text-xs italic mt-1">
+                                <IconAlertTriangle font-size="12" />
+                                {$LL.warning.megaphoneNeeds()}
+                            </span>
+                        {/if}
+                    </div>
+                    <div class="flex flew-row justify-center">
+                        {#if !$requestedMegaphoneStore}
+                            <Button
+                                class="font-light [&_.btn-label]:text-black bg-white mt-4 rounded-md disabled:bg-[#4a5568] disabled:cursor-not-allowed"
+                                onclick={startLive}
+                                disabled={!$requestedCameraState && !$requestedMicrophoneState}
+                            >
+                                {#if !$requestedCameraState && !$requestedMicrophoneState && !$requestedScreenSharingState}
+                                    <Tooltip text={$LL.warning.megaphoneNeeds()} />
+                                {/if}
+                                {$LL.megaphone.modal.liveMessage.startMegaphone()}
+                            </Button>
+                        {:else}
+                            <Button variant="danger" onclick={stopLive}>
+                                {$LL.megaphone.modal.liveMessage.stopMegaphone()}
+                            </Button>
+                        {/if}
+                    </div>
+                </div>
+            {/if}
+        </div>
+    </div>
+</div>
+
+<style>
+    video {
+        transition: all 0.2s ease-in-out;
+        &:hover {
+            scale: 1.1;
+        }
+    }
+</style>

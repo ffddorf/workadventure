@@ -1,103 +1,214 @@
-version: "3.5"
 services:
   reverse-proxy:
-    image: traefik:v2.5
+    image: traefik:v3.6.1
+    expose:
+      - "8080"
+    ports:
+      - "80:80"
     command:
       - --api.insecure=true
       - --providers.docker
       - --entryPoints.web.address=:80
-      - --entryPoints.websecure.address=:443
-      - "--providers.docker.exposedbydefault=false"
-    ports:
-      - "80:80"
-      - "443:443"
-      # The Web UI (enabled by --api.insecure=true)
-      - "8080:8080"
-    #depends_on:
-    #  - back
-    #  - front
+      - --providers.docker.exposedbydefault=false
+      #- --log.level=DEBUG
+    labels:
+      - "traefik.enable=true"
+      - "traefik.port=8080"
+      - "traefik.http.routers.traefik.rule=Host(`traefik.workadventure.localhost`)"
+      - "traefik.http.routers.traefik.service=api@internal"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
     networks:
       default:
         aliases:
-          - 'play.workadventure.localhost'
-          - 'pusher.workadventure.localhost'
-          - 'maps.workadventure.localhost'
-
-  front:
-    image: thecodingmachine/nodejs:14
+          - "front.workadventure.localhost"
+          - "play.workadventure.localhost"
+          - "room-api.workadventure.localhost"
+          - "maps.workadventure.localhost"
+          - "oidc.workadventure.localhost"
+          - "map-storage.workadventure.localhost"
+          - "xmpp.workadventure.localhost"
+          - "matrix.workadventure.localhost"
+          - "pusher.workadventure.localhost"
+  play:
+    image: ghcr.io/thecodingmachine/nodejs:v2-24-trixie
+    command: npm run dev
+    # Uncomment to run the production build in dev (along STARTUP_COMMAND_4 and NODE_OPTIONS)
+    #command: npm run start
+    working_dir: /usr/src/app/play
+    volumes:
+      - .:/usr/src/app
+    tmpfs: /tmp
+    ports:
+      - "9231:9229"
+      - "9235:9235"
     environment:
+      # On startup, we ask the messages container to regenerate the files.
+      # Note: we need to use this "messages" container because of ARM64 processors that are not supported with protoc (used in "messages" container)
+      STARTUP_COMMAND_1: ../wait-proto.sh
+      STARTUP_COMMAND_2: ../npm-install.sh
+      STARTUP_COMMAND_3: npm run typesafe-i18n
+      # Uncomment to run the production build in dev
+      #STARTUP_COMMAND_4: npm run build
+      #STARTUP_COMMAND_5: npm run build-iframe-api
+      #NODE_OPTIONS: --max-old-space-size=16384
+      DEBUG: "socket,space"
+      DEBUG_COLORS: "true"
+      DEBUG_ERROR_MESSAGES: "true"
       DEBUG_MODE: "$DEBUG_MODE"
       JITSI_URL: $JITSI_URL
       JITSI_PRIVATE_MODE: "$JITSI_PRIVATE_MODE"
+      ENABLE_MAP_EDITOR: "$ENABLE_MAP_EDITOR"
       HOST: "0.0.0.0"
       NODE_ENV: development
-      PUSHER_URL: //pusher.workadventure.localhost
-      UPLOADER_URL: //uploader.workadventure.localhost
-      #ADMIN_URL: //workadventure.localhost
-      ICON_URL: //icon.workadventure.localhost
-      STARTUP_COMMAND_1: ./templater.sh
-      STARTUP_COMMAND_2: yarn install
-      STUN_SERVER: "stun:stun.l.google.com:19302"
-      TURN_SERVER: "turn:coturn.workadventure.localhost:3478,turns:coturn.workadventure.localhost:5349"
+      ALLOWED_CORS_ORIGIN: "http://play.workadventure.localhost"
+      PUSHER_URL: http://play.workadventure.localhost
+      FRONT_URL: http://play.workadventure.localhost
+      # The page loads its modules from the Vite dev server on another origin, like it loads the assets from the
+      # "front" container in production. The pusher reads index.html from Vite (same container).
+      ASSETS_URL: http://front.workadventure.localhost
+      ASSETS_INTERNAL_URL: http://localhost:8080
+      UPLOADER_URL: http://uploader.workadventure.localhost
+      ICON_URL: http://icon.workadventure.localhost
+      STUN_SERVER: "${STUN_SERVER:-}"
+      TURN_SERVER: "${TURN_SERVER:-}"
       DISABLE_NOTIFICATIONS: "$DISABLE_NOTIFICATIONS"
       SKIP_RENDER_OPTIMIZATIONS: "$SKIP_RENDER_OPTIMIZATIONS"
       # Use TURN_USER/TURN_PASSWORD if your Coturn server is secured via hard coded credentials.
-      # Advice: you should instead use Coturn REST API along the TURN_STATIC_AUTH_SECRET in the Back container
+      # Advice: you should instead use Coturn with short-lived secrets thanks to TURN_STATIC_AUTH_SECRET
       TURN_USER: ""
       TURN_PASSWORD: ""
-      START_ROOM_URL: "$START_ROOM_URL"
+      TURN_STATIC_AUTH_SECRET: "$TURN_STATIC_AUTH_SECRET"
       MAX_PER_GROUP: "$MAX_PER_GROUP"
       MAX_USERNAME_LENGTH: "$MAX_USERNAME_LENGTH"
-      DISABLE_ANONYMOUS: "$DISABLE_ANONYMOUS"
-      OPID_LOGIN_SCREEN_PROVIDER: "$OPID_LOGIN_SCREEN_PROVIDER"
-      LIVE_RELOAD: "$LIVE_RELOAD:-true"
-    command: yarn run start
-    volumes:
-      - ./front:/usr/src/app
-    labels:
-      - "traefik.enable=true"
-      - "traefik.http.routers.front.rule=Host(`play.workadventure.localhost`)"
-      - "traefik.http.routers.front.entryPoints=web"
-      - "traefik.http.services.front.loadbalancer.server.port=8080"
-      - "traefik.http.routers.front-ssl.rule=Host(`play.workadventure.localhost`)"
-      - "traefik.http.routers.front-ssl.entryPoints=websecure"
-      - "traefik.http.routers.front-ssl.tls=true"
-      - "traefik.http.routers.front-ssl.service=front"
+      OPENID_CLIENT_ID: authorization-code-client-id
+      OPENID_CLIENT_SECRET: authorization-code-client-secret
+      OPENID_CLIENT_ISSUER: http://oidc.workadventure.localhost
+      OPENID_PROFILE_SCREEN_PROVIDER: ${OPENID_PROFILE_SCREEN_PROVIDER:-}
+      OPENID_SCOPE: profile openid email tags-scope
+      OPENID_PROMPT: ${OPENID_PROMPT:-}
+      OPENID_USERNAME_CLAIM: ${OPENID_USERNAME_CLAIM:-}
+      OPENID_LOCALE_CLAIM: ${OPENID_LOCALE_CLAIM:-}
+      OPENID_LOGOUT_REDIRECT_URL: "${OPENID_LOGOUT_REDIRECT_URL:-}"
+      OPENID_WOKA_NAME_POLICY: ${OPENID_WOKA_NAME_POLICY:-}
 
-  pusher:
-    image: thecodingmachine/nodejs:14
-    command: yarn dev
-    environment:
-      DEBUG: "socket:*"
-      STARTUP_COMMAND_1: yarn install
-      # wait for files generated by "messages" container to exists
-      STARTUP_COMMAND_2: while [ ! -f /usr/src/app/src/Messages/generated/messages_pb.js ]; do sleep 1; done
-      SECRET_JITSI_KEY: "$SECRET_JITSI_KEY"
-      SECRET_KEY: yourSecretKey
+      SECRET_KEY: "$SECRET_KEY"
+      ADMIN_API_URL: "${ADMIN_API_URL:-}"
       ADMIN_API_TOKEN: "$ADMIN_API_TOKEN"
+      MAP_STORAGE_API_TOKEN: "FFVSGBSGBSGFB23SFGBSFG4BS"
       API_URL: back:50051
-      JITSI_URL: $JITSI_URL
-      JITSI_ISS: $JITSI_ISS
-      FRONT_URL: http://play.workadventure.localhost
-      OPID_CLIENT_ID: $OPID_CLIENT_ID
-      OPID_CLIENT_SECRET: $OPID_CLIENT_SECRET
-      OPID_CLIENT_ISSUER: $OPID_CLIENT_ISSUER
-      OPID_CLIENT_REDIRECT_URL: $OPID_CLIENT_REDIRECT_URL
-      OPID_PROFILE_SCREEN_PROVIDER: $OPID_PROFILE_SCREEN_PROVIDER
       DISABLE_ANONYMOUS: $DISABLE_ANONYMOUS
-    volumes:
-      - ./pusher:/usr/src/app
+      #Map editor
+      PUBLIC_MAP_STORAGE_URL: "http://map-storage.workadventure.localhost"
+      INTERNAL_MAP_STORAGE_URL: "http://map-storage:3000"
+      REDIS_HOST: redis
+      ENABLE_OPENAPI_ENDPOINT: "true"
+      START_ROOM_URL: "$START_ROOM_URL"
+      ENABLE_CHAT: "$ENABLE_CHAT"
+      ENABLE_CHAT_UPLOAD: "$ENABLE_CHAT_UPLOAD"
+      ENABLE_CHAT_ONLINE_LIST: "$ENABLE_CHAT_ONLINE_LIST"
+      ENABLE_CHAT_DISCONNECTED_LIST: "$ENABLE_CHAT_DISCONNECTED_LIST"
+      CLIENT_DISCONNECTION_RETENTION_MS: "$CLIENT_DISCONNECTION_RETENTION_MS"
+      PUSHER_ADMIN_WS_MAX_BACKPRESSURE_BYTES: "$PUSHER_ADMIN_WS_MAX_BACKPRESSURE_BYTES"
+      ENABLE_TUTORIAL: "$ENABLE_TUTORIAL"
+      # Woka settings
+      DEFAULT_WOKA_NAME: ${DEFAULT_WOKA_NAME:-}
+      DEFAULT_WOKA_TEXTURE: ${DEFAULT_WOKA_TEXTURE:-}
+      SKIP_CAMERA_PAGE: ${SKIP_CAMERA_PAGE:-false}
+      DEFAULT_CAMERA_PRIVACY_SETTINGS: ${DEFAULT_CAMERA_PRIVACY_SETTINGS:-false}
+      DEFAULT_MICROPHONE_PRIVACY_SETTINGS: ${DEFAULT_MICROPHONE_PRIVACY_SETTINGS:-true}
+      BYPASS_PWA: ${BYPASS_PWA:-false}
+      PROVIDE_DEFAULT_WOKA_NAME: ${PROVIDE_DEFAULT_WOKA_NAME:-}
+      PROVIDE_DEFAULT_WOKA_TEXTURE: ${PROVIDE_DEFAULT_WOKA_TEXTURE:-}
+      SERVER_NAME: $SERVER_NAME
+      SERVER_MOTD: $SERVER_MOTD
+      SERVER_ICON: $SERVER_ICON
+      # Report issues menu
+      ENABLE_REPORT_ISSUES_MENU: $ENABLE_REPORT_ISSUES_MENU
+      REPORT_ISSUES_URL: $REPORT_ISSUES_URL
+      # LogRocket
+      LOGROCKET_ID: $LOGROCKET_ID
+      # Sentry integration
+      SENTRY_DSN_FRONT: ${SENTRY_DSN_FRONT:-}
+      SENTRY_DSN_PUSHER: ${SENTRY_DSN_PUSHER:-}
+      SENTRY_ENVIRONMENT: ${SENTRY_ENVIRONMENT:-}
+      SENTRY_RELEASE: ${SENTRY_RELEASE:-}
+      SENTRY_ORG: ${SENTRY_ORG:-}
+      SENTRY_PROJECT: ${SENTRY_PROJECT:-}
+      # Room API
+      ROOM_API_PORT: "50051"
+      ROOM_API_SECRET_KEY: ${ROOM_API_SECRET_KEY}
+      #GRPC_VERBOSITY: DEBUG
+      #GRPC_TRACE: all
+      # Integration tools
+      KLAXOON_ENABLED: "$KLAXOON_ENABLED"
+      KLAXOON_CLIENT_ID: "${KLAXOON_CLIENT_ID:-}"
+      YOUTUBE_ENABLED: "$YOUTUBE_ENABLED"
+      GOOGLE_DRIVE_ENABLED: "$GOOGLE_DRIVE_ENABLED"
+      GOOGLE_DOCS_ENABLED: "$GOOGLE_DOCS_ENABLED"
+      GOOGLE_SHEETS_ENABLED: "$GOOGLE_SHEETS_ENABLED"
+      GOOGLE_SLIDES_ENABLED: "$GOOGLE_SLIDES_ENABLED"
+      ERASER_ENABLED: "$ERASER_ENABLED"
+      EXCALIDRAW_ENABLED: "$EXCALIDRAW_ENABLED"
+      EXCALIDRAW_DOMAINS: "${EXCALIDRAW_DOMAINS:-}"
+      EMBEDDED_DOMAINS_WHITELIST: "${EMBEDDED_DOMAINS_WHITELIST:-}"
+      CARDS_ENABLED: "$CARDS_ENABLED"
+      TLDRAW_ENABLED: "$TLDRAW_ENABLED"
+      # Report issues menu
+      ACTIVE_REPORT_ISSUES_MENU: "true"
+      URL_REPORT_ISSUES: "https://github.com/workadventure/workadventure/issues"
+      # Google drive picker
+      GOOGLE_DRIVE_PICKER_CLIENT_ID: "${GOOGLE_DRIVE_PICKER_CLIENT_ID:-}"
+      GOOGLE_DRIVE_PICKER_APP_ID: "${GOOGLE_DRIVE_PICKER_APP_ID:-}"
+      MINIMUM_DISTANCE: "${MINIMUM_DISTANCE}"
+      #Chat
+      MATRIX_API_URI: http://synapse:8008/
+      MATRIX_PUBLIC_URI: http://matrix.workadventure.localhost
+      MATRIX_ADMIN_USER: admin
+      MATRIX_ADMIN_PASSWORD: MySecretPassword
+      MATRIX_DOMAIN: matrix.workadventure.localhost
+      # oEmbed providers
+      EMBEDLY_KEY: "$EMBEDLY_KEY"
+      # Map editor restrictions (allow all users when OIDC is enabled by default)
+      MAP_EDITOR_ALLOW_ALL_USERS: "false"
+      MAX_DISPLAYED_VIDEOS: ${MAX_DISPLAYED_VIDEOS:-}
+      LIVEKIT_PIXEL_DENSITY: "${LIVEKIT_PIXEL_DENSITY:-}"
+
+      # "selfie-segmentation" or "tasks-vision"
+      # TODO: remove "selfie-segmentation" code when tasks-vision is stable enough
     labels:
       - "traefik.enable=true"
-      - "traefik.http.routers.pusher.rule=Host(`pusher.workadventure.localhost`)"
-      - "traefik.http.routers.pusher.entryPoints=web"
-      - "traefik.http.services.pusher.loadbalancer.server.port=8080"
-      - "traefik.http.routers.pusher-ssl.rule=Host(`pusher.workadventure.localhost`)"
-      - "traefik.http.routers.pusher-ssl.entryPoints=websecure"
-      - "traefik.http.routers.pusher-ssl.tls=true"
-      - "traefik.http.routers.pusher-ssl.service=pusher"
+
+      - "traefik.http.routers.front.rule=Host(`front.workadventure.localhost`)"
+      - "traefik.http.routers.front.service=front"
+      - "traefik.http.services.front.loadbalancer.server.port=8080"
+
+      # Serve Vite's dev module graph (/src, /node_modules, /@fs) same-origin under the play host too.
+      # Some dev-only URLs are root-relative and resolve against the page (e.g. the noise suppression
+      # AudioWorklet of @workadventure/noise-suppression/vite). Priority 2 beats the play catch-all
+      # (priority 1); the front router still wins on the front.* host via its longer Host rule.
+      - "traefik.http.routers.play-vite.rule=HostRegexp(`^.+$`) && (PathPrefix(`/src`) || PathPrefix(`/node_modules`) || PathPrefix(`/@fs`) || PathPrefix(`/@vite`) || PathPrefix(`/@id`))"
+      - "traefik.http.routers.play-vite.priority=2"
+      - "traefik.http.routers.play-vite.service=front"
+
+      - "traefik.http.routers.room-api.rule=Host(`room-api.workadventure.localhost`)"
+      - "traefik.http.routers.room-api.service=room-api"
+      - "traefik.http.services.room-api.loadbalancer.server.port=50051"
+      - "traefik.http.services.room-api.loadbalancer.server.scheme=h2c"
+
+      - "traefik.http.routers.play.rule=HostRegexp(`^.+$`)"
+      - "traefik.http.routers.play.priority=1"
+      - "traefik.http.routers.play.service=play"
+      - "traefik.http.services.play.loadbalancer.server.port=3000"
+
+      - "traefik.http.routers.play-ws.rule=HostRegexp(`^.+$`) && PathPrefix(`/ws/`)"
+      - "traefik.http.routers.play-ws.priority=2"
+      - "traefik.http.routers.play-ws.service=play-ws"
+      - "traefik.http.services.play-ws.loadbalancer.server.port=3001"
+      - "traefik.http.services.play-ws.loadbalancer.sticky.cookie=true"
+      - "traefik.http.services.play-ws.loadbalancer.sticky.cookie.name=wa_ws_affinity"
+      - "traefik.http.services.play-ws.loadbalancer.sticky.cookie.httpOnly=true"
+      - "traefik.http.services.play-ws.loadbalancer.sticky.cookie.sameSite=lax"
 
   maps:
     image: thecodingmachine/php:8.1-v4-apache-node12
@@ -111,7 +222,6 @@ services:
       #APACHE_EXTENSION_HEADERS: 1
       STARTUP_COMMAND_0: sudo a2enmod headers
       STARTUP_COMMAND_1: yarn install
-      STARTUP_COMMAND_2: yarn run dev &
     volumes:
       - ./maps:/var/www/html
     labels:
@@ -119,74 +229,147 @@ services:
       - "traefik.http.routers.maps.rule=Host(`maps.workadventure.localhost`)"
       - "traefik.http.routers.maps.entryPoints=web,traefik"
       - "traefik.http.services.maps.loadbalancer.server.port=80"
-      - "traefik.http.routers.maps-ssl.rule=Host(`maps.workadventure.localhost`)"
-      - "traefik.http.routers.maps-ssl.entryPoints=websecure"
-      - "traefik.http.routers.maps-ssl.tls=true"
-      - "traefik.http.routers.maps-ssl.service=maps"
 
   back:
-    image: thecodingmachine/nodejs:12
-    command: yarn dev
-    #command: yarn run profile
+    image: ghcr.io/thecodingmachine/nodejs:v2-24-trixie
+    command: npm run dev
+    working_dir: /usr/src/app/back
     environment:
-      DEBUG: "*"
-      STARTUP_COMMAND_1: yarn install
-      # wait for files generated by "messages" container to exists
-      STARTUP_COMMAND_2: while [ ! -f /usr/src/app/src/Messages/generated/messages_pb.js ]; do sleep 1; done
-      SECRET_KEY: yourSecretKey
+      #DEBUG: "*"
+      PLAY_URL: http://play.workadventure.localhost
+      MINIMUM_DISTANCE: "${MINIMUM_DISTANCE}"
+      GROUP_RADIUS: "${GROUP_RADIUS}"
+      # On startup, we ask the messages container to regenerate the files.
+      # Note: we need to use this "messages" container because of ARM64 processors that are not supported with protoc (used in "messages" container)
+      #STARTUP_COMMAND_0: touch /usr/src/app/back/src/Messages/generate_request/need_regenerate
+      STARTUP_COMMAND_1: ../wait-proto.sh
+      STARTUP_COMMAND_2: ../npm-install.sh
+      # wait for files to be generated by "messages" container
+      #STARTUP_COMMAND_2: while [ -f /usr/src/app/back/src/Messages/generate_request/need_regenerate ]; do sleep 1; done
+      SECRET_KEY: "$SECRET_KEY"
       SECRET_JITSI_KEY: "$SECRET_JITSI_KEY"
+      ENABLE_MAP_EDITOR: "$ENABLE_MAP_EDITOR"
       ALLOW_ARTILLERY: "true"
-      ADMIN_API_TOKEN: "$ADMIN_API_TOKEN"
+      ADMIN_API_URL: "${ADMIN_API_URL:-}"
+      ADMIN_API_TOKEN: "${ADMIN_API_TOKEN:-}"
       JITSI_URL: $JITSI_URL
       JITSI_ISS: $JITSI_ISS
-      TURN_STATIC_AUTH_SECRET: SomeStaticAuthSecret
-      MAX_PER_GROUP: "MAX_PER_GROUP"
+      BBB_URL: $BBB_URL
+      BBB_SECRET: $BBB_SECRET
+      MAX_PER_GROUP: "$MAX_PER_GROUP"
       REDIS_HOST: redis
       NODE_ENV: development
       STORE_VARIABLES_FOR_LOCAL_MAPS: "true"
+      PROMETHEUS_AUTHORIZATION_TOKEN: "$PROMETHEUS_AUTHORIZATION_TOKEN"
+      MAP_STORAGE_URL: "map-storage:50053"
+      PUBLIC_MAP_STORAGE_URL: "http://map-storage.workadventure.localhost"
+      INTERNAL_MAP_STORAGE_URL: "http://map-storage:3000"
+      PLAYER_VARIABLES_MAX_TTL: $PLAYER_VARIABLES_MAX_TTL
+      ENABLE_CHAT: "$ENABLE_CHAT"
+      ENABLE_CHAT_UPLOAD: "$ENABLE_CHAT_UPLOAD"
+      # Sentry integration
+      SENTRY_DSN: ${SENTRY_DSN_BACK:-}
+      SENTRY_ENVIRONMENT: ${SENTRY_ENVIRONMENT:-}
+      SENTRY_RELEASE: ${SENTRY_RELEASE:-}
     volumes:
-      - ./back:/usr/src/app
+      - .:/usr/src/app
+    tmpfs: /tmp
+    ports:
+      - "9232:9229"
     labels:
       - "traefik.enable=true"
       - "traefik.http.routers.back.rule=Host(`api.workadventure.localhost`)"
       - "traefik.http.routers.back.entryPoints=web"
+      - "traefik.http.routers.back.service=back"
       - "traefik.http.services.back.loadbalancer.server.port=8080"
-      - "traefik.http.routers.back-ssl.rule=Host(`api.workadventure.localhost`)"
-      - "traefik.http.routers.back-ssl.entryPoints=websecure"
-      - "traefik.http.routers.back-ssl.tls=true"
-      - "traefik.http.routers.back-ssl.service=back"
+
+  map-storage:
+    image: ghcr.io/thecodingmachine/nodejs:v2-24-trixie
+    command: npm run start:dev
+    #command: npm run profile
+    working_dir: /usr/src/app/map-storage
+    environment:
+      #DEBUG: "*"
+      STARTUP_COMMAND_1: ../wait-proto.sh
+      STARTUP_COMMAND_2: ../npm-install.sh
+      NODE_ENV: development
+      PROMETHEUS_AUTHORIZATION_TOKEN: "$PROMETHEUS_AUTHORIZATION_TOKEN"
+      ENABLE_BASIC_AUTHENTICATION: "true"
+      AUTHENTICATION_USER: "john.doe"
+      AUTHENTICATION_PASSWORD: "password"
+      ENABLE_BEARER_AUTHENTICATION: "true"
+      AUTHENTICATION_TOKEN: "123"
+      API_URL: back:50051
+      # Sentry integration
+      SENTRY_DSN: ${SENTRY_DSN_MAPSTORAGE:-}
+      SENTRY_ENVIRONMENT: ${SENTRY_ENVIRONMENT:-}
+      SENTRY_RELEASE: ${SENTRY_RELEASE:-}
+      PATH_PREFIX: ""
+      MAP_STORAGE_API_TOKEN: "FFVSGBSGBSGFB23SFGBSFG4BS"
+      PUSHER_URL: http://play.workadventure.localhost
+      WHITELISTED_RESOURCE_URLS: ""
+      SECRET_KEY: "$SECRET_KEY"
+    volumes:
+      - .:/usr/src/app
+    tmpfs: /tmp
+    ports:
+      - "9233:9229"
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.map-storage.rule=Host(`map-storage.workadventure.localhost`)"
+      - "traefik.http.routers.map-storage.entryPoints=web"
+      - "traefik.http.routers.map-storage.service=map-storage"
+      - "traefik.http.services.map-storage.loadbalancer.server.port=3000"
+      - "traefik.http.routers.map-storage-ui.rule=Host(`map-storage.workadventure.localhost`) && PathPrefix(`/ui/`)"
+      - "traefik.http.routers.map-storage-ui.entryPoints=web"
+      - "traefik.http.routers.map-storage-ui.service=map-storage-ui"
+      - "traefik.http.services.map-storage-ui.loadbalancer.server.port=8080"
 
   uploader:
-    image: thecodingmachine/nodejs:12
-    command: yarn dev
-    #command: yarn run profile
+    image: ghcr.io/thecodingmachine/nodejs:v2-24-trixie
+    command: npm run dev
+    #command: npm run profile
+    working_dir: /usr/src/app/uploader
     environment:
       DEBUG: "*"
-      STARTUP_COMMAND_1: yarn install
+      STARTUP_COMMAND_1: ../npm-install.sh
+      UPLOADER_URL: http://uploader.workadventure.localhost
+      #AWS
+      AWS_ACCESS_KEY_ID: "${AWS_ACCESS_KEY_ID:-}"
+      AWS_SECRET_ACCESS_KEY: "${AWS_SECRET_ACCESS_KEY:-}"
+      AWS_DEFAULT_REGION: "${AWS_DEFAULT_REGION:-}"
+      AWS_BUCKET: "${AWS_BUCKET:-}"
+      AWS_ENDPOINT: "${AWS_ENDPOINT:-}"
+      UPLOADER_AWS_SIGNED_URL_EXPIRATION: "${UPLOADER_AWS_SIGNED_URL_EXPIRATION:-}"
+      #REDIS
+      REDIS_HOST: "${UPLOADER_REDIS_HOST:-}"
+      REDIS_PORT: "${UPLOADER_REDIS_PORT:-}"
+      REDIS_DB_NUMBER: "${UPLOADER_REDIS_DB_NUMBER:-}"
+      ENABLE_CHAT_UPLOAD: "$ENABLE_CHAT_UPLOAD"
+      UPLOAD_MAX_FILESIZE: "${UPLOAD_MAX_FILESIZE:-}"
     volumes:
-      - ./uploader:/usr/src/app
+      - .:/usr/src/app
+    tmpfs: /tmp
+    ports:
+      - "9234:9229"
     labels:
       - "traefik.enable=true"
       - "traefik.http.routers.uploader.rule=Host(`uploader.workadventure.localhost`)"
       - "traefik.http.routers.uploader.entryPoints=web"
       - "traefik.http.services.uploader.loadbalancer.server.port=8080"
-      - "traefik.http.routers.uploader-ssl.rule=Host(`uploader.workadventure.localhost`)"
-      - "traefik.http.routers.uploader-ssl.entryPoints=websecure"
-      - "traefik.http.routers.uploader-ssl.tls=true"
-      - "traefik.http.routers.uploader-ssl.service=uploader"
 
   messages:
-    #image: thecodingmachine/nodejs:14
-    image: thecodingmachine/workadventure-back-base:latest
+    image: ghcr.io/thecodingmachine/nodejs:v2-24-trixie-build
     environment:
-      #STARTUP_COMMAND_0: sudo apt-get install -y inotify-tools
-      STARTUP_COMMAND_1: yarn install
-      STARTUP_COMMAND_2: yarn run proto:watch
+      STARTUP_COMMAND_1: npm install
+      STARTUP_COMMAND_2: npm run proto:watch
     volumes:
       - ./messages:/usr/src/app
       - ./back:/usr/src/back
-      - ./front:/usr/src/front
-      - ./pusher:/usr/src/pusher
+      - ./play:/usr/src/play
+      #- ./chat:/usr/src/chat
+      - ./map-storage:/usr/src/map-storage
+      - ./libs:/usr/src/libs
 
   redis:
     image: redis:6
@@ -198,22 +381,162 @@ services:
       - "traefik.http.routers.redisinsight.rule=Host(`redis.workadventure.localhost`)"
       - "traefik.http.routers.redisinsight.entryPoints=web"
       - "traefik.http.services.redisinsight.loadbalancer.server.port=8001"
-      - "traefik.http.routers.redisinsight-ssl.rule=Host(`redis.workadventure.localhost`)"
-      - "traefik.http.routers.redisinsight-ssl.entryPoints=websecure"
-      - "traefik.http.routers.redisinsight-ssl.tls=true"
-      - "traefik.http.routers.redisinsight-ssl.service=redisinsight"
 
   icon:
-    image: matthiasluedtke/iconserver:v3.13.0
+    image: matthiasluedtke/iconserver:v3.21.0
     labels:
       - "traefik.enable=true"
       - "traefik.http.routers.icon.rule=Host(`icon.workadventure.localhost`)"
       - "traefik.http.routers.icon.entryPoints=web"
       - "traefik.http.services.icon.loadbalancer.server.port=8080"
-      - "traefik.http.routers.icon-ssl.rule=Host(`icon.workadventure.localhost`)"
-      - "traefik.http.routers.icon-ssl.entryPoints=websecure"
-      - "traefik.http.routers.icon-ssl.tls=true"
-      - "traefik.http.routers.icon-ssl.service=icon"
+
+  # A mock server to test OpenID connect connectivity
+  oidc-server-mock:
+    image: ghcr.io/soluto/oidc-server-mock:0.7.0
+    environment:
+      ASPNETCORE_ENVIRONMENT: Development
+      SERVER_OPTIONS_INLINE: |
+        {
+          "AccessTokenJwtType": "JWT",
+          "Discovery": {
+            "ShowKeySet": true
+          },
+          "Authentication": {
+            "CookieSameSiteMode": "Lax",
+            "CheckSessionCookieSameSiteMode": "Lax"
+          }
+        }
+      LOGIN_OPTIONS_INLINE: |
+        {
+          "AllowRememberLogin": false
+        }
+      LOGOUT_OPTIONS_INLINE: |
+        {
+          "AutomaticRedirectAfterSignOut": true
+        }
+      API_SCOPES_INLINE: |
+        - Name: tags
+          UserClaims:
+            - tags-scope
+      API_RESOURCES_INLINE: |
+        - Name: some-app
+          Scopes:
+            - some-app-scope-1
+            - tags-scope
+          UserClaims:
+            - tags
+      USERS_CONFIGURATION_INLINE: |
+        [
+          {
+            "SubjectId":"1",
+            "Username":"User1",
+            "Password":"pwd",
+            "Claims": [
+              {
+                "Type": "name",
+                "Value": "John Doe",
+                "ValueType": "string",
+              },
+              {
+                "Type": "email",
+                "Value": "john.doe@example.com",
+                "ValueType": "string"
+              },
+              {
+                "Type": "tags",
+                "Value": "[\"admin\"]",
+                "ValueType": "json"
+              },
+            ]
+          },
+          {
+            "SubjectId":"2",
+            "Username":"User2",
+            "Password":"pwd",
+            "Claims": [
+              {
+                "Type": "name",
+                "Value": "Alice Doe",
+                "ValueType": "string",
+              },
+              {
+                "Type": "email",
+                "Value": "alice.doe@example.com",
+                "ValueType": "string"
+              },
+              {
+                "Type": "tags",
+                "Value": "[\"member\"]",
+                "ValueType": "json"
+              },
+            ]
+          },
+          {
+            "SubjectId":"3",
+            "Username":"UserMatrix",
+            "Password":"pwd",
+            "Claims": [
+              {
+                "Type": "name",
+                "Value": "John Doe",
+                "ValueType": "string",
+              },
+              {
+                "Type": "email",
+                "Value": "john.doe@example.com",
+                "ValueType": "string"
+              },
+              {
+                "Type": "tags",
+                "Value": "[\"admin\"]",
+                "ValueType": "json"
+              },
+            ]
+          }
+        ]
+      IDENTITY_RESOURCES_INLINE: |
+        [
+          {
+            "Name": "tags-scope",
+            "ClaimTypes": ["tags"]
+          }
+        ]
+      CLIENTS_CONFIGURATION_PATH: /tmp/config/clients-config.json
+    volumes:
+      - ./contrib/oidc-server-mock:/tmp/config:ro
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.oidc.rule=Host(`oidc.workadventure.localhost`)"
+      - "traefik.http.routers.oidc.entryPoints=web"
+    healthcheck:
+      #disable: true
+      timeout: 5s
+    # A mock server to test OpenID connect connectivity
+
+  synapse:
+    # Note: v1.141.0 introduces a breaking change in OIDC authentication in http with Webkit
+    # See https://github.com/element-hq/synapse/pull/19309
+    image: matrixdotorg/synapse:v1.140.0
+    entrypoint: /data/start.sh
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.matrix.rule=Host(`matrix.workadventure.localhost`)"
+      - "traefik.http.routers.matrix.entryPoints=web"
+      - "traefik.http.services.matrix.loadbalancer.server.port=8008"
+      - "traefik.http.routers.matrix.service=matrix"
+    volumes:
+      - ./synapse:/data/
+      #- ./synapse/homeserver.template.yaml:/data/homeserver.template.yaml
+      - ./synapse/federation:/etc/nginx/vhost.d/matrix.workadventure.localhost
+    environment:
+      VIRTUAL_HOST: "matrix.workadventure.localhost"
+      VIRTUAL_PORT: 8008
+      LETSENCRYPT_HOST: "matrix.workadventure.localhost"
+      SYNAPSE_SERVER_NAME: "matrix.workadventure.localhost"
+      SYNAPSE_REPORT_STATS: "yes"
+      MATRIX_ADMIN_USER: admin
+      MATRIX_ADMIN_PASSWORD: MySecretPassword
+      JWT_SECRET: "$SECRET_KEY"
 
 #  coturn:
 #    image: coturn/coturn:4.5.2
@@ -239,3 +562,5 @@ services:
 #      #- --cert=/root/letsencrypt/fullchain.pem
 #      #- --pkey=/root/letsencrypt/privkey.pem
 #    network_mode: host
+#volumes:
+#  synapsedata:

@@ -1,0 +1,57 @@
+<script lang="ts">
+    import ActionBarButton from "../ActionBarButton.svelte";
+    import { openedMenuStore } from "../../../Stores/MenuStore";
+
+    import PictureInPictureIcon from "../../Icons/PictureInPictureIcon.svelte";
+    import PictureInPictureOffIcon from "../../Icons/PictureInPictureOffIcon.svelte";
+    import {
+        activePictureInPictureStore,
+        askPictureInPictureActivatingStore,
+        pictureInPictureSupportedStore,
+    } from "../../../Stores/PeerStore";
+    import { localUserStore } from "../../../Connection/LocalUserStore";
+    import { LL } from "../../../../i18n/i18n-svelte";
+    import { analyticsClient } from "../../../Administration/AnalyticsClient";
+
+    interface Props {
+        onclick?: () => void;
+    }
+
+    const { onclick }: Props = $props();
+
+    function pictureInPictureClick() {
+        // Analytics
+        analyticsClient.trackAdminEvent("meeting.picture_in_picture.toggled", {
+            open: !$askPictureInPictureActivatingStore,
+        });
+
+        // Create request to the navigateur to enter picture in picture mode
+        onclick?.();
+
+        // If the settings of user do not allow picture in picture, we enable it
+        if (!localUserStore.getAllowPictureInPicture()) {
+            localUserStore.setAllowPictureInPicture(true);
+        }
+
+        askPictureInPictureActivatingStore.set(!$askPictureInPictureActivatingStore);
+    }
+</script>
+
+<ActionBarButton
+    classList="group/btn-picture-in-picture"
+    disabledHelp={$openedMenuStore !== undefined}
+    state={$activePictureInPictureStore ? "active" : "normal"}
+    dataTestId={$pictureInPictureSupportedStore ? "pictureInPictureButton" : "pictureInPictureButtonDisabled"}
+    tooltipTitle={$LL.actionbar.help.pictureInPicture.title()}
+    desc={$pictureInPictureSupportedStore
+        ? $LL.actionbar.help.pictureInPicture.desc()
+        : $LL.actionbar.help.pictureInPicture.descDisabled()}
+    media="./static/Videos/PictureInPicture.mp4"
+    onclick={pictureInPictureClick}
+>
+    {#if $activePictureInPictureStore}
+        <PictureInPictureOffIcon />
+    {:else}
+        <PictureInPictureIcon />
+    {/if}
+</ActionBarButton>

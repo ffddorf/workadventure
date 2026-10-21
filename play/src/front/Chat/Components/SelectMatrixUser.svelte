@@ -1,0 +1,167 @@
+<script lang="ts">
+    import { onMount } from "svelte";
+    import { get } from "svelte/store";
+    import * as Sentry from "@sentry/svelte";
+    import Select from "svelte-select";
+    import LL from "../../../i18n/i18n-svelte";
+    import { gameManager } from "../../Phaser/Game/GameManager";
+    import { chatSearchBarValue } from "../Stores/ChatStore";
+    import type { SelectItem } from "./Room/searchChatMembersRule";
+    import { searchChatMembersRule } from "./Room/searchChatMembersRule";
+    import { IconUsers } from "@wa-icons";
+
+    const SEARCH_DEBOUNCE_DELAY = 300;
+
+    interface Props {
+        value?: SelectItem[];
+        placeholder?: string;
+        filterText?: string;
+        onerror?: (error: string) => void;
+    }
+
+    let { value = $bindable<SelectItem[]>(), placeholder = "", filterText = "", onerror }: Props = $props();
+
+    if (value === undefined) {
+        value = [];
+    }
+
+    let members: SelectItem[] = $state([]);
+    let createdItem: SelectItem | undefined = $state(undefined);
+    let items: SelectItem[] = $derived(createdItem === undefined ? members : [...members, createdItem]);
+    const chat = gameManager.chatConnection;
+
+    const { subscribeToWorldMembers, searchWorldMembers } = searchChatMembersRule();
+
+    function handleSearchError(error: unknown) {
+        onerror?.(get(LL).chat.matrixUserSelect.failedToLoadUsers());
+        console.error(error);
+        Sentry.captureException(error);
+    }
+
+    function handleFilter(e: CustomEvent) {
+        if (value.find((i) => i.label === filterText)) return;
+        if (e.detail.length === 0 && filterText.length > 0) {
+            createdItem = { value: filterText, label: filterText, created: true };
+        } else if (filterText.length === 0) {
+            createdItem = undefined;
+        }
+    }
+
+    async function handleChange() {
+        const verificationResults = await Promise.all(
+            value.map(async (item) => {
+                if (item.verified !== undefined) {
+                    return { item, isValid: item.verified };
+                }
+                try {
+                    const isValid = await chat.isUserExist(item.value);
+                    return { item, isValid };
+                } catch (error) {
+                    console.error(error);
+                    return { item, isValid: false };
+                }
+            }),
+        );
+
+        const validItems = verificationResults
+            .filter(({ isValid }) => isValid)
+            .map(({ item }) => ({ ...item, verified: true }));
+
+        const hasInvalidItems = verificationResults.some(({ isValid }) => !isValid);
+        if (hasInvalidItems) {
+            onerror?.(get(LL).chat.matrixUserSelect.userNotFound());
+        }
+
+        return validItems;
+    }
+
+    onMount(() => {
+        let unsubscribeFromMembers: (() => void) | undefined;
+        let destroyed = false;
+
+        subscribeToWorldMembers((newMembers) => {
+            members = newMembers;
+        })
+            .then((unsubscribe) => {
+                if (destroyed) {
+                    unsubscribe();
+                    return;
+                }
+                unsubscribeFromMembers = unsubscribe;
+            })
+            .catch(handleSearchError);
+
+        return () => {
+            destroyed = true;
+            unsubscribeFromMembers?.();
+            // The user providers are shared with the chat sidebar: give it back the filter of its own search bar.
+            searchWorldMembers(get(chatSearchBarValue)).catch((error) => console.error(error));
+        };
+    });
+
+    // Only a limited number of members is kept in memory, so we ask the user providers to search the
+    // whole world (the search is performed by the Admin API) whenever the user types in the selector.
+    let searchedText = "";
+    $effect(() => {
+        const text = filterText;
+        if (text === searchedText) {
+            return;
+        }
+        searchedText = text;
+
+        const timeout = setTimeout(() => {
+            searchWorldMembers(text).catch(handleSearchError);
+        }, SEARCH_DEBOUNCE_DELAY);
+
+        return () => clearTimeout(timeout);
+    });
+</script>
+
+<Select
+    bind:value
+    multiple
+    class="border border-solid !bg-contrast !rounded-md"
+    inputStyles="box-shadow:none !important"
+    --border-focused="2px solid hsl(var(--secondary-600))"
+    --border-hover="1px solid hsl(var(--secondary-500))"
+    --input-color="white"
+    --border="1px solid hsl(var(--contrast-400))"
+    --clear-select-color="hsl(var(--danger-500))"
+    --internal-padding="6px"
+    --value-container-padding="6px"
+    --multi-select-input-padding="0 0 0 6px"
+    --multi-item-color="hsl(var(--contrast-900))"
+    --multi-item-bg="hsl(var(--contrast-200))"
+    --multi-select-padding="0 0 0 6px"
+    --multi-item-outline="none"
+    --list-background="hsl(var(--contrast))"
+    --list-empty-color="hsl(var(--contrast-400))"
+    --selected-item-color="hsl(var(--contrast-500)) !important"
+    --selected-item-padding="0 0 0 32px"
+    --list-border-radius="12px"
+    --list-border="solid 1px hsl(var(--contrast-400))"
+    --list-empty-padding="12px"
+    --item-color="hsl(var(--contrast-200))"
+    --item-is-active-bg="hsl(var(--contrast-900))"
+    --item-is-active-color="hsl(var(--contrast-200))"
+    --item-hover-bg="hsl(var(--contrast-900))"
+    --item-hover-color="hsl(var(--contrast-200))"
+    --placeholder-color="hsl(var(--contrast-400))"
+    ----padding="8px"
+    {placeholder}
+    on:change={async () => {
+        const validItems = await handleChange();
+        value = validItems;
+    }}
+    on:filter={handleFilter}
+    bind:filterText
+    {items}
+>
+    <div slot="prepend" class="ps-2">
+        <IconUsers font-size="20" class="text-white" />
+    </div>
+    <div slot="item" let:item class="cursor-pointer">
+        {item.created ? $LL.chat.addNew : ""}
+        {`${item.label} (${item.value})`}
+    </div>
+</Select>

@@ -1,0 +1,562 @@
+<script lang="ts">
+    import { writable } from "svelte/store";
+    import { onMount } from "svelte";
+    import type { OpenWebsitePropertyData } from "@workadventure/map-editor";
+    import { LL } from "../../../i18n/i18n-svelte";
+    import AreaToolImg from "../images/icon-tool-area.png";
+    import EntityToolImg from "../images/icon-tool-entity.svg";
+    import {
+        mapEditorModeStore,
+        mapExplorationAreasStore,
+        mapExplorationEntitiesStore,
+        mapExplorationObjectSelectedStore,
+    } from "../../Stores/MapEditorStore";
+    import { gameManager } from "../../Phaser/Game/GameManager";
+    import type { Entity } from "../../Phaser/ECS/Entity";
+    import type { AreaPreview } from "../../Phaser/Components/MapEditor/AreaPreview";
+    import type { ExplorerTool } from "../../Phaser/Game/MapEditor/Tools/ExplorerTool";
+    import AddPropertyButtonWrapper from "../MapEditor/PropertyEditor/AddPropertyButtonWrapper.svelte";
+
+    import { mapExplorerSearchinputFocusStore } from "../../Stores/UserInputStore";
+    import Input from "../Input/Input.svelte";
+    import { analyticsClient } from "../../Administration/AnalyticsClient";
+    import { warningMessageStore } from "../../Stores/ErrorStore";
+    import { WOKA_SPEED } from "../../Enum/EnvironmentVariable";
+    import { IconChevronUp, IconEye, IconWalk } from "@wa-icons";
+
+    let filter = $state("");
+    let selectFilters = writable<Array<string>>(new Array<string>());
+    let entitiesListFiltered = writable<Map<string, Entity>>(new Map());
+    let areasListFiltered = writable<Map<string, AreaPreview>>(new Map());
+
+    const applicationManager = gameManager.getCurrentGameScene().applicationManager;
+
+    onMount(() => {
+        init();
+    });
+
+    function init() {
+        entitiesListFiltered.set($mapExplorationEntitiesStore);
+        if ($mapExplorationAreasStore) areasListFiltered.set($mapExplorationAreasStore);
+    }
+
+    // Name used to display and sort an entity: its custom name if set, otherwise the prefab name.
+    function getEntityDisplayName(entity: Entity): string {
+        const name = entity.getEntityData().name;
+        return name && name !== "" ? name : entity.getPrefab().name;
+    }
+
+    // Name used to display and sort an area (may be an empty string when the area has no name).
+    function getAreaDisplayName(area: AreaPreview): string {
+        return area.getAreaData().name;
+    }
+
+    // Sort the filtered entries alphabetically by display name (case-insensitive, natural number order).
+    function sortByName<T>(entries: Iterable<[string, T]>, getName: (item: T) => string): Array<[string, T]> {
+        return [...entries].sort(([, a], [, b]) =>
+            getName(a).localeCompare(getName(b), undefined, { sensitivity: "base", numeric: true }),
+        );
+    }
+
+    function onChangeFilterHandle() {
+        entitiesListFiltered.set(new Map());
+        for (let [key, entity] of $mapExplorationEntitiesStore) {
+            // Check filter by name
+            if (filter && filter != "" && entity.getPrefab().name.toLowerCase().indexOf(filter.toLowerCase()) == -1)
+                continue;
+
+            // Check filter by properties
+            if ($selectFilters.length == 0) {
+                $entitiesListFiltered.set(key, entity);
+                entityListActive = true;
+                continue;
+            } else {
+                // Check if the entity has the selected properties
+                for (let filter of $selectFilters) {
+                    if (
+                        entity
+                            .getProperties()
+                            .find((p) => p.type === filter || (p as OpenWebsitePropertyData).application === filter)
+                    ) {
+                        $entitiesListFiltered.set(key, entity);
+                        entityListActive = true;
+                    }
+                }
+            }
+        }
+
+        areasListFiltered.set(new Map());
+        if ($mapExplorationAreasStore) {
+            for (let [key, area] of $mapExplorationAreasStore) {
+                // Set area if the name match the filter and if the area has the selected properties
+                if (filter && filter != "" && area.getAreaData().name.toLowerCase().indexOf(filter.toLowerCase()) == -1)
+                    continue;
+
+                // Check filter by properties
+                if ($selectFilters.length == 0) {
+                    $areasListFiltered.set(key, area);
+                    areaListActive = true;
+                    continue;
+                } else {
+                    // Check if the area has the selected properties
+                    for (let filter of $selectFilters) {
+                        if (
+                            area
+                                .getProperties()
+                                .find((p) => p.type === filter || (p as OpenWebsitePropertyData).application === filter)
+                        ) {
+                            $areasListFiltered.set(key, area);
+                            areaListActive = true;
+                        }
+                    }
+                }
+            }
+        }
+        analyticsClient.trackAdminEvent("map_explorer.filtered");
+    }
+
+    function addFilter(filterName: string) {
+        selectFilters.update((filters) => {
+            if (filters.includes(filterName)) {
+                return filters.filter((f) => f !== filterName);
+            }
+            return [...filters, filterName];
+        });
+        onChangeFilterHandle();
+    }
+    let entityListActive = $state(false);
+    let areaListActive = $state(false);
+    function toggleEntityList() {
+        entityListActive = !entityListActive;
+    }
+    function toggleAreaList() {
+        areaListActive = !areaListActive;
+    }
+
+    function highlightEntity(entity: Entity) {
+        if ($mapExplorationObjectSelectedStore != undefined) return;
+        entity.setPointedToEditColor(0xf9e82d);
+        gameManager.getCurrentGameScene().getCameraManager().centerCameraOn(entity);
+        // Use explorer tool to define the zoom to center camera position
+        const activeTool = gameManager.getCurrentGameScene().getMapEditorModeManager()?.currentlyActiveTool;
+        (activeTool as ExplorerTool | undefined)?.defineZoomToCenterCameraPosition();
+    }
+    function unhighlightEntity(entity: Entity) {
+        // Don't unhighlight if the entity is selected
+        if ($mapExplorationObjectSelectedStore == entity) return;
+
+        entity.setPointedToEditColor(0x00000);
+        gameManager.getCurrentGameScene().markDirty();
+    }
+    function highlightArea(area: AreaPreview) {
+        if ($mapExplorationObjectSelectedStore != undefined) return;
+        area.setStrokeStyle(2, 0xf9e82d);
+        gameManager.getCurrentGameScene().getCameraManager().centerCameraOn(area);
+        // Use explorer tool to define the zoom to center camera position
+        const activeTool = gameManager.getCurrentGameScene().getMapEditorModeManager()?.currentlyActiveTool;
+        (activeTool as ExplorerTool | undefined)?.defineZoomToCenterCameraPosition();
+    }
+    function unhighlightArea(area: AreaPreview) {
+        // Don't unhighlight if the area is selected
+        if ($mapExplorationObjectSelectedStore == area) return;
+
+        area.setStrokeStyle(2, 0x000000);
+        gameManager.getCurrentGameScene().markDirty();
+    }
+
+    // Prevent the input form to be focused when clicking on the filter input
+    // The UserInputManager service automatically focus the input form when a click event is detected
+    // When user looking for entities or areas, we don't move the player
+    function focusin(event: FocusEvent) {
+        event.stopImmediatePropagation();
+        event.preventDefault();
+        mapExplorerSearchinputFocusStore.set(true);
+    }
+    function focusout(event: FocusEvent) {
+        event.stopImmediatePropagation();
+        event.preventDefault();
+        mapExplorerSearchinputFocusStore.set(false);
+    }
+
+    let timeOutToSelectArea: ReturnType<typeof setTimeout> | undefined;
+    function handlerToSelectArea(area: AreaPreview) {
+        // If the area is already selected, unselect it
+        if ($mapExplorationObjectSelectedStore == area) {
+            unhighlightArea(area);
+            mapExplorationObjectSelectedStore.set(undefined);
+            return;
+        }
+
+        // If no area is selected, select it directly
+        if ($mapExplorationObjectSelectedStore == undefined) {
+            mapExplorationObjectSelectedStore.set(area);
+            return;
+        }
+
+        // if not, unselect first and select after a delay
+        mapExplorationObjectSelectedStore.set(undefined);
+        highlightArea(area);
+        if (timeOutToSelectArea) clearTimeout(timeOutToSelectArea);
+        timeOutToSelectArea = setTimeout(() => {
+            mapExplorationObjectSelectedStore.set(area);
+        }, 800); // use 800ms because the fly transition duration is 500ms and we want to avoid flickering
+    }
+
+    let timeOutToSelectEntity: ReturnType<typeof setTimeout> | undefined;
+    function handlerToSelectEntity(entity: Entity) {
+        // If the entity is already selected, unselect it
+        if ($mapExplorationObjectSelectedStore == entity) {
+            unhighlightEntity(entity);
+            mapExplorationObjectSelectedStore.set(undefined);
+            return;
+        }
+
+        // If no entity is selected, select it directly
+        if ($mapExplorationObjectSelectedStore == undefined) {
+            mapExplorationObjectSelectedStore.set(entity);
+            return;
+        }
+
+        // if not, unselect first and select after a delay
+        mapExplorationObjectSelectedStore.set(undefined);
+        highlightEntity(entity);
+        if (timeOutToSelectEntity) clearTimeout(timeOutToSelectEntity);
+        timeOutToSelectEntity = setTimeout(() => {
+            mapExplorationObjectSelectedStore.set(entity);
+        }, 800); // use 800ms because the fly transition duration is 500ms and we want to avoid flickering
+    }
+
+    // Go to the entity or area
+    function goTo(object: Entity | AreaPreview) {
+        gameManager
+            .getCurrentGameScene()
+            .moveTo(
+                {
+                    x: object.x,
+                    y: object.y,
+                },
+                true,
+                WOKA_SPEED * 2.5,
+            )
+            .catch((error) => {
+                console.warn("Error while moving to the entity or area", error);
+                warningMessageStore.addWarningMessage($LL.mapEditor.explorer.details.errorMovingToObject(), {
+                    closable: true,
+                });
+            });
+        gameManager.getCurrentGameScene().getMapEditorModeManager()?.equipTool(undefined);
+
+        // Close map editor to walk on the entity or zone
+        analyticsClient.trackAdminEvent(!$mapEditorModeStore ? "map_editor.opened" : "map_editor.closed");
+        mapEditorModeStore.switchMode(!$mapEditorModeStore);
+
+        // Close the modal
+        mapExplorationObjectSelectedStore.set(undefined);
+    }
+</script>
+
+<div class="mapexplorer flex flex-col overflow-auto">
+    <div class="header-container">
+        <h3 class="text-l text-left">{$LL.mapEditor.explorer.title()}</h3>
+    </div>
+    <div class="flex flex-col gap-2 justify-center">
+        <div class="flex *:w-full">
+            <Input
+                rounded
+                bind:value={filter}
+                oninput={onChangeFilterHandle}
+                onfocusin={focusin}
+                onfocusout={focusout}
+                placeholder={$LL.mapEditor.entityEditor.itemPicker.searchPlaceholder()}
+            />
+        </div>
+        <div class="flex flex-row overflow-y-hidden overflow-x-scroll">
+            <AddPropertyButtonWrapper
+                property="personalAreaPropertyData"
+                isActive={$selectFilters.includes("personalAreaPropertyData")}
+                onclick={() => addFilter("personalAreaPropertyData")}
+            />
+            <AddPropertyButtonWrapper
+                property="restrictedRightsPropertyData"
+                isActive={$selectFilters.includes("restrictedRightsPropertyData")}
+                onclick={() => addFilter("restrictedRightsPropertyData")}
+            />
+            <AddPropertyButtonWrapper
+                property="jitsiRoomProperty"
+                isActive={$selectFilters.includes("jitsiRoomProperty")}
+                onclick={() => {
+                    addFilter("jitsiRoomProperty");
+                }}
+            />
+            <AddPropertyButtonWrapper
+                property="playAudio"
+                isActive={$selectFilters.includes("playAudio")}
+                onclick={() => {
+                    addFilter("playAudio");
+                }}
+            />
+            <AddPropertyButtonWrapper
+                property="openWebsite"
+                isActive={$selectFilters.includes("openWebsite")}
+                onclick={() => {
+                    addFilter("openWebsite");
+                }}
+            />
+            <AddPropertyButtonWrapper
+                property="speakerMegaphone"
+                isActive={$selectFilters.includes("speakerMegaphone")}
+                onclick={() => {
+                    addFilter("speakerMegaphone");
+                }}
+            />
+            <AddPropertyButtonWrapper
+                property="listenerMegaphone"
+                isActive={$selectFilters.includes("listenerMegaphone")}
+                onclick={() => {
+                    addFilter("listenerMegaphone");
+                }}
+            />
+            <AddPropertyButtonWrapper
+                property="exit"
+                isActive={$selectFilters.includes("exit")}
+                onclick={() => {
+                    addFilter("exit");
+                }}
+            />
+            <AddPropertyButtonWrapper
+                property="start"
+                isActive={$selectFilters.includes("start")}
+                onclick={() => {
+                    addFilter("start");
+                }}
+            />
+            <AddPropertyButtonWrapper
+                property="focusable"
+                isActive={$selectFilters.includes("focusable")}
+                onclick={() => {
+                    addFilter("focusable");
+                }}
+            />
+            <AddPropertyButtonWrapper
+                property="matrixRoomPropertyData"
+                isActive={$selectFilters.includes("matrixRoomPropertyData")}
+                onclick={() => {
+                    addFilter("matrixRoomPropertyData");
+                }}
+            />
+            <AddPropertyButtonWrapper
+                property="openFile"
+                isActive={$selectFilters.includes("openFile")}
+                onclick={() => {
+                    addFilter("openFile");
+                }}
+            />
+            <AddPropertyButtonWrapper
+                property="livekitRoomProperty"
+                isActive={$selectFilters.includes("livekitRoomProperty")}
+                onclick={() => {
+                    addFilter("livekitRoomProperty");
+                }}
+            />
+
+            {#each applicationManager.applications as app, index (`my-own-app-${index}`)}
+                <AddPropertyButtonWrapper
+                    property="openWebsite"
+                    subProperty={app.name}
+                    onclick={() => {
+                        addFilter(app.name);
+                    }}
+                />
+            {/each}
+        </div>
+
+        <div class="flex flex-col gap-2">
+            <!-- svelte-ignore a11y_click_events_have_key_events -->
+            <!-- svelte-ignore a11y_no_static_element_interactions -->
+            <div
+                class="group entities p-2 rounded flex flex-row justify-between items-center cursor-pointer hover:bg-white/10 transition-all"
+                onclick={toggleEntityList}
+            >
+                <div class="flex flex-row items-center justify-start gap-2">
+                    <img
+                        draggable="false"
+                        class="w-10 h-auto pointer-events-none"
+                        src={EntityToolImg}
+                        alt="link icon"
+                    />
+                    {#if $entitiesListFiltered.size > 0}
+                        <span class="pointer-events-none flex flex-row items-center gap-2">
+                            <span
+                                class="flex items-center justify-center p-2 aspect-square rounded-md h-8 font-bold bg-white text-secondary"
+                            >
+                                {$entitiesListFiltered.size}
+                            </span>
+                            <span class="text-white/75 group-hover:text-white"
+                                >{$LL.mapEditor.explorer.entitiesFound($entitiesListFiltered.size > 1)}</span
+                            >
+                        </span>
+                    {:else}
+                        <p class="m-0">{$LL.mapEditor.explorer.noEntitiesFound()}</p>
+                    {/if}
+                </div>
+
+                <button
+                    class="transition-all group-hover:bg-white/10 p-1 rounded-lg aspect-square flex items-center justify-center text-white"
+                    data-testid="toggleFolderEntity"
+                    onclick={(event) => {
+                        event.stopPropagation();
+                        toggleEntityList();
+                    }}
+                >
+                    <IconChevronUp class={`transform transition ${!entityListActive ? "" : "rotate-180"}`} />
+                </button>
+            </div>
+
+            {#if entityListActive && $entitiesListFiltered.size > 0}
+                <div class="entity-items p-2 flex flex-col">
+                    {#each sortByName($entitiesListFiltered, getEntityDisplayName) as [key, entity] (key)}
+                        <!-- svelte-ignore a11y_click_events_have_key_events -->
+                        <!-- svelte-ignore a11y_no_static_element_interactions -->
+                        <div
+                            id={entity.entityId}
+                            onmouseenter={() => highlightEntity(entity)}
+                            onmouseleave={() => unhighlightEntity(entity)}
+                            onclick={() => handlerToSelectEntity(entity)}
+                            class={[
+                                "item p-2 rounded flex flex-row justify-start gap-2 items-center cursor-pointer hover:bg-white/10 transition-all",
+                                {
+                                    "bg-white/10": $mapExplorationObjectSelectedStore === entity,
+                                },
+                            ]}
+                        >
+                            <img
+                                draggable="false"
+                                class="w-6 max-h-10 h-auto mr-2 pointer-events-none object-contain"
+                                src={entity.getPrefab().imagePath}
+                                alt="link icon"
+                            />
+                            <span
+                                class="pointer-events-none w-full text-nowrap text-ellipsis overflow-hidden whitespace-nowrap"
+                                >{entity.getEntityData().name && entity.getEntityData().name !== ""
+                                    ? entity.getEntityData().name
+                                    : entity.getPrefab().name}</span
+                            >
+                            <button
+                                class="transition-all hover:bg-white/10 p-2 rounded-md aspect-square flex items-center justify-center m-0"
+                                onclick={(event) => {
+                                    event.preventDefault();
+                                    event.stopPropagation();
+                                    goTo(entity);
+                                }}
+                            >
+                                <IconWalk font-size="16" />
+                            </button>
+                            <button
+                                class="transition-all hover:bg-white/10 p-2 rounded-md aspect-square flex items-center justify-center m-0"
+                                onclick={(event) => {
+                                    event.preventDefault();
+                                    event.stopPropagation();
+                                    handlerToSelectEntity(entity);
+                                }}
+                            >
+                                <IconEye font-size="16" />
+                            </button>
+                        </div>
+                    {/each}
+                </div>
+            {/if}
+
+            <!-- svelte-ignore a11y_click_events_have_key_events -->
+            <!-- svelte-ignore a11y_no_static_element_interactions -->
+            <div
+                class="group areas p-2 rounded flex flex-row justify-between items-center cursor-pointer hover:bg-white/10 transition-all"
+                onclick={toggleAreaList}
+            >
+                <div class="flex flex-row items-center justify-start gap-2">
+                    <img draggable="false" class="w-10 h-auto pointer-events-none" src={AreaToolImg} alt="link icon" />
+                    {#if $areasListFiltered.size > 0}
+                        <span class="pointer-events-none flex flex-row items-center gap-2">
+                            <span
+                                class="flex items-center justify-center p-2 aspect-square rounded-md h-8 font-bold bg-white text-secondary"
+                            >
+                                {$areasListFiltered.size}
+                            </span>
+                            <span class="text-white/75 group-hover:text-white"
+                                >{$LL.mapEditor.explorer.areasFound($areasListFiltered.size > 1)}</span
+                            >
+                        </span>
+                    {:else}
+                        <p class="m-0 text-white/75 group-hover:text-white">{$LL.mapEditor.explorer.noAreasFound()}</p>
+                    {/if}
+                </div>
+                <button
+                    class="transition-all group-hover:bg-white/10 p-1 rounded-lg aspect-square flex items-center justify-center text-white"
+                    data-testid="toggleFolderArea"
+                    onclick={(event) => {
+                        event.stopPropagation();
+                        toggleAreaList();
+                    }}
+                >
+                    <IconChevronUp class={`transform transition ${!areaListActive ? "" : "rotate-180"}`} />
+                </button>
+            </div>
+            {#if areaListActive && $areasListFiltered.size > 0}
+                <div class="area-items p-2 flex flex-col">
+                    {#if $areasListFiltered.size > 0}
+                        {#each sortByName($areasListFiltered, getAreaDisplayName) as [key, area] (key)}
+                            <!-- svelte-ignore a11y_click_events_have_key_events -->
+                            <!-- svelte-ignore a11y_no_static_element_interactions -->
+                            <div
+                                id={key}
+                                onmouseenter={() => highlightArea(area)}
+                                onmouseleave={() => unhighlightArea(area)}
+                                onclick={() => handlerToSelectArea(area)}
+                                class={[
+                                    "item p-2 rounded flex flex-row justify-start gap-2 items-center cursor-pointer hover:bg-white/10 transition-all",
+                                    {
+                                        "bg-white/10": $mapExplorationObjectSelectedStore === area,
+                                    },
+                                ]}
+                                title={area.getAreaData().name || "No name"}
+                            >
+                                <img
+                                    draggable="false"
+                                    class="w-6 h-auto pointer-events-none"
+                                    src={AreaToolImg}
+                                    alt="link icon"
+                                />
+                                <span
+                                    class="pointer-events-none w-full text-nowrap text-ellipsis overflow-hidden whitespace-nowrap"
+                                    class:italic={!area.getAreaData().name || area.getAreaData().name == ""}
+                                    class:font-bold={area.getAreaData().name && area.getAreaData().name != ""}
+                                >
+                                    {area.getAreaData().name || "No name"}
+                                </span>
+                                <button
+                                    class="transition-all hover:bg-white/10 p-2 rounded-md aspect-square flex items-center justify-center m-0"
+                                    onclick={(event) => {
+                                        event.preventDefault();
+                                        event.stopPropagation();
+                                        goTo(area);
+                                    }}
+                                >
+                                    <IconWalk font-size="16" />
+                                </button>
+                                <button
+                                    class="transition-all hover:bg-white/10 p-2 rounded-md aspect-square flex items-center justify-center m-0"
+                                    onclick={(event) => {
+                                        event.preventDefault();
+                                        event.stopPropagation();
+                                        handlerToSelectArea(area);
+                                    }}
+                                >
+                                    <IconEye font-size="16" />
+                                </button>
+                            </div>
+                        {/each}
+                    {/if}
+                </div>
+            {/if}
+        </div>
+    </div>
+</div>

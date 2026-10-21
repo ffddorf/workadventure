@@ -9,3 +9,20 @@ maps/dist/computer.js
 maps/dist/computer.js.map
 node_modules
 _
+*.code-workspace
+/install.lock
+.vscode/extensions.json
+
+# Helm
+# Chart dependencies
+**/charts/*.tgz
+
+synapse/homeserver.log*
+synapse/matrix.workadventure.localhost.signing.key
+synapse/homeserver.db
+synapse/homeserver.db-*
+synapse/homeserver.yaml
+synapse/media_store/*
+
+.vscode/settings.json
+play/src/i18n/ko-KR/*.backup

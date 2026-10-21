@@ -1,0 +1,123 @@
+import type { MatrixEvent, Room } from "matrix-js-sdk";
+import { Direction, EventType, RelationType } from "matrix-js-sdk";
+import { MapStore } from "@workadventure/store-utils";
+import type { Readable, Writable } from "svelte/store";
+import { get, writable } from "svelte/store";
+import type { ChatMessageReaction, ChatUser } from "../ChatConnection";
+import type { WorkAdventureComponent, WorkAdventureComponentProps } from "../../../../types/component";
+import ReactionIcon from "../../Components/Room/ReactionIcon.svelte";
+import { chatUserFactoryFromEvent } from "./MatrixChatUser";
+
+type EventId = string;
+type ChatUserWithEventId = ChatUser & { eventId: EventId };
+
+export class MatrixChatMessageReaction implements ChatMessageReaction {
+    key: string;
+    messageId: string;
+    users: MapStore<string, ChatUserWithEventId>;
+    reacted: Writable<boolean>;
+    canReact: Readable<boolean>;
+
+    constructor(
+        private matrixRoom: Room,
+        event: MatrixEvent,
+        canReactStore?: Readable<boolean>,
+    ) {
+        const relation = event.getRelation();
+        if (relation === null || relation.rel_type !== "m.annotation") {
+            throw Error("Wrong matrix event object for MessageReaction");
+        }
+
+        const reactionKey = relation.key;
+        const targetEventId = relation.event_id;
+
+        if (reactionKey === undefined || targetEventId === undefined) {
+            throw Error("ReactionKey is undefined or event_id is undefined");
+        }
+        this.key = reactionKey;
+        this.messageId = targetEventId;
+        this.users = new MapStore<string, ChatUserWithEventId>();
+        this.reacted = writable(false);
+        this.canReact =
+            canReactStore ??
+            writable(
+                this.matrixRoom
+                    .getLiveTimeline()
+                    .getState(Direction.Backward)
+                    ?.maySendEvent(EventType.Reaction, this.matrixRoom.client.getSafeUserId()) ?? false,
+            );
+        this.addUser(event);
+    }
+
+    public addUser(event: MatrixEvent) {
+        const userId = event.getSender();
+        const userReactionEventId = event.getId();
+        if (userId === undefined || userReactionEventId === undefined) {
+            return;
+        }
+        if (this.users.get(userId) !== undefined) {
+            return;
+        }
+        const user = chatUserFactoryFromEvent(this.matrixRoom, event);
+        if (user) {
+            this.users.set(user.chatId, {
+                ...user,
+                eventId: userReactionEventId,
+            });
+            this.reacted.set(this.users.get(this.matrixRoom.myUserId) !== undefined);
+        }
+    }
+
+    public removeUser(userId: string) {
+        this.users.delete(userId);
+        if (get(this.reacted) && userId === this.matrixRoom.myUserId) {
+            this.reacted.set(false);
+        }
+    }
+
+    react() {
+        if (!get(this.canReact)) {
+            return;
+        }
+        const userWithReactionEventId = this.users.get(this.matrixRoom.myUserId);
+        if (userWithReactionEventId === undefined) {
+            this.sendMyReaction().catch((error) => console.error(error));
+        } else {
+            this.removeMyReaction(userWithReactionEventId.eventId).catch((error) => console.error(error));
+        }
+    }
+
+    private async sendMyReaction() {
+        try {
+            await this.matrixRoom.client.sendEvent(this.matrixRoom.roomId, EventType.Reaction, {
+                "m.relates_to": { event_id: this.messageId, rel_type: RelationType.Annotation, key: this.key },
+            });
+        } catch (error) {
+            console.error(error);
+        }
+    }
+
+    private async removeMyReaction(myReactionEventId: string) {
+        try {
+            await this.matrixRoom.client
+                .redactEvent(this.matrixRoom.roomId, myReactionEventId)
+                .catch((error) => console.error(error));
+            this.removeUser(this.matrixRoom.myUserId);
+        } catch (error) {
+            console.error(error);
+        }
+    }
+
+    public get component(): {
+        component: WorkAdventureComponent;
+        props: WorkAdventureComponentProps;
+    } {
+        return {
+            component: ReactionIcon,
+            props: {
+                key: this.key,
+                matrixClient: this.matrixRoom.client,
+            },
+        };
+    }
+}

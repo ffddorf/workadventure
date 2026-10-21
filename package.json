@@ -1,8 +1,28 @@
 {
+  "name": "workadventure",
+  "private": true,
   "devDependencies": {
-    "husky": "^7.0.1"
+    "husky": "^9.1.7",
+    "patch-package": "^8.0.1",
+    "typescript": "^5.9.3"
   },
   "scripts": {
-    "prepare": "husky install"
-  }
+    "postinstall": "patch-package || echo 'patch-package not found. Maybe you are installing only a subproject without it (e.g. a scoped `npm ci --workspace`); patches are only needed for the play build.'",
+    "prepare": "husky install || echo 'Husky not found. Maybe you are installing only a subproject.'",
+    "generate-env-docs": "npm run generate --workspace=contrib/tools/generate-env-docs",
+    "check-env-docs": "npm run check --workspace=contrib/tools/generate-env-docs",
+    "e2e:report": "npm exec --workspace=@workadventure/e2e-report -- tsx src/cli.ts"
+  },
+  "workspaces": [
+    "play",
+    "back",
+    "map-storage",
+    "libs/*",
+    "benchmark",
+    "uploader",
+    "play/packages/iframe-api-typings",
+    "tests",
+    "contrib/tools/generate-env-docs",
+    "contrib/tools/e2e-report"
+  ]
 }

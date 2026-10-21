@@ -1,0 +1,202 @@
+import type { DeepPartial } from "../DeepPartial";
+import type { Translation } from "../i18n-types";
+
+const menu: DeepPartial<Translation["menu"]> = {
+    title: "Menu",
+    icon: {
+        open: {
+            menu: "Apri menu",
+            invite: "Mostra invito",
+            register: "Registrati",
+            chat: "Apri chat",
+            userlist: "Lista utenti",
+            openEmoji: "Apri popup selezione emoji",
+            closeEmoji: "Chiudi menu emoji",
+            mobile: "Apri menu mobile",
+            calendar: "Apri calendario",
+            todoList: "Apri lista delle cose da fare",
+        },
+    },
+    visitCard: {
+        close: "Chiudi",
+        sendMessage: "Invia messaggio",
+    },
+    profile: {
+        login: "Accedi",
+        logout: "Esci",
+        helpAndTips: "Aiuto e suggerimenti",
+    },
+    settings: {
+        videoBandwidth: {
+            title: "Qualità video",
+            low: "Bassa",
+            recommended: "Consigliata",
+            high: "High",
+        },
+        shareScreenBandwidth: {
+            title: "Qualità condivisione schermo",
+            low: "Bassa",
+            recommended: "Consigliata",
+            high: "High",
+        },
+        bandwidthConstrainedPreference: {
+            title: "Se la banda di rete è limitata",
+            maintainFramerateTitle: "Mantenere animazioni fluide",
+            maintainFramerateDescription:
+                "Dai priorità al frame rate rispetto alla risoluzione. Usalo quando la fluidità è importante, ad esempio nello streaming di videogiochi.",
+            maintainResolutionTitle: "Mantenere il testo leggibile",
+            maintainResolutionDescription:
+                "Dai priorità alla risoluzione rispetto al frame rate. Usalo quando la leggibilità del testo è importante, ad esempio nelle presentazioni o quando condividi codice.",
+            balancedTitle: "Bilanciare frame rate e risoluzione",
+            balancedDescription: "Cerca di mantenere un equilibrio tra frame rate e risoluzione.",
+        },
+        microphone: {
+            title: "Impostazioni microfono",
+            autoGainControl: "Controllo automatico del guadagno",
+            autoGainControlDescription: "Regola automaticamente il volume del microfono.",
+            echoCancellation: "Cancellazione dell'eco",
+            enableAdvancedNoiseReduction: "Attiva riduzione avanzata del rumore",
+            noiseSuppressionMode: "Modalità di soppressione del rumore:",
+            workAdventureNoiseSuppression: "Soppressione del rumore WorkAdventure",
+            workAdventureNoiseSuppressionDescription:
+                "Elabora il microfono con la soppressione del rumore di WorkAdventure.",
+            recommended: "Consigliato",
+            browserNoiseSuppression: "Soppressione del rumore del browser",
+            browserNoiseSuppressionDescription: "Usa la soppressione del rumore integrata nel browser.",
+            voiceIsolation: "Isolamento della voce",
+            voiceIsolationDescription:
+                "Usa l'isolamento della voce del browser e del sistema operativo quando disponibile.",
+        },
+        language: {
+            title: "Lingua",
+        },
+        privacySettings: {
+            title: "Modalità assente",
+            explanation:
+                'Quando la scheda WorkAdventure nel tuo browser non è visibile, WorkAdventure passa alla modalità "assente"',
+            cameraToggle: 'Mantieni la fotocamera attiva in modalità "assente"',
+            microphoneToggle: 'Mantieni il microfono attivo in modalità "assente"',
+        },
+        save: "Salva",
+        otherSettings: "Altre impostazioni",
+        fullscreen: "Schermo intero",
+        notifications: "Notifiche",
+        enablePictureInPicture: "Abilita picture-in-picture",
+        chatSounds: "Suoni chat",
+        cowebsiteTrigger: "Chiedi sempre prima di aprire siti web e stanze Jitsi Meet",
+        ignoreFollowRequest: "Ignora richieste di seguire altri utenti",
+        proximityDiscussionVolume: "Volume discussione di prossimità",
+        blockAudio: "Blocca suoni ambientali e musica",
+        disableAnimations: "Disabilita animazioni delle tessere della mappa",
+        bubbleSound: "Suono delle bolle",
+        bubbleSoundOptions: {
+            ding: "Ding",
+            wobble: "Wobble",
+        },
+        displayVideoQualityStats: "Mostra statistiche qualità video",
+    },
+    invite: {
+        description: "Condividi il link della stanza!",
+        copy: "Copia",
+        copied: "Copiato",
+        share: "Condividi",
+        walkAutomaticallyToPosition: "Cammina automaticamente alla mia posizione",
+        selectEntryPoint: "Seleziona un punto di ingresso",
+        selectEntryPointSelect: "Seleziona il punto di ingresso attraverso il quale gli utenti arriveranno",
+    },
+    globalMessage: {
+        text: "Testo",
+        audio: "Audio",
+        warning: "Trasmetti a tutte le stanze del mondo",
+        enter: "Inserisci il tuo messaggio qui...",
+        send: "Invia",
+    },
+    globalAudio: {
+        uploadInfo: "Carica un file",
+        error: "Nessun file selezionato. Devi caricare un file prima di inviarlo.",
+        errorUpload:
+            "Errore di caricamento del file. Controlla il tuo file e riprova. Se il problema persiste, contatta l'amministratore.",
+        dragAndDrop: "Trascina e rilascia o clicca qui per caricare il tuo file 🎧",
+    },
+    contact: {
+        gettingStarted: {
+            title: "Iniziare",
+            description:
+                "WorkAdventure ti permette di creare uno spazio online per comunicare spontaneamente con gli altri. E tutto inizia con la creazione del tuo spazio. Scegli tra una vasta selezione di mappe prefabbricate dal nostro team.",
+        },
+        createMap: {
+            title: "Crea la tua mappa",
+            description: "Puoi anche creare la tua mappa personalizzata seguendo i passaggi della documentazione.",
+        },
+    },
+    about: {
+        mapInfo: "Informazioni sulla mappa",
+        mapLink: "link a questa mappa",
+        copyrights: {
+            map: {
+                title: "Copyright della mappa",
+                empty: "Il creatore della mappa non ha dichiarato un copyright per la mappa.",
+            },
+            tileset: {
+                title: "Copyright dei tileset",
+                empty: "Il creatore della mappa non ha dichiarato un copyright per i tileset. Questo non significa che quei tileset non abbiano una licenza.",
+            },
+            audio: {
+                title: "Copyright dei file audio",
+                empty: "Il creatore della mappa non ha dichiarato un copyright per i file audio. Questo non significa che quei file audio non abbiano una licenza.",
+            },
+        },
+    },
+    chat: {
+        matrixIDLabel: "Il tuo ID Matrix",
+        settings: "Impostazioni",
+        resetKeyStorageUpButtonLabel: "Reimposta il tuo archivio chiavi",
+        resetKeyStorageConfirmationModal: {
+            title: "Conferma reimpostazione archivio chiavi",
+            content: "Stai per reimpostare l'archivio chiavi. Sei sicuro?",
+            warning:
+                "Reimpostare l'archivio chiavi rimuoverà la tua sessione corrente e tutti gli utenti fidati. Potresti perdere l'accesso ad alcuni messaggi passati e non sarai più riconosciuto come utente fidato. Assicurati di comprendere appieno le conseguenze di questa azione prima di procedere.",
+            cancel: "Annulla",
+            continue: "Continua",
+        },
+    },
+    sub: {
+        profile: "Profilo",
+        settings: "Impostazioni",
+        credit: "Credito",
+        globalMessages: "Messaggi globali",
+        contact: "Contatto",
+        report: "Segnala problemi",
+        chat: "Chat",
+        help: "Aiuto e tutorial",
+        contextualActions: "Azioni contestuali",
+        shortcuts: "Scorciatoie",
+    },
+    shortcuts: {
+        title: "Scorciatoie da tastiera",
+        keys: "Scorciatoia",
+        actions: "Azione",
+        moveUp: "Sposta su",
+        moveDown: "Sposta giù",
+        moveLeft: "Sposta a sinistra",
+        moveRight: "Sposta a destra",
+        speedUp: "Corri",
+        interact: "Interagisci",
+        follow: "Segui",
+        openChat: "Apri chat",
+        openUserList: "Apri lista utenti",
+        toggleMapEditor: "Mostra/Nascondi editor mappa",
+        rotatePlayer: "Ruota giocatore",
+        emote1: "Emote 1",
+        emote2: "Emote 2",
+        emote3: "Emote 3",
+        emote4: "Emote 4",
+        emote5: "Emote 5",
+        emote6: "Emote 6",
+        openSayPopup: "Apri popup di dire",
+        openThinkPopup: "Apri popup di pensare",
+        walkMyDesk: "Vai alla mia scrivania",
+    },
+};
+
+export default menu;

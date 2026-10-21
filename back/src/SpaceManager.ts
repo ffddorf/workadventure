@@ -1,0 +1,166 @@
+import type { SpaceManagerServer } from "@workadventure/messages/src/ts-proto-generated/services";
+import { v4 as uuid } from "uuid";
+import type {
+    BackToPusherSpaceMessage,
+    HandleLivekitWebhookRequest,
+    PusherToBackSpaceMessage,
+} from "@workadventure/messages";
+import Debug from "debug";
+import {
+    status,
+    type sendUnaryData,
+    type ServerDuplexStream,
+    type ServerUnaryCall,
+    type ServiceError,
+} from "@grpc/grpc-js";
+import type { Empty } from "@workadventure/messages/src/ts-proto-generated/google/protobuf/empty";
+import * as Sentry from "@sentry/node";
+import { socketManager } from "./Services/SocketManager";
+import { SpacesWatcher } from "./Model/SpacesWatcher";
+import { LivekitWebhookError } from "./Model/Services/LivekitService";
+
+export type SpaceSocket = ServerDuplexStream<PusherToBackSpaceMessage, BackToPusherSpaceMessage>;
+
+const debug = Debug("space");
+
+const spaceManager = {
+    watchSpace: (call: SpaceSocket): void => {
+        debug("watchSpace => called");
+        const pusherUuid = uuid();
+        const pusher = new SpacesWatcher(pusherUuid, call);
+
+        call.on("data", (message: PusherToBackSpaceMessage) => {
+            try {
+                if (!message.message) {
+                    console.error("Empty message received");
+                    Sentry.captureException("Empty message received");
+                    return;
+                }
+
+                switch (message.message.$case) {
+                    case "joinSpaceMessage": {
+                        socketManager.handleJoinSpaceMessage(pusher, message.message.joinSpaceMessage);
+                        break;
+                    }
+                    case "leaveSpaceMessage": {
+                        socketManager.handleLeaveSpaceMessage(pusher, message.message.leaveSpaceMessage);
+                        break;
+                    }
+                    case "updateSpaceUserMessage": {
+                        socketManager.handleUpdateSpaceUserMessage(pusher, message.message.updateSpaceUserMessage);
+                        break;
+                    }
+                    case "updateSpaceMetadataPusherToBackMessage": {
+                        socketManager.handleUpdateSpaceMetadataMessage(
+                            pusher,
+                            message.message.updateSpaceMetadataPusherToBackMessage,
+                        );
+                        break;
+                    }
+                    case "pongMessage": {
+                        pusher.clearPongTimeout();
+                        break;
+                    }
+                    // FIXME: kickOffMessage should go through the room (unless we plan to ban from the user list). If so, it should be a private message.
+                    case "kickOffMessage": {
+                        socketManager.handleKickSpaceUserMessage(pusher, message.message.kickOffMessage);
+                        break;
+                    }
+                    case "publicEvent": {
+                        socketManager.handlePublicEvent(pusher, message.message.publicEvent);
+                        break;
+                    }
+                    case "privateEvent": {
+                        socketManager.handlePrivateEvent(pusher, message.message.privateEvent);
+                        break;
+                    }
+                    case "backEvent": {
+                        socketManager.handleBackEvent(pusher, message.message.backEvent);
+                        break;
+                    }
+                    case "syncSpaceUsersMessage": {
+                        socketManager.handleSyncSpaceUsersMessage(pusher, message.message.syncSpaceUsersMessage);
+                        break;
+                    }
+                    case "spaceQueryMessage": {
+                        socketManager.handleSpaceQueryMessage(pusher, message.message.spaceQueryMessage).catch((e) => {
+                            console.error("Error while handling space query message", e);
+                        });
+                        break;
+                    }
+                    case "addSpaceUserToNotifyMessage": {
+                        socketManager.handleAddSpaceUserToNotifyMessage(
+                            pusher,
+                            message.message.addSpaceUserToNotifyMessage,
+                        );
+                        break;
+                    }
+                    case "deleteSpaceUserToNotifyMessage": {
+                        socketManager.handleDeleteSpaceUserToNotifyMessage(
+                            pusher,
+                            message.message.deleteSpaceUserToNotifyMessage,
+                        );
+                        break;
+                    }
+                    default: {
+                        const _exhaustiveCheck: never = message.message;
+                    }
+                }
+            } catch (e) {
+                if (!message.message) {
+                    console.error("Empty message received");
+                    Sentry.captureException("Empty message received");
+                    return;
+                }
+
+                console.error(
+                    "An error occurred while managing a message of type PusherToBackSpaceMessage:" +
+                        message.message.$case,
+                    e,
+                );
+                Sentry.captureException(e);
+                // Note: We do not close the back connection on every error to avoid excessive reconnections.
+                // When 'end' is triggered, the callback below will handle cleanup.
+                // 'error' and 'end' events may not always be triggered together; handle both cases.
+                // Consider revising the reconnection logic in pusher to avoid reconnecting to the same back repeatedly.
+                //call.end();
+            }
+        })
+            .on("error", (e) => {
+                console.error("Error on watchSpace", e);
+                Sentry.captureException(e);
+                socketManager.handleUnwatchAllSpaces(pusher);
+            })
+            .on("end", () => {
+                socketManager.handleUnwatchAllSpaces(pusher);
+                pusher.end();
+                debug("watchSpace => ended %s", pusher.id);
+                call.end();
+            });
+    },
+    handleLivekitWebhook: (
+        call: ServerUnaryCall<HandleLivekitWebhookRequest, Empty>,
+        callback: sendUnaryData<Empty>,
+    ): void => {
+        socketManager
+            .handleLivekitWebhook(call.request)
+            .then(() => callback(null, {}))
+            .catch((error) => callback(toGrpcLivekitWebhookError(error), null));
+    },
+} satisfies SpaceManagerServer;
+
+function toGrpcLivekitWebhookError(error: unknown): ServiceError {
+    const message = error instanceof Error ? error.message : "Unexpected LiveKit webhook error";
+
+    if (error instanceof LivekitWebhookError) {
+        // Invalid payloads/signatures are permanent failures; pusher maps these to non-retryable HTTP statuses.
+        return Object.assign(new Error(message), {
+            code: error.kind === "unauthorized" ? status.UNAUTHENTICATED : status.INVALID_ARGUMENT,
+        }) as ServiceError;
+    }
+
+    // Unknown back errors stay retryable; pusher maps this to HTTP 500 so LiveKit can retry.
+    return Object.assign(new Error(message), { code: status.UNKNOWN }) as ServiceError;
+}
+
+export { spaceManager };

@@ -1,0 +1,83 @@
+<script lang="ts">
+    import * as Sentry from "@sentry/svelte";
+    import { gameManager } from "../../../Phaser/Game/GameManager";
+    import { selectedRoomStore } from "../../Stores/SelectRoomStore";
+    import { warningMessageStore } from "../../../Stores/ErrorStore";
+    import Avatar from "../Avatar.svelte";
+    import { LL } from "../../../../i18n/i18n-svelte";
+    import type { PictureStore } from "../../../Stores/PictureStore";
+    import { ignoreSuggestedRoom } from "../../Stores/ChatStore";
+    import { IconLoader } from "@wa-icons";
+
+    interface Props {
+        roomInformation: { name: string; id: string; pictureStore?: PictureStore };
+    }
+
+    let { roomInformation }: Props = $props();
+    let roomName = $derived(roomInformation.name);
+    let loadingInvitation = $state(false);
+
+    async function joinRoom() {
+        loadingInvitation = true;
+        try {
+            const chatconnection = await gameManager.getChatConnection();
+            chatconnection
+                .joinRoom(roomInformation.id)
+                .then((room) => {
+                    if (room && !room.isRoomFolder) selectedRoomStore.set(room);
+                })
+                .catch(() => {
+                    warningMessageStore.addWarningMessage($LL.chat.failedToJoinRoom());
+                })
+                .finally(() => {
+                    loadingInvitation = false;
+                });
+        } catch (error) {
+            loadingInvitation = false;
+            console.error(error);
+            Sentry.captureException(error);
+            warningMessageStore.addWarningMessage($LL.chat.failedToJoinRoom());
+        }
+    }
+
+    function onIgnoreClick(event: MouseEvent) {
+        event.stopPropagation();
+        event.preventDefault();
+        ignoreSuggestedRoom(roomInformation.id);
+    }
+</script>
+
+<div
+    class="wa-chat-item text-md flex gap-2 flex-row items-center transition-all hover:bg-white/10 hover:rounded hover:!cursor-pointer px-2 py-2"
+    data-testid="userInvitation"
+>
+    <div class="relative shrink-0">
+        <Avatar compact pictureStore={roomInformation.pictureStore} fallbackName={roomName} />
+    </div>
+    <div class="m-0 grow text-sm font-bold">
+        {roomName}
+    </div>
+    {#if loadingInvitation}
+        <div class="min-h-[60px] text-md flex gap-2 justify-center flex-row items-center p-1">
+            <IconLoader class="animate-spin" />
+        </div>
+    {:else}
+        <div class="flex gap-1 flex-wrap justify-end">
+            <button
+                type="button"
+                class="border border-solid border-white/35 text-white/80 hover:bg-white/10 rounded text-xs py-1 px-2 m-0"
+                data-testid="ignoreSuggestedRoomButton"
+                onclick={onIgnoreClick}
+            >
+                {$LL.chat.ignoreSuggestedRoom()}
+            </button>
+            <button
+                class="border border-solid border-success text-success hover:bg-success-400/10 rounded text-xs py-1 px-2 m-0"
+                data-testid="acceptInvitationButton"
+                onclick={() => joinRoom()}
+            >
+                {$LL.chat.join()}
+            </button>
+        </div>
+    {/if}
+</div>

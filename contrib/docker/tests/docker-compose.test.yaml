@@ -1,0 +1,134 @@
+services:
+  reverse-proxy:
+    networks:
+      default:
+        aliases:
+          - "livekit.workadventure.localhost"
+          - "egress.workadventure.localhost"
+    depends_on:
+      play:
+        condition: service_healthy
+      back:
+        condition: service_healthy
+  maps:
+    image: thecodingmachine/php:8.1-v4-apache-node12
+    environment:
+      FRONT_URL: https://play.workadventure.localhost
+      #APACHE_DOCUMENT_ROOT: dist/
+      #APACHE_EXTENSIONS: headers
+      #APACHE_EXTENSION_HEADERS: 1
+      STARTUP_COMMAND_0: sudo a2enmod headers
+      STARTUP_COMMAND_1: yarn install
+    volumes:
+      - ../../maps:/var/www/html
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.maps.rule: "Host(`maps.workadventure.localhost`)"
+      traefik.http.routers.maps.entryPoints: "web,traefik"
+      traefik.http.services.maps.loadbalancer.server.port: "80"
+      traefik.http.routers.maps-ssl.rule: "Host(`maps.workadventure.localhost`)"
+      traefik.http.routers.maps-ssl.entryPoints: "websecure"
+      traefik.http.routers.maps-ssl.service: "maps"
+      traefik.http.routers.maps-ssl.tls: "true"
+      traefik.http.routers.maps-ssl.tls.certresolver: "myresolver"
+  back:
+    depends_on:
+      rustfs-livekit-init:
+        condition: service_completed_successfully
+    environment:
+      NODE_TLS_REJECT_UNAUTHORIZED: "0"
+  livekit:
+    image: livekit/livekit-server:v1.10.1
+    command: --config /etc/livekit/config.yaml
+    ports:
+      - "7881:7881" # WebRTC TCP
+      - "7882:7882/udp" # WebRTC UDP
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.livekit.rule: "Host(`livekit.workadventure.localhost`)"
+      traefik.http.routers.livekit.entryPoints: "web"
+      traefik.http.routers.livekit.service: livekit
+      traefik.http.routers.livekit-ssl.rule: "Host(`livekit.workadventure.localhost`)"
+      traefik.http.routers.livekit-ssl.entryPoints: "websecure"
+      traefik.http.routers.livekit-ssl.service: "livekit"
+      traefik.http.routers.livekit-ssl.tls: "true"
+      traefik.http.routers.livekit-ssl.tls.certresolver: "myresolver"
+      traefik.http.services.livekit.loadbalancer.server.port: "7880"
+      traefik.udp.routers.livekit-udp.entrypoints: udp
+      traefik.udp.routers.livekit-udp.service: livekit-udp
+      traefik.udp.services.livekit-udp.loadbalancer.server.port: 7881
+
+    volumes:
+      - ./tests/livekit-config.yaml:/etc/livekit/config.yaml
+    depends_on:
+      redis:
+        condition: service_started
+
+  egress:
+    image: livekit/egress:v1.12.0
+    #restart: unless-stopped
+    environment:
+      EGRESS_CONFIG_FILE: /etc/egress/config.yaml
+
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./egress-config.yaml:/etc/egress/config.yaml
+      - ./out:/out:rw
+      - /tmp:/tmp:rw
+    cap_add:
+      - SYS_ADMIN
+    privileged: true
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8081/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+    depends_on:
+      redis:
+        condition: service_started
+      livekit:
+        condition: service_started
+
+  rustfs-livekit:
+    image: rustfs/rustfs:1.0.0-alpha.83
+    command: ["/data"]
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.rustfs-livekit.rule=Host(`rustfs-livekit.workadventure.localhost`)"
+      - "traefik.http.routers.rustfs-livekit.entryPoints=web"
+      - "traefik.http.services.rustfs-livekit.loadbalancer.server.port=9001"
+      - "traefik.http.routers.rustfs-livekit.service=rustfs-livekit"
+      - "traefik.http.routers.cdn-livekit.rule=Host(`cdn-livekit.workadventure.localhost`)"
+      - "traefik.http.routers.cdn-livekit.entryPoints=web"
+      - "traefik.http.services.cdn-livekit.loadbalancer.server.port=9000"
+      - "traefik.http.routers.cdn-livekit.service=cdn-livekit"
+
+      - "traefik.http.routers.rustfs-livekit-ssl.rule=Host(`rustfs-livekit.workadventure.localhost`)"
+      - "traefik.http.routers.rustfs-livekit-ssl.entryPoints=websecure"
+      - "traefik.http.routers.rustfs-livekit-ssl.service=rustfs-livekit"
+      - "traefik.http.routers.rustfs-livekit-ssl.tls=true"
+      - "traefik.http.routers.rustfs-livekit-ssl.tls.certresolver=myresolver"
+
+      - "traefik.http.routers.cdn-livekit-ssl.rule=Host(`cdn-livekit.workadventure.localhost`)"
+      - "traefik.http.routers.cdn-livekit-ssl.entryPoints=websecure"
+      - "traefik.http.routers.cdn-livekit-ssl.service=cdn-livekit"
+      - "traefik.http.routers.cdn-livekit-ssl.tls=true"
+      - "traefik.http.routers.cdn-livekit-ssl.tls.certresolver=myresolver"
+    environment:
+      RUSTFS_ACCESS_KEY: "rustfs-access-key"
+      RUSTFS_SECRET_KEY: "rustfs-secret-access-key"
+      RUSTFS_CONSOLE_ENABLE: "true"
+
+  rustfs-livekit-init:
+    image: amazon/aws-cli:2.31.1
+    depends_on:
+      rustfs-livekit:
+        condition: service_started
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - "until aws --endpoint-url http://rustfs-livekit:9000 s3api list-buckets >/dev/null 2>&1; do sleep 1; done; aws --endpoint-url http://rustfs-livekit:9000 s3api head-bucket --bucket livekit-recording >/dev/null 2>&1 || aws --endpoint-url http://rustfs-livekit:9000 s3api create-bucket --bucket livekit-recording --create-bucket-configuration LocationConstraint=eu-west-1"
+    environment:
+      AWS_ACCESS_KEY_ID: "rustfs-access-key"
+      AWS_SECRET_ACCESS_KEY: "rustfs-secret-access-key"
+      AWS_DEFAULT_REGION: "eu-west-1"
