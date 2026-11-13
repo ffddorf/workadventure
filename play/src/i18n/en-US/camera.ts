@@ -1,0 +1,106 @@
+import type { BaseTranslation } from "../i18n-types";
+
+const camera: BaseTranslation = {
+    editCam: "Edit camera",
+    editSpeaker: "Edit audio output",
+    active: "Active",
+    disabled: "Disabled",
+    notRecommended: "Not recommended",
+    enable: {
+        title: "Turn on your camera and microphone",
+        start: "Welcome to our audio and video device configuration page! Find the tools here to enhance your online experience. Adjust settings to your preferences to address any potential issues. Ensure your hardware is properly connected and up to date. Explore and test different configurations to find what works best for you.",
+    },
+    help: {
+        title: "Camera / Microphone access needed",
+        cameraTitle: "Camera access needed",
+        microphoneTitle: "Microphone access needed",
+        cameraPermissionDenied: "Camera permission denied",
+        microphonePermissionDenied: "Microphone permission denied",
+        cameraMicrophonePermissionDenied: "Camera and microphone permissions denied",
+        content: "You must allow camera and microphone access in your browser.",
+        cameraContent: "You must allow camera access in your browser.",
+        microphoneContent: "You must allow microphone access in your browser.",
+        firefoxContent:
+            'Please click the "Remember this decision" checkbox, if you don\'t want Firefox to keep asking you the authorization.',
+        allow: "Allow webcam",
+        allowMicrophone: "Allow microphone",
+        allowCameraMicrophone: "Allow webcam and microphone",
+        continue: "Continue without webcam",
+        continueWithoutMicrophone: "Continue without microphone",
+        continueCameraMicrophone: "Continue without webcam and microphone",
+        screen: {
+            firefox: "/resources/help-setting-camera-permission/en-US-firefox.png",
+            chrome: "/resources/help-setting-camera-permission/en-US-firefox.png",
+        },
+        tooltip: {
+            permissionDeniedTitle: "Camera access blocked",
+            permissionDeniedDesc:
+                "Your browser denied camera access for this site. Allow it from the address bar (lock or camera icon) or in site settings. The illustration below matches your browser.",
+            noDeviceTitle: "No usable camera",
+            noDeviceDesc:
+                "Your browser does not see any camera you can use. Try another browser, check that a camera is connected, check your computer's settings (privacy, devices), or restart your computer if the device should work.",
+            permissionMedia: {
+                firefox: "/resources/help-setting-camera-permission/en-US-firefox.png",
+                chrome: "/resources/help-setting-camera-permission/en-US-firefox.png",
+                safari: "/resources/help-setting-camera-permission/en-US-firefox.png",
+                android: "/resources/help-setting-camera-permission/en-US-firefox.png",
+                default: "/resources/help-setting-camera-permission/en-US-firefox.png",
+            },
+        },
+        microphoneTooltip: {
+            permissionDeniedTitle: "Microphone access blocked",
+            permissionDeniedDesc:
+                "Your browser denied microphone access for this site. Allow it from the address bar (lock or microphone icon) or in site settings. The illustration below matches your browser.",
+            noDeviceTitle: "No usable microphone",
+            noDeviceDesc:
+                "Your browser does not see any microphone you can use. Try another browser, check that a microphone is connected, check your computer's settings (privacy, devices), or restart your computer if the device should work.",
+            permissionMedia: {
+                firefox: "/resources/help-setting-camera-permission/en-US-firefox.png",
+                chrome: "/resources/help-setting-camera-permission/en-US-firefox.png",
+                safari: "/resources/help-setting-camera-permission/en-US-firefox.png",
+                android: "/resources/help-setting-camera-permission/en-US-firefox.png",
+                default: "/resources/help-setting-camera-permission/en-US-firefox.png",
+            },
+        },
+    },
+    webrtc: {
+        title: "Video relay server connection error",
+        titlePending: "Video relay server connection pending",
+        error: "TURN server isn't reachable",
+        content: "The video relay server cannot be reached. You may be unable to communicate with other users.",
+        solutionVpn:
+            "If you are <strong>connecting via a VPN</strong>, please disconnect from you VPN and refresh the web page.",
+        solutionVpnNotAskAgain: "Understood. Don't warn me again 🫡",
+        solutionHotspot:
+            "If you are on a restricted network (company network...), try switching network. For instance, create a <strong>Wifi hotspot</strong> with your phone and connect via your phone.",
+        solutionNetworkAdmin: "If you are a <strong>network administrator</strong>, review the ",
+        preparingYouNetworkGuide: '"Preparing your network" guide',
+        refresh: "Refresh",
+        continue: "Continue",
+        newDeviceDetected: "New device detected {device} 🎉 Switch? [SPACE] Ignore [ESCAPE]",
+    },
+    my: {
+        silentZone: "Silent zone",
+        silentZoneDesc:
+            "You are in a silent zone. Nobody can talk to you here, and your microphone and camera are off.",
+        nameTag: "You",
+        loading: "Loading your camera...",
+    },
+    disable: "Turn off your camera",
+    menu: {
+        moreAction: "More actions",
+        closeMenu: "Close menu",
+        senPrivateMessage: "Send a private message (coming soon)",
+        giveFloor: "Give the floor",
+        revokeFloor: "Take back the floor",
+        muteAudioUser: "Mute audio",
+        askToMuteAudioUser: "Ask to mute audio",
+        muteAudioEveryBody: "Mute audio for everybody",
+        muteVideoUser: "Turn off video",
+        askToMuteVideoUser: "Ask to turn off video",
+        muteVideoEveryBody: "Turn off video for everybody",
+        blockOrReportUser: "Moderation",
+    },
+};
+
+export default camera;

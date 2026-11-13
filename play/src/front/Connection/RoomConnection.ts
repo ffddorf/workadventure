@@ -1,0 +1,2426 @@
+import Debug from "debug";
+import * as Sentry from "@sentry/svelte";
+
+import type { AreaData, AtLeast, EntityDimensions, WAMEntityData } from "@workadventure/map-editor";
+import { Deferred } from "@workadventure/shared-utils";
+import type {
+    AddSpaceFilterMessage,
+    AnswerMessage,
+    ApplicationMessage,
+    AvailabilityStatus,
+    CharacterTextureMessage,
+    ChatMembersAnswer,
+    CompanionTextureMessage,
+    DeleteCustomEntityMessage,
+    DeleteMapMessage,
+    EditMapCommandMessage,
+    EmbeddableWebsiteAnswer,
+    EmoteEventMessage as EmoteEventMessageTsProto,
+    EntityMessage as EntityMessageTsProto,
+    BanUserMessage,
+    ErrorMessage as ErrorMessageTsProto,
+    ErrorScreenMessage as ErrorScreenMessageTsProto,
+    FollowAbortMessage,
+    FollowConfirmationMessage,
+    FollowRequestMessage,
+    GroupDeleteMessage as GroupDeleteMessageTsProto,
+    GroupUpdateMessage as GroupUpdateMessageTsProto,
+    JitsiJwtAnswer,
+    JoinBBBMeetingAnswer,
+    BanIpPreviewAnswer,
+    Member,
+    ModifiyWAMMetadataMessage,
+    ModifyCustomEntityMessage,
+    MoveToPositionMessage as MoveToPositionMessageProto,
+    LocatePositionMessage as LocatePositionMessageProto,
+    PlayerDetailsUpdatedMessage as PlayerDetailsUpdatedMessageTsProto,
+    PositionMessage as PositionMessageTsProto,
+    PositionMessage_Direction,
+    QueryMessage,
+    RefreshRoomMessage,
+    RemoveSpaceFilterMessage,
+    RoomShortDescription,
+    TokenExpiredMessage,
+    UpdateWAMSettingsMessage,
+    UploadEntityMessage,
+    UserJoinedMessage as UserJoinedMessageTsProto,
+    UserLeftMessage as UserLeftMessageTsProto,
+    UserMovedMessage as UserMovedMessageTsProto,
+    ViewportMessage as ViewportMessageTsProto,
+    WorldConnectionMessage,
+    PublicEvent,
+    JoinSpaceRequestMessage,
+    LeaveSpaceRequestMessage,
+    SpaceEvent,
+    PrivateSpaceEvent,
+    UpdateSpaceUserPusherToFrontMessage,
+    AddSpaceUserMessage,
+    AnalyticsEventReportMessage,
+    RemoveSpaceUserPusherToFrontMessage,
+    PublicEventFrontToPusher,
+    PrivateEventFrontToPusher,
+    OauthRefreshToken,
+    ExternalModuleMessage,
+    SpaceDestroyedMessage,
+    SayMessage,
+    FilterType,
+    UploadFileMessage,
+    MapStorageJwtAnswer,
+    DeleteRecordingAnswer,
+    SpaceStatePatchMessage,
+    SpaceStateQuery,
+    PrivateEventPusherToFront,
+    InitSpaceUsersMessage,
+    NonUndefinedFields,
+    Recording,
+    IceServersAnswer,
+    BackEventMessage,
+    BackEventFrontToPusherMessage,
+    AskPositionMessage_AskType,
+    MeetingInvitationRequestReceivedMessage,
+    MeetingInvitationResponseReceivedMessage,
+    MeetingInvitationRequestClosedMessage,
+    MeetingInvitationRequestTooHighMessage,
+    VideoQualityReportMessage,
+    ClientToServerMessage as ClientToServerMessageTsProto,
+    ServerToClientMessage as ServerToClientMessageTsProto,
+    SendUserMessage,
+} from "@workadventure/messages";
+import {
+    noUndefined,
+    AskPositionMessage_AskType as AskPositionMessageAskType,
+    apiVersionHash,
+    SetPlayerDetailsMessage as SetPlayerDetailsMessageTsProto,
+    SetPlayerVariableMessage_Scope,
+    UpdateSpaceMetadataMessage,
+    SpaceUser,
+    LeaveChatRoomAreaMessage,
+} from "@workadventure/messages";
+import { Subject, type Observable } from "rxjs";
+import { get } from "svelte/store";
+import { generateFieldMask } from "protobuf-fieldmask";
+import { AbortError } from "@workadventure/shared-utils/src/Abort/AbortError";
+import { asError } from "catch-unknown";
+import { abortAny } from "@workadventure/shared-utils/src/Abort/AbortAny";
+import { abortTimeout } from "@workadventure/shared-utils/src/Abort/AbortTimeout";
+import type { ReceiveEventEvent } from "../Api/Events/ReceiveEventEvent";
+import type { SetPlayerVariableEvent } from "../Api/Events/SetPlayerVariableEvent";
+import { iframeListener } from "../Api/IframeListener";
+import { analyticsClient } from "../Administration/AnalyticsClient";
+import { ABSOLUTE_PUSHER_URL } from "../Enum/ComputedConst";
+import { ENABLE_MAP_EDITOR, WOKA_SPEED } from "../Enum/EnvironmentVariable";
+import type { CompanionTextureDescriptionInterface } from "../Phaser/Companion/CompanionTextures";
+import type { WokaTextureDescriptionInterface } from "../Phaser/Entity/PlayerTextures";
+import { gameManager } from "../Phaser/Game/GameManager";
+import { SelectCharacterScene, SelectCharacterSceneName } from "../Phaser/Login/SelectCharacterScene";
+import { SelectCompanionScene, SelectCompanionSceneName } from "../Phaser/Login/SelectCompanionScene";
+import { chatZoneLiveStore } from "../Stores/ChatStore";
+import { errorScreenStore } from "../Stores/ErrorScreenStore";
+import { duplicateUserConnectedStore, shouldShowDuplicateUserPopup } from "../Stores/DuplicateUserConnectedStore";
+import { followRoleStore, followUsersStore } from "../Stores/FollowStore";
+import { isSpeakerStore, requestedMicrophoneState, requestedCameraState } from "../Stores/MediaStore";
+import { currentLiveStreamingSpaceStore } from "../Stores/MegaphoneStore";
+import { stopMegaphoneLive } from "../Components/ActionBar/MenuIcons/megaphoneActions";
+import {
+    inviteUserActivated,
+    mapEditorActivated,
+    menuIconVisiblilityStore,
+    menuVisiblilityStore,
+    warningBannerStore,
+} from "../Stores/MenuStore";
+import { requestedScreenSharingState } from "../Stores/ScreenSharingStore";
+import { selectCompanionSceneVisibleStore } from "../Stores/SelectCompanionStore";
+import { selectCharacterSceneVisibleStore } from "../Stores/SelectCharacterStore";
+import { connectionManager } from "./ConnectionManager";
+import type {
+    GroupCreatedUpdatedMessageInterface,
+    GroupUsersUpdateMessageInterface,
+    MessageUserJoined,
+    OnConnectInterface,
+    PlayGlobalMessageInterface,
+    RoomJoinedMessageInterface,
+    ViewportInterface,
+} from "./ConnexionModels";
+import { localUserStore } from "./LocalUserStore";
+import { ConnectionClosedError } from "./ConnectionClosedError";
+import { WorkAdventureWebSocket } from "./WorkAdventureWebSocket";
+
+// This must be greater than RoomManager's PING_INTERVAL
+const manualPingDelay = 100_000;
+
+export class RoomConnection implements RoomConnection {
+    public readonly socket: WorkAdventureWebSocket;
+    public readonly websocketReconnectingStream: Observable<boolean>;
+    private userId: number | null = null;
+    private _closed = false;
+    private readonly cleanupCallbacks: Array<() => void> = [];
+    private tags: string[] = [];
+    private canEdit = false;
+
+    public readonly _serverDisconnected = new Subject<void>();
+    public readonly serverDisconnected = this._serverDisconnected.asObservable();
+
+    private readonly _errorMessageStream = new Subject<ErrorMessageTsProto>();
+    public readonly errorMessageStream = this._errorMessageStream.asObservable();
+    private readonly _errorScreenMessageStream = new Subject<ErrorScreenMessageTsProto>();
+    public readonly errorScreenMessageStream = this._errorScreenMessageStream.asObservable();
+    private readonly _roomConnectedPromise = new Deferred<OnConnectInterface>();
+    public readonly roomConnectedPromise = this._roomConnectedPromise.promise;
+    private readonly _roomJoinedPromise = new Deferred<RoomJoinedMessageInterface>();
+    public readonly roomJoinedPromise = this._roomJoinedPromise.promise;
+    private readonly _teleportMessageMessageStream = new Subject<string>();
+    public readonly teleportMessageMessageStream = this._teleportMessageMessageStream.asObservable();
+    private readonly _worldFullMessageStream = new Subject<string | null>();
+    public readonly worldFullMessageStream = this._worldFullMessageStream.asObservable();
+    private readonly _worldConnectionMessageStream = new Subject<WorldConnectionMessage>();
+    public readonly worldConnectionMessageStream = this._worldConnectionMessageStream.asObservable();
+    private readonly _tokenExpiredMessageStream = new Subject<TokenExpiredMessage>();
+    public readonly tokenExpiredMessageStream = this._tokenExpiredMessageStream.asObservable();
+    private readonly _userMovedMessageStream = new Subject<UserMovedMessageTsProto>();
+    public readonly userMovedMessageStream = this._userMovedMessageStream.asObservable();
+    private readonly _groupUpdateMessageStream = new Subject<GroupCreatedUpdatedMessageInterface>();
+    public readonly groupUpdateMessageStream = this._groupUpdateMessageStream.asObservable();
+    private readonly _groupUsersUpdateMessageStream = new Subject<GroupUsersUpdateMessageInterface>();
+    public readonly groupUsersUpdateMessageStream = this._groupUsersUpdateMessageStream.asObservable();
+    private readonly _groupDeleteMessageStream = new Subject<GroupDeleteMessageTsProto>();
+    public readonly groupDeleteMessageStream = this._groupDeleteMessageStream.asObservable();
+    private readonly _userJoinedMessageStream = new Subject<MessageUserJoined>();
+    public readonly userJoinedMessageStream = this._userJoinedMessageStream.asObservable();
+    private readonly _userLeftMessageStream = new Subject<UserLeftMessageTsProto>();
+    public readonly userLeftMessageStream = this._userLeftMessageStream.asObservable();
+    private readonly _refreshRoomMessageStream = new Subject<RefreshRoomMessage>();
+    public readonly refreshRoomMessageStream = this._refreshRoomMessageStream.asObservable();
+    private readonly _deleteMapMessageStream = new Subject<DeleteMapMessage>();
+    public readonly deleteMapMessageStream = this._deleteMapMessageStream.asObservable();
+
+    private readonly _followRequestMessageStream = new Subject<FollowRequestMessage>();
+    public readonly followRequestMessageStream = this._followRequestMessageStream.asObservable();
+
+    private readonly _followConfirmationMessageStream = new Subject<FollowConfirmationMessage>();
+    public readonly followConfirmationMessageStream = this._followConfirmationMessageStream.asObservable();
+
+    private readonly _followAbortMessageStream = new Subject<FollowAbortMessage>();
+    public readonly followAbortMessageStream = this._followAbortMessageStream.asObservable();
+
+    private readonly _itemEventMessageStream = new Subject<{
+        itemId: number;
+        event: string;
+        parameters: unknown;
+        state: unknown;
+    }>();
+    public readonly itemEventMessageStream = this._itemEventMessageStream.asObservable();
+    private readonly _emoteEventMessageStream = new Subject<EmoteEventMessageTsProto>();
+    public readonly emoteEventMessageStream = this._emoteEventMessageStream.asObservable();
+    private readonly _variableMessageStream = new Subject<{ name: string; value: unknown }>();
+    public readonly variableMessageStream = this._variableMessageStream.asObservable();
+    private readonly _areaPropertyVariableMessageStream = new Subject<{
+        areaId: string;
+        propertyId: string;
+        key: string;
+        value: unknown;
+    }>();
+    public readonly areaPropertyVariableMessageStream = this._areaPropertyVariableMessageStream.asObservable();
+    private readonly _entityMessageStream = new Subject<EntityMessageTsProto>();
+    public readonly entityMessageStream = this._entityMessageStream.asObservable();
+    private readonly _editMapCommandMessageStream = new Subject<EditMapCommandMessage>();
+    public readonly editMapCommandMessageStream = this._editMapCommandMessageStream.asObservable();
+    private readonly _playerDetailsUpdatedMessageStream = new Subject<PlayerDetailsUpdatedMessageTsProto>();
+    public readonly playerDetailsUpdatedMessageStream = this._playerDetailsUpdatedMessageStream.asObservable();
+
+    private readonly _sendUserMessageStream = new Subject<SendUserMessage>();
+    public readonly sendUserMessageStream = this._sendUserMessageStream.asObservable();
+    private readonly _banUserMessageStream = new Subject<BanUserMessage>();
+    public readonly banUserMessageStream = this._banUserMessageStream.asObservable();
+
+    private readonly _websocketErrorStream = new Subject<Event>();
+    public readonly websocketErrorStream = this._websocketErrorStream.asObservable();
+    // Triggered if a "close" event is received from the WebSocket before a message is received
+    // If this timeout triggers, we consider the connection is lost (no ping received)
+    private timeout: ReturnType<typeof setInterval> | undefined = undefined;
+    private readonly _moveToPositionMessageStream = new Subject<MoveToPositionMessageProto>();
+    public readonly moveToPositionMessageStream = this._moveToPositionMessageStream.asObservable();
+    private readonly _locatePositionMessageStream = new Subject<LocatePositionMessageProto>();
+    public readonly locatePositionMessageStream = this._locatePositionMessageStream.asObservable();
+    private readonly _meetingInvitationRequestReceivedStream = new Subject<MeetingInvitationRequestReceivedMessage>();
+    public readonly meetingInvitationRequestReceivedStream =
+        this._meetingInvitationRequestReceivedStream.asObservable();
+    private readonly _meetingInvitationResponseReceivedStream = new Subject<MeetingInvitationResponseReceivedMessage>();
+    public readonly meetingInvitationResponseReceivedStream =
+        this._meetingInvitationResponseReceivedStream.asObservable();
+    private readonly _meetingInvitationRequestTooHighStream = new Subject<MeetingInvitationRequestTooHighMessage>();
+    public readonly meetingInvitationRequestTooHighStream = this._meetingInvitationRequestTooHighStream.asObservable();
+    private readonly _meetingInvitationRequestClosedStream = new Subject<MeetingInvitationRequestClosedMessage>();
+    public readonly meetingInvitationRequestClosedStream = this._meetingInvitationRequestClosedStream.asObservable();
+    private readonly _initSpaceUsersMessageStream = new Subject<InitSpaceUsersMessage>();
+    public readonly initSpaceUsersMessageStream = this._initSpaceUsersMessageStream.asObservable();
+    private readonly _addSpaceUserMessageStream = new Subject<AddSpaceUserMessage>();
+    public readonly addSpaceUserMessageStream = this._addSpaceUserMessageStream.asObservable();
+    private readonly _updateSpaceUserMessageStream = new Subject<UpdateSpaceUserPusherToFrontMessage>();
+    public readonly updateSpaceUserMessageStream = this._updateSpaceUserMessageStream.asObservable();
+    private readonly _removeSpaceUserMessageStream = new Subject<RemoveSpaceUserPusherToFrontMessage>();
+    public readonly removeSpaceUserMessageStream = this._removeSpaceUserMessageStream.asObservable();
+    private readonly _updateSpaceMetadataMessageStream = new Subject<UpdateSpaceMetadataMessage>();
+    public readonly updateSpaceMetadataMessageStream = this._updateSpaceMetadataMessageStream.asObservable();
+    private readonly _spaceStatePatchMessageStream = new Subject<SpaceStatePatchMessage>();
+    public readonly spaceStatePatchMessageStream = this._spaceStatePatchMessageStream.asObservable();
+    private readonly _receivedEventMessageStream = new Subject<ReceiveEventEvent>();
+    public readonly receivedEventMessageStream = this._receivedEventMessageStream.asObservable();
+    private readonly _spacePrivateMessageEvent = new Subject<PrivateEventPusherToFront>();
+    public readonly spacePrivateMessageEvent = this._spacePrivateMessageEvent.asObservable();
+    private readonly _spacePublicMessageEvent = new Subject<PublicEvent>();
+    public readonly spacePublicMessageEvent = this._spacePublicMessageEvent.asObservable();
+    private readonly _joinSpaceRequestMessage = new Subject<JoinSpaceRequestMessage>();
+    public readonly joinSpaceRequestMessage = this._joinSpaceRequestMessage.asObservable();
+    private readonly _leaveSpaceRequestMessage = new Subject<LeaveSpaceRequestMessage>();
+    public readonly leaveSpaceRequestMessage = this._leaveSpaceRequestMessage.asObservable();
+    private readonly _externalModuleMessage = new Subject<ExternalModuleMessage>();
+    public readonly externalModuleMessage = this._externalModuleMessage.asObservable();
+    private readonly _spaceDestroyedMessage = new Subject<SpaceDestroyedMessage>();
+    public readonly spaceDestroyedMessage = this._spaceDestroyedMessage.asObservable();
+
+    private queries = new Map<
+        number,
+        {
+            answerType: string;
+            resolve: (message: NonNullable<AnswerMessage["answer"]>) => void;
+            reject: (e: unknown) => void;
+        }
+    >();
+    private lastQueryId = 0;
+    private roomConnectedMessageReceived: boolean = false;
+    private joinRoomEmitted: boolean = false;
+    private isRoomJoined: boolean = false;
+
+    private eventBeforeRoomJoinedQueue: ClientToServerMessageTsProto[] = [];
+
+    /**
+     *
+     * @param token A JWT token containing the email of the user
+     * @param roomUrl The URL of the room in the form "https://example.com/_/[instance]/[map_url]" or "https://example.com/@/[org]/[event]/[map]"
+     * @param characterTextureIds
+     * @param companionTextureId
+     * @param lastCommandId
+     */
+    public constructor(
+        token: string | null,
+        private roomUrl: string,
+        characterTextureIds: string[],
+        companionTextureId: string | null,
+        lastCommandId?: string,
+    ) {
+        const urlObj = new URL("ws/room", ABSOLUTE_PUSHER_URL);
+        urlObj.protocol = urlObj.protocol.replace("http", "ws");
+
+        const params = urlObj.searchParams;
+        params.set("roomId", roomUrl);
+        for (const textureId of characterTextureIds) {
+            params.append("characterTextureIds", textureId);
+        }
+        if (companionTextureId) {
+            params.set("companionTextureId", companionTextureId);
+        }
+        if (lastCommandId) {
+            params.set("lastCommandId", lastCommandId);
+        }
+        params.set("version", apiVersionHash);
+        params.set("chatID", localUserStore.getChatId() ?? "");
+        params.set("roomName", gameManager.currentStartedRoom.roomName ?? "");
+        params.set("cameraState", get(requestedCameraState) ? "true" : "false");
+        params.set("microphoneState", get(requestedMicrophoneState) ? "true" : "false");
+        params.set("tabId", connectionManager.tabId);
+        // TODO: check if the screenSharingState variable is used
+        params.set("screenSharingState", get(requestedScreenSharingState) ? "true" : "false");
+
+        const url = urlObj.toString();
+        let subProtocols: string[] | undefined = undefined;
+        if (token) {
+            // We abuse the subprotocols to pass the token to the server
+            subProtocols = [token];
+        }
+
+        this.socket = new WorkAdventureWebSocket(url, subProtocols);
+        // The stream stays — ConnectionManager drives the reconnecting toast off it.
+        // What went is the analytics subscription: the socket reports its own retries
+        // now, so this no longer watches a stream to say a second time what the layer
+        // below already said.
+        this.websocketReconnectingStream = this.socket.reconnectingStream;
+
+        this.socket.onopen = () => {
+            console.info("Socket has been opened");
+            this.resetPingTimeout();
+        };
+
+        this.socket.onclose = this.handleSocketClose;
+        this.socket.onmessage = this.handleSocketMessage;
+        this.socket.onerror = this.handleSocketError;
+    }
+
+    private handleSocketMessage = (messageEvent: MessageEvent<ServerToClientMessageTsProto>) => {
+        try {
+            const message = messageEvent.data.message;
+            if (message === undefined) {
+                return;
+            }
+
+            switch (message.$case) {
+                case "batchMessage": {
+                    for (const subMessageWrapper of message.batchMessage.payload) {
+                        try {
+                            const subMessage = subMessageWrapper.message;
+                            if (subMessage === undefined) {
+                                return;
+                            }
+                            switch (subMessage.$case) {
+                                case "errorMessage": {
+                                    this._errorMessageStream.next(subMessage.errorMessage);
+                                    console.error("An error occurred server side: " + subMessage.errorMessage.message);
+                                    break;
+                                }
+                                case "userJoinedMessage": {
+                                    this._userJoinedMessageStream.next(
+                                        this.toMessageUserJoined(subMessage.userJoinedMessage),
+                                    );
+                                    break;
+                                }
+                                case "userLeftMessage": {
+                                    this._userLeftMessageStream.next(subMessage.userLeftMessage);
+                                    break;
+                                }
+                                case "userMovedMessage": {
+                                    this._userMovedMessageStream.next(subMessage.userMovedMessage);
+                                    break;
+                                }
+                                case "groupUpdateMessage": {
+                                    this._groupUpdateMessageStream.next(
+                                        this.toGroupCreatedUpdatedMessage(subMessage.groupUpdateMessage),
+                                    );
+                                    break;
+                                }
+                                case "groupDeleteMessage": {
+                                    this._groupDeleteMessageStream.next(subMessage.groupDeleteMessage);
+                                    break;
+                                }
+                                case "itemEventMessage": {
+                                    this._itemEventMessageStream.next({
+                                        itemId: subMessage.itemEventMessage.itemId,
+                                        event: subMessage.itemEventMessage.event,
+                                        parameters: JSON.parse(subMessage.itemEventMessage.parametersJson),
+                                        state: JSON.parse(subMessage.itemEventMessage.stateJson),
+                                    });
+                                    break;
+                                }
+                                case "emoteEventMessage": {
+                                    this._emoteEventMessageStream.next(subMessage.emoteEventMessage);
+                                    break;
+                                }
+                                case "playerDetailsUpdatedMessage": {
+                                    this._playerDetailsUpdatedMessageStream.next(
+                                        subMessage.playerDetailsUpdatedMessage,
+                                    );
+                                    break;
+                                }
+                                case "variableMessage": {
+                                    const name = subMessage.variableMessage.name;
+                                    const value = RoomConnection.unserializeVariable(subMessage.variableMessage.value);
+                                    this._variableMessageStream.next({ name, value });
+                                    break;
+                                }
+                                case "areaPropertyVariableMessage": {
+                                    const { areaId, propertyId, key, value } = subMessage.areaPropertyVariableMessage;
+                                    this._areaPropertyVariableMessageStream.next({
+                                        areaId,
+                                        propertyId,
+                                        key,
+                                        value: RoomConnection.unserializeVariable(value),
+                                    });
+                                    break;
+                                }
+                                case "entityMessage": {
+                                    this._entityMessageStream.next(subMessage.entityMessage);
+                                    break;
+                                }
+                                case "pingMessage": {
+                                    this.resetPingTimeout();
+                                    this.sendPong();
+                                    break;
+                                }
+                                case "editMapCommandMessage": {
+                                    const message = subMessage.editMapCommandMessage;
+                                    this._editMapCommandMessageStream.next(message);
+                                    break;
+                                }
+                                case "initSpaceUsersMessage": {
+                                    this._initSpaceUsersMessageStream.next(subMessage.initSpaceUsersMessage);
+                                    break;
+                                }
+                                case "addSpaceUserMessage": {
+                                    this._addSpaceUserMessageStream.next(subMessage.addSpaceUserMessage);
+                                    break;
+                                }
+                                case "updateSpaceUserMessage": {
+                                    this._updateSpaceUserMessageStream.next(subMessage.updateSpaceUserMessage);
+                                    break;
+                                }
+                                case "removeSpaceUserMessage": {
+                                    this._removeSpaceUserMessageStream.next(subMessage.removeSpaceUserMessage);
+                                    break;
+                                }
+                                case "spaceStatePatchMessage": {
+                                    this._spaceStatePatchMessageStream.next(subMessage.spaceStatePatchMessage);
+                                    break;
+                                }
+                                case "updateSpaceMetadataMessage": {
+                                    this._updateSpaceMetadataMessageStream.next(subMessage.updateSpaceMetadataMessage);
+                                    break;
+                                }
+                                case "receivedEventMessage": {
+                                    this._receivedEventMessageStream.next({
+                                        name: subMessage.receivedEventMessage.name,
+                                        data: subMessage.receivedEventMessage.data,
+                                        senderId: subMessage.receivedEventMessage.senderId,
+                                    });
+                                    break;
+                                }
+                                case "duplicateUserConnectedMessage": {
+                                    if (shouldShowDuplicateUserPopup()) {
+                                        duplicateUserConnectedStore.setDuplicateConnected(true);
+                                    }
+                                    break;
+                                }
+                                // FIXME: not sure where kickOffMessage belongs
+                                case "kickOffMessage": {
+                                    if (subMessage.kickOffMessage.userId !== this.userId?.toString()) break;
+
+                                    // Being kicked off the stage ends the broadcast, and
+                                    // only this path knows it — neither megaphone button
+                                    // is involved. Without going through the same stop,
+                                    // requestedMegaphoneStore stays true and the action
+                                    // bar keeps offering to stop a broadcast that is
+                                    // already over.
+                                    if (
+                                        get(currentLiveStreamingSpaceStore)?.getName() ===
+                                        subMessage.kickOffMessage.spaceName
+                                    ) {
+                                        stopMegaphoneLive();
+                                    }
+                                    isSpeakerStore.set(false);
+                                    currentLiveStreamingSpaceStore.set(undefined);
+                                    const scene = gameManager.getCurrentGameScene();
+                                    scene.broadcastService
+                                        .leaveSpace(subMessage.kickOffMessage.spaceName)
+                                        .catch((e) => {
+                                            console.error("Error while leaving space", e);
+                                            Sentry.captureException(e);
+                                        });
+
+                                    chatZoneLiveStore.set(false);
+                                    break;
+                                }
+                                case "publicEvent": {
+                                    this._spacePublicMessageEvent.next(subMessage.publicEvent);
+                                    break;
+                                }
+                                case "privateEvent": {
+                                    this._spacePrivateMessageEvent.next(subMessage.privateEvent);
+                                    break;
+                                }
+                                case "spaceDestroyedMessage": {
+                                    this._spaceDestroyedMessage.next(subMessage.spaceDestroyedMessage);
+                                    break;
+                                }
+                                case "groupUsersUpdateMessage": {
+                                    this._groupUsersUpdateMessageStream.next(subMessage.groupUsersUpdateMessage);
+                                    break;
+                                }
+                                default: {
+                                    const _exhaustiveCheck: never = subMessage;
+                                }
+                            }
+                        } catch (e) {
+                            console.error("Error while processing a submessage of a batchMessage", e);
+                            Sentry.captureException(e);
+                        }
+                    }
+                    break;
+                }
+                case "roomConnectedMessage": {
+                    if (this.roomConnectedMessageReceived) {
+                        throw new Error("Received multiple roomConnectedMessage, this should never happen");
+                    }
+                    this.tags = message.roomConnectedMessage.tag;
+                    this.canEdit = message.roomConnectedMessage.canEdit;
+                    this._roomConnectedPromise.resolve({
+                        connection: this,
+                        roomConnectedMessage: message.roomConnectedMessage,
+                    });
+                    this.roomConnectedMessageReceived = true;
+                    break;
+                }
+                case "roomJoinedMessage": {
+                    if (this.userId) {
+                        throw new Error(
+                            "Received roomJoinedMessage but userId is already set, this should never happen",
+                        );
+                    }
+
+                    const roomJoinedMessage = message.roomJoinedMessage;
+
+                    const items: { [itemId: number]: unknown } = {};
+                    for (const item of roomJoinedMessage.item) {
+                        items[item.itemId] = JSON.parse(item.stateJson);
+                    }
+
+                    const variables = new Map<string, unknown>();
+                    for (const variable of roomJoinedMessage.variable) {
+                        variables.set(variable.name, RoomConnection.unserializeVariable(variable.value));
+                    }
+
+                    const playerVariables = new Map<string, unknown>();
+                    for (const variable of roomJoinedMessage.playerVariable) {
+                        playerVariables.set(variable.name, RoomConnection.unserializeVariable(variable.value));
+                    }
+
+                    const areaPropertyVariables = (roomJoinedMessage.areaPropertyVariable ?? []).map((variable) => ({
+                        areaId: variable.areaId,
+                        propertyId: variable.propertyId,
+                        key: variable.key,
+                        value: RoomConnection.unserializeVariable(variable.value),
+                    }));
+
+                    /*const editMapCommandsArrayMessage = roomJoinedMessage.editMapCommandsArrayMessage;
+                    let commandsToApply: EditMapCommandMessage[] | undefined = undefined;
+                    if (editMapCommandsArrayMessage) {
+                        commandsToApply = editMapCommandsArrayMessage.editMapCommands;
+                    }*/
+
+                    this.userId = roomJoinedMessage.currentUserId;
+                    this._userRoomToken = roomJoinedMessage.userRoomToken;
+                    //define if there is invite user option activated
+                    inviteUserActivated.set(
+                        roomJoinedMessage.activatedInviteUser != undefined
+                            ? roomJoinedMessage.activatedInviteUser
+                            : true,
+                    );
+                    this.canEdit = roomJoinedMessage.canEdit;
+                    mapEditorActivated.set(ENABLE_MAP_EDITOR && this.canEdit);
+
+                    // If there are scripts from the admin, run it
+                    const applications: ApplicationMessage[] = [];
+                    if (roomJoinedMessage.applications != undefined) {
+                        roomJoinedMessage.applications.forEach((application, index) => {
+                            if (application.script == undefined) {
+                                applications.push(application);
+                                return;
+                            }
+                            iframeListener.registerScript(application.script).catch((err) => {
+                                console.error("roomJoinedMessage => registerScript => err", err);
+                            });
+                        });
+                    }
+
+                    const characterTextures = roomJoinedMessage.characterTextures.map(
+                        this.mapWokaTextureToResourceDescription.bind(this),
+                    );
+
+                    this._roomJoinedPromise.resolve({
+                        items,
+                        variables,
+                        characterTextures,
+                        companionTexture: roomJoinedMessage.companionTexture,
+                        playerVariables,
+                        areaPropertyVariables,
+                        applications: applications,
+                    } as RoomJoinedMessageInterface);
+                    this.isRoomJoined = true;
+
+                    for (const event of this.eventBeforeRoomJoinedQueue) {
+                        this.send(event);
+                    }
+                    this.eventBeforeRoomJoinedQueue = [];
+
+                    break;
+                }
+                case "invalidCharacterTextureMessage": {
+                    console.warn(
+                        "One of your Woka textures is invalid for this world, you will be redirect to the Woka selection screen",
+                    );
+                    this.goToSelectYourWokaScene();
+
+                    this.closeConnection();
+                    break;
+                }
+                case "invalidCompanionTextureMessage": {
+                    console.warn(
+                        "Your companion texture is invalid for this world, you will be redirect to the companion selection screen",
+                    );
+                    this.goToSelectYourCompanionScene();
+
+                    this.closeConnection();
+                    break;
+                }
+                case "tokenExpiredMessage": {
+                    connectionManager.logout();
+                    this.closeConnection(); //technically, this isn't needed since loadOpenIDScreen() will do window.location.assign() but I prefer to leave it for consistency
+                    break;
+                }
+                case "worldConnectionMessage": {
+                    this._worldFullMessageStream.next(message.worldConnectionMessage.message);
+                    this.closeConnection();
+                    break;
+                }
+                case "teleportMessageMessage": {
+                    // FIXME: WHY IS THIS UNUSED? CAN WE REMOVE THIS???
+                    this._teleportMessageMessageStream.next(message.teleportMessageMessage.map);
+                    break;
+                }
+                case "sendUserMessage": {
+                    this._sendUserMessageStream.next(message.sendUserMessage);
+                    break;
+                }
+                case "banUserMessage": {
+                    this._banUserMessageStream.next(message.banUserMessage);
+                    break;
+                }
+                case "worldFullWarningMessage": {
+                    warningBannerStore.activateWarningContainer();
+                    break;
+                }
+                case "refreshRoomMessage": {
+                    this._refreshRoomMessageStream.next(message.refreshRoomMessage);
+                    break;
+                }
+                case "deleteMapMessage": {
+                    this._deleteMapMessageStream.next(message.deleteMapMessage);
+                    break;
+                }
+                case "followRequestMessage": {
+                    this._followRequestMessageStream.next(message.followRequestMessage);
+                    break;
+                }
+                case "followConfirmationMessage": {
+                    this._followConfirmationMessageStream.next(message.followConfirmationMessage);
+                    break;
+                }
+                case "followAbortMessage": {
+                    this._followAbortMessageStream.next(message.followAbortMessage);
+                    break;
+                }
+                case "errorMessage": {
+                    this._errorMessageStream.next(message.errorMessage);
+                    console.error("An error occurred server side: " + message.errorMessage.message);
+                    break;
+                }
+                case "errorScreenMessage": {
+                    this._errorScreenMessageStream.next(message.errorScreenMessage);
+                    console.error("An error occurred server side: " + JSON.stringify(message.errorScreenMessage));
+                    if (message.errorScreenMessage.code !== "retry") {
+                        this._closed = true;
+                    }
+                    if (message.errorScreenMessage.type === "redirect" && message.errorScreenMessage.urlToRedirect) {
+                        window.location.assign(message.errorScreenMessage.urlToRedirect);
+                    } else {
+                        errorScreenStore.setError(message.errorScreenMessage);
+                    }
+                    break;
+                }
+                case "moveToPositionMessage": {
+                    if (message.moveToPositionMessage && message.moveToPositionMessage.position) {
+                        gameManager
+                            .getCurrentGameScene()
+                            .moveTo(message.moveToPositionMessage.position, false, WOKA_SPEED * 2.5)
+                            .catch((error) => {
+                                console.warn(error);
+                            });
+                    }
+                    this._moveToPositionMessageStream.next(message.moveToPositionMessage);
+                    break;
+                }
+                case "locatePositionMessage": {
+                    this._locatePositionMessageStream.next(message.locatePositionMessage);
+                    break;
+                }
+                case "meetingInvitationRequestReceivedMessage": {
+                    this._meetingInvitationRequestReceivedStream.next(message.meetingInvitationRequestReceivedMessage);
+                    break;
+                }
+                case "meetingInvitationResponseReceivedMessage": {
+                    this._meetingInvitationResponseReceivedStream.next(
+                        message.meetingInvitationResponseReceivedMessage,
+                    );
+                    break;
+                }
+                case "meetingInvitationRequestTooHighMessage": {
+                    this._meetingInvitationRequestTooHighStream.next(message.meetingInvitationRequestTooHighMessage);
+                    break;
+                }
+                case "meetingInvitationRequestClosedMessage": {
+                    this._meetingInvitationRequestClosedStream.next(message.meetingInvitationRequestClosedMessage);
+                    break;
+                }
+                case "duplicateUserConnectedMessage": {
+                    if (shouldShowDuplicateUserPopup()) {
+                        duplicateUserConnectedStore.setDuplicateConnected(true);
+                    }
+                    break;
+                }
+                case "answerMessage": {
+                    const queryId = message.answerMessage.id;
+                    const query = this.queries.get(queryId);
+                    if (query === undefined) {
+                        throw new Error("Got an answer to a query we have no track of: " + queryId.toString());
+                    }
+                    if (message.answerMessage.answer === undefined) {
+                        throw new Error("Invalid message received. Answer missing.");
+                    }
+                    if (message.answerMessage.answer.$case === "error") {
+                        query.reject(new Error(message.answerMessage.answer.error.message));
+                    } else {
+                        query.resolve(message.answerMessage.answer);
+                    }
+                    this.queries.delete(queryId);
+                    break;
+                }
+                case "joinSpaceRequestMessage": {
+                    this._joinSpaceRequestMessage.next(message.joinSpaceRequestMessage);
+                    break;
+                }
+                case "leaveSpaceRequestMessage": {
+                    this._leaveSpaceRequestMessage.next(message.leaveSpaceRequestMessage);
+                    break;
+                }
+                case "externalModuleMessage": {
+                    this._externalModuleMessage.next(message.externalModuleMessage);
+                    break;
+                }
+                case "backConnectionCloseReasonMessage": {
+                    console.warn("Received an internal back connection close reason message on the front.");
+                    break;
+                }
+                default: {
+                    // Security check: if we forget a "case", the line below will catch the error at compile-time.
+                    const _exhaustiveCheck: never = message;
+                }
+            }
+        } catch (e) {
+            console.error("Error while handling message from server", e);
+            Sentry.captureException(e);
+        }
+    };
+
+    // Event handlers as arrow function in order not to have to bind this explicitly
+    private handleSocketClose = (event: CloseEvent) => {
+        console.info("Socket has been closed", this.userId, this._closed, event);
+        if (this.timeout) {
+            clearTimeout(this.timeout);
+            this.timeout = undefined;
+        }
+
+        // If we are not connected yet (if a JoinRoomMessage was not sent), we need to retry.
+        if (!this.roomConnectedMessageReceived && !this._closed) {
+            this._roomConnectedPromise.reject(event);
+            return;
+        }
+
+        // If the socket closes after connection but before the room is joined,
+        // reject the roomJoined promise to avoid leaving callers hanging.
+        if (!this.userId && !this._closed) {
+            // GameScene awaits roomJoinedPromise only once the map and scripts are loaded, and never if the scene is
+            // torn down first. Callers awaiting it still get the rejection; this only stops an unhandled rejection
+            // when nobody awaits for the error yet. The lost socket is handled by the reconnection flow.
+            this.roomJoinedPromise.catch(() => undefined);
+            this._roomJoinedPromise.reject(event);
+        }
+        if (event.code !== 1000) {
+            analyticsClient.trackAdminEvent("websocket.connection_lost", {
+                reason: event.reason || String(event.code),
+            });
+            // Like the ping timeout below, a lost socket is a network condition handled by the reconnection flow,
+            // and analytics already counts it. As a Sentry event it cost ~60k events a month (mostly failed resumes,
+            // code 1008). A breadcrumb keeps it in the timeline of a real error.
+            Sentry.addBreadcrumb({
+                category: "room-connection",
+                level: "info",
+                message: "WebSocket closed by remote side",
+                data: { code: event.code, reason: event.reason, wasClean: event.wasClean },
+            });
+        }
+        this.cleanupConnection(event.code === 1000);
+    };
+
+    private handleSocketError = (event: Event) => {
+        analyticsClient.trackAdminEvent("websocket.connection_lost", { reason: event.type });
+        this._websocketErrorStream.next(event);
+    };
+
+    private cleanupConnection(isNormalClosure: boolean) {
+        for (const callback of this.cleanupCallbacks.splice(0)) {
+            callback();
+        }
+
+        // Cleanup queries:
+        for (const query of this.queries.values()) {
+            query.reject(new ConnectionClosedError("Socket closed"));
+        }
+
+        this.completeStreams();
+
+        if (this._closed || connectionManager.unloading) {
+            return;
+        }
+
+        if (isNormalClosure) {
+            // Normal closure case
+            return;
+        }
+
+        this._serverDisconnected.next();
+        this._serverDisconnected.complete();
+    }
+
+    private _userRoomToken: string | undefined;
+
+    public get userRoomToken(): string | undefined {
+        return this._userRoomToken;
+    }
+
+    get userCanEdit() {
+        return this.canEdit;
+    }
+
+    /**
+     * Unserializes a string received from the server.
+     * If the value cannot be unserialized, returns undefined and outputs a console error.
+     */
+    public static unserializeVariable(serializedValue: string): unknown {
+        let value: unknown = undefined;
+        if (serializedValue) {
+            try {
+                value = JSON.parse(serializedValue);
+            } catch (e) {
+                console.error(
+                    "Unable to unserialize value received from server for a variable. " +
+                        'Value received: "' +
+                        serializedValue +
+                        '". Error: ',
+                    e,
+                );
+            }
+        }
+        return value;
+    }
+
+    public emitJoinRoom(
+        name: string,
+        position: PositionMessageTsProto,
+        viewport: ViewportInterface,
+        availabilityStatus: AvailabilityStatus,
+    ): void {
+        this.joinRoomEmitted = true;
+        this.send(
+            {
+                message: {
+                    $case: "joinRoomFrontMessage",
+                    joinRoomFrontMessage: {
+                        name,
+                        positionMessage: this.toPositionMessage(
+                            position.x,
+                            position.y,
+                            position.direction,
+                            position.moving,
+                        ),
+                        viewportMessage: this.toViewportMessage(viewport),
+                        availabilityStatus,
+                    },
+                },
+            },
+            true,
+        );
+    }
+
+    public emitPlayerShowVoiceIndicator(show: boolean): void {
+        const message = SetPlayerDetailsMessageTsProto.fromPartial({
+            showVoiceIndicator: show,
+        });
+        this.sendPlayerDetailsMessage(message);
+    }
+
+    public emitPlayerStatusChange(availabilityStatus: AvailabilityStatus): void {
+        const message = SetPlayerDetailsMessageTsProto.fromPartial({
+            availabilityStatus,
+        });
+        this.sendPlayerDetailsMessage(message);
+    }
+
+    public emitPlayerChatID(chatID: string): void {
+        const message = SetPlayerDetailsMessageTsProto.fromPartial({
+            chatID,
+        });
+        this.sendPlayerDetailsMessage(message);
+    }
+
+    public emitPlayerOutlineColor(color: number | null) {
+        let message: SetPlayerDetailsMessageTsProto;
+        if (color === null) {
+            message = SetPlayerDetailsMessageTsProto.fromPartial({
+                removeOutlineColor: true,
+            });
+        } else {
+            message = SetPlayerDetailsMessageTsProto.fromPartial({
+                outlineColor: color,
+            });
+        }
+        this.sendPlayerDetailsMessage(message);
+    }
+
+    public emitPlayerSayMessage(sayMessage: SayMessage | undefined) {
+        this.sendPlayerDetailsMessage(
+            SetPlayerDetailsMessageTsProto.fromPartial({
+                sayMessage,
+            }),
+        );
+    }
+
+    private sendPlayerDetailsMessage(setPlayerDetailsMessage: SetPlayerDetailsMessageTsProto): void {
+        const message: ClientToServerMessageTsProto = {
+            message: {
+                $case: "setPlayerDetailsMessage",
+                setPlayerDetailsMessage,
+            },
+        };
+
+        if (this.userId !== null) {
+            this.send(message);
+            return;
+        }
+
+        this.roomJoinedPromise
+            .then(() => {
+                this.send(message);
+            })
+            .catch((error) => {
+                if (!this._closed) {
+                    console.error("Unable to send player details message before joining room", error);
+                    Sentry.captureException(error);
+                }
+            });
+    }
+
+    public closeConnection(): void {
+        // Run cleanup BEFORE closing the socket. The cleanup callbacks flush the
+        // end-of-session analytics (session.ended),
+        // and WorkAdventureWebSocket.send() silently drops messages once the socket
+        // is manually closed (manuallyClosed=true / readyState !== OPEN). Emitting
+        // them while the socket is still OPEN lets the browser flush the frames
+        // ahead of the close handshake. `_closed` is set afterwards so send() is not
+        // blocked during this flush. (Remote/abnormal closes still can't deliver
+        // these — the pusher's timed-event tracker remains the source of truth
+        // there, and it is what closes any meeting, area or screen-share interval
+        // whose owner never got to.)
+        //
+        // The finally guarantees the socket is still closed (and `_closed` set) even
+        // if a cleanup callback throws — otherwise a throwing callback would leave a
+        // live, listener-attached socket behind that could auto-reconnect a room the
+        // user already left.
+        try {
+            this.cleanupConnection(true);
+        } finally {
+            this.socket?.close(1000, "Room connection closed");
+            this._closed = true;
+        }
+    }
+
+    public sharePosition(
+        x: number,
+        y: number,
+        direction: PositionMessage_Direction,
+        moving: boolean,
+        viewport: ViewportInterface,
+    ): void {
+        if (!this.socket) {
+            return;
+        }
+
+        const positionMessage = this.toPositionMessage(x, y, direction, moving);
+
+        const viewportMessage = this.toViewportMessage(viewport);
+
+        this.send({
+            message: {
+                $case: "userMovesMessage",
+                userMovesMessage: {
+                    position: positionMessage,
+                    viewport: viewportMessage,
+                },
+            },
+        });
+    }
+
+    public setViewport(viewport: ViewportInterface): void {
+        if (!this.joinRoomEmitted) {
+            // Only send the viewport if we already emitted the joinRoom message (that contains the first valid viewport)
+            // Any call to setViewport before might be triggered by Phaser because of the CameraManager on a bad viewport.
+            return;
+        }
+        this.send({
+            message: {
+                $case: "viewportMessage",
+                viewportMessage: this.toViewportMessage(viewport),
+            },
+        });
+    }
+
+    public getUserId(): number {
+        if (this.userId === null) throw new Error("UserId cannot be null!");
+        return this.userId;
+    }
+
+    public getSpaceUserId(): string {
+        return this.roomUrl + "_" + this.getUserId();
+    }
+
+    emitActionableEvent(itemId: number, event: string, state: unknown, parameters: unknown): void {
+        this.send({
+            message: {
+                $case: "itemEventMessage",
+                itemEventMessage: {
+                    itemId,
+                    event,
+                    stateJson: JSON.stringify(state),
+                    parametersJson: JSON.stringify(parameters),
+                },
+            },
+        });
+    }
+
+    emitSetVariableEvent(name: string, value: unknown): void {
+        this.send({
+            message: {
+                $case: "variableMessage",
+                variableMessage: {
+                    name,
+                    value: JSON.stringify(value),
+                },
+            },
+        });
+    }
+
+    emitSetAreaPropertyVariable(areaId: string, propertyId: string, key: string, value: unknown): void {
+        this.send({
+            message: {
+                $case: "setAreaPropertyVariableMessage",
+                setAreaPropertyVariableMessage: {
+                    areaId,
+                    propertyId,
+                    key,
+                    value: JSON.stringify(value),
+                },
+            },
+        });
+    }
+
+    /**
+     * Asks the server to play a sound carried by an entity for every player of the map. The server
+     * checks the URL against the entity before relaying it, and the sender hears the sound through
+     * the broadcast it gets back, like everybody else.
+     */
+    emitEntitySoundPlayed(entityId: string, soundUrl: string): void {
+        this.send({
+            message: {
+                $case: "entityMessage",
+                entityMessage: {
+                    entityId,
+                    entityEvent: {
+                        event: {
+                            $case: "entitySoundPlayed",
+                            entitySoundPlayed: { soundUrl },
+                        },
+                    },
+                },
+            },
+        });
+    }
+
+    public async emitScriptableEvent(name: string, data: unknown, targetUserIds: number[] | undefined): Promise<void> {
+        const answer = await this.query({
+            $case: "sendEventQuery",
+            sendEventQuery: {
+                name,
+                data,
+                targetUserIds: targetUserIds ?? [],
+            },
+        });
+        if (answer.$case !== "sendEventAnswer") {
+            throw new Error("Unexpected answer");
+        }
+        return;
+    }
+
+    public emitGlobalMessage(message: PlayGlobalMessageInterface): void {
+        this.send({
+            message: {
+                $case: "playGlobalMessage",
+                playGlobalMessage: {
+                    type: message.type,
+                    content: message.content,
+                    broadcastToWorld: message.broadcastToWorld,
+                    joinUrl: message.joinUrl,
+                },
+            },
+        });
+    }
+
+    public emitReportPlayerMessage(reportedUserUuid: string, reportComment: string): void {
+        this.send({
+            message: {
+                $case: "reportPlayerMessage",
+                reportPlayerMessage: {
+                    reportedUserUuid,
+                    reportComment,
+                },
+            },
+        });
+    }
+
+    /**
+     * Ejects a user from the room. Reserved to the admins of the world (enforced by the pusher).
+     * @param kick true to only eject the user, false to also ban them from the world (permanent)
+     */
+    public emitBanPlayerMessage(
+        banUserUuid: string,
+        banUserName: string,
+        kick = false,
+        reason = "",
+        byIp = false,
+    ): void {
+        this.send({
+            message: {
+                $case: "banPlayerMessage",
+                banPlayerMessage: {
+                    banUserUuid,
+                    banUserName,
+                    kick,
+                    reason,
+                    byIp,
+                },
+            },
+        });
+    }
+
+    /**
+     * Who else a ban by IP of this user would lock out. The pusher refuses it to anyone but the admins of the world.
+     */
+    public async queryBanIpPreview(banUserUuid: string): Promise<BanIpPreviewAnswer> {
+        const answer = await this.query({
+            $case: "banIpPreviewQuery",
+            banIpPreviewQuery: { banUserUuid },
+        });
+        if (answer.$case !== "banIpPreviewAnswer") {
+            throw new Error("Unexpected answer");
+        }
+        return answer.banIpPreviewAnswer;
+    }
+
+    public hasTag(tag: string): boolean {
+        if (!this.roomConnectedMessageReceived) {
+            throw new Error("Call to hasTag before room is initialized");
+        }
+        return this.tags.includes(tag);
+    }
+
+    public isAdmin(): boolean {
+        return this.hasTag("admin");
+    }
+
+    public emitEmoteEvent(emoteName: string): void {
+        this.send({
+            message: {
+                $case: "emotePromptMessage",
+                emotePromptMessage: {
+                    emote: emoteName,
+                },
+            },
+        });
+    }
+
+    public emitFollowRequest(forceFollow = false): void {
+        if (!this.userId) {
+            return;
+        }
+
+        this.send({
+            message: {
+                $case: "followRequestMessage",
+                followRequestMessage: {
+                    leader: this.userId,
+                    forceFollow,
+                },
+            },
+        });
+    }
+
+    public emitFollowConfirmation(leaderId: number): void {
+        if (!this.userId) {
+            return;
+        }
+
+        this.send({
+            message: {
+                $case: "followConfirmationMessage",
+                followConfirmationMessage: {
+                    leader: leaderId,
+                    follower: this.userId,
+                },
+            },
+        });
+    }
+
+    public emitFollowAbort(): void {
+        const isLeader = get(followRoleStore) === "leader";
+        if (!this.userId) {
+            return;
+        }
+
+        this.send({
+            message: {
+                $case: "followAbortMessage",
+                followAbortMessage: {
+                    leader: isLeader ? this.userId : get(followUsersStore)[0],
+                    follower: isLeader ? 0 : this.userId,
+                },
+            },
+        });
+    }
+
+    public emitLockGroup(lock = true): void {
+        this.send({
+            message: {
+                $case: "lockGroupPromptMessage",
+                lockGroupPromptMessage: {
+                    lock,
+                },
+            },
+        });
+    }
+
+    public emitMapEditorModifyArea(commandId: string, config: AtLeast<AreaData, "id">): void {
+        // We need to round the values because previous versions of WorkAdventure saved them as floats
+        if (config.x !== undefined) {
+            config.x = Math.round(config.x);
+        }
+        if (config.y !== undefined) {
+            config.y = Math.round(config.y);
+        }
+        if (config.width !== undefined) {
+            config.width = Math.round(config.width);
+        }
+        if (config.height !== undefined) {
+            config.height = Math.round(config.height);
+        }
+        this.send({
+            message: {
+                $case: "editMapCommandMessage",
+                editMapCommandMessage: {
+                    id: commandId,
+                    editMapMessage: {
+                        message: {
+                            $case: "modifyAreaMessage",
+                            modifyAreaMessage: {
+                                ...config,
+                                properties: config.properties ?? [],
+                                modifyProperties: config.properties !== undefined,
+                            },
+                        },
+                    },
+                },
+            },
+        });
+    }
+
+    public emitUpdateWAMSettingMessage(commandId: string, updateWAMSettingsMessage: UpdateWAMSettingsMessage) {
+        this.send({
+            message: {
+                $case: "editMapCommandMessage",
+                editMapCommandMessage: {
+                    id: commandId,
+                    editMapMessage: {
+                        message: {
+                            $case: "updateWAMSettingsMessage",
+                            updateWAMSettingsMessage,
+                        },
+                    },
+                },
+            },
+        });
+    }
+
+    public emitMapEditorDeleteArea(commandId: string, id: string): void {
+        this.send({
+            message: {
+                $case: "editMapCommandMessage",
+                editMapCommandMessage: {
+                    id: commandId,
+                    editMapMessage: {
+                        message: {
+                            $case: "deleteAreaMessage",
+                            deleteAreaMessage: {
+                                id,
+                            },
+                        },
+                    },
+                },
+            },
+        });
+    }
+
+    public emitMapEditorCreateArea(commandId: string, config: AreaData): void {
+        if (config.x !== undefined) {
+            config.x = Math.round(config.x);
+        }
+        if (config.y !== undefined) {
+            config.y = Math.round(config.y);
+        }
+        if (config.width !== undefined) {
+            config.width = Math.round(config.width);
+        }
+        if (config.height !== undefined) {
+            config.height = Math.round(config.height);
+        }
+        this.send({
+            message: {
+                $case: "editMapCommandMessage",
+                editMapCommandMessage: {
+                    id: commandId,
+                    editMapMessage: {
+                        message: {
+                            $case: "createAreaMessage",
+                            createAreaMessage: config,
+                        },
+                    },
+                },
+            },
+        });
+    }
+
+    public emitMapEditorModifyEntity(
+        commandId: string,
+        entityId: string,
+        config: AtLeast<WAMEntityData, "x" | "y">,
+        entityDimensions: EntityDimensions,
+    ): void {
+        this.send({
+            message: {
+                $case: "editMapCommandMessage",
+                editMapCommandMessage: {
+                    id: commandId,
+                    editMapMessage: {
+                        message: {
+                            $case: "modifyEntityMessage",
+                            modifyEntityMessage: {
+                                ...config,
+                                id: entityId,
+                                properties: config.properties ?? [],
+                                modifyProperties: config.properties !== undefined,
+                                width: entityDimensions.width,
+                                height: entityDimensions.height,
+                            },
+                        },
+                    },
+                },
+            },
+        });
+    }
+
+    public emitMapEditorCreateEntity(
+        commandId: string,
+        entityId: string,
+        config: WAMEntityData,
+        entityDimensions: EntityDimensions,
+    ): void {
+        this.send({
+            message: {
+                $case: "editMapCommandMessage",
+                editMapCommandMessage: {
+                    id: commandId,
+                    editMapMessage: {
+                        message: {
+                            $case: "createEntityMessage",
+                            createEntityMessage: {
+                                id: entityId,
+                                x: config.x,
+                                y: config.y,
+                                collectionName: config.prefabRef.collectionName,
+                                prefabId: config.prefabRef.id,
+                                properties: config.properties ?? [],
+                                name: config.name,
+                                width: entityDimensions.width,
+                                height: entityDimensions.height,
+                            },
+                        },
+                    },
+                },
+            },
+        });
+    }
+
+    public emitMapEditorDeleteEntity(commandId: string, id: string): void {
+        this.send({
+            message: {
+                $case: "editMapCommandMessage",
+                editMapCommandMessage: {
+                    id: commandId,
+                    editMapMessage: {
+                        message: {
+                            $case: "deleteEntityMessage",
+                            deleteEntityMessage: {
+                                id,
+                            },
+                        },
+                    },
+                },
+            },
+        });
+    }
+
+    public emitMapEditorUploadEntity(commandId: string, uploadEntityMessage: UploadEntityMessage): void {
+        this.send({
+            message: {
+                $case: "editMapCommandMessage",
+                editMapCommandMessage: {
+                    id: commandId,
+                    editMapMessage: {
+                        message: {
+                            $case: "uploadEntityMessage",
+                            uploadEntityMessage,
+                        },
+                    },
+                },
+            },
+        });
+    }
+
+    public emitMapEditorUploadFile(commandId: string, uploadFileMessage: UploadFileMessage): void {
+        this.send({
+            message: {
+                $case: "editMapCommandMessage",
+                editMapCommandMessage: {
+                    id: commandId,
+                    editMapMessage: {
+                        message: {
+                            $case: "uploadFileMessage",
+                            uploadFileMessage,
+                        },
+                    },
+                },
+            },
+        });
+    }
+
+    public emitModifiyWAMMetadataMessage(
+        commandId: string,
+        modifiyWAMMetadataMessage: ModifiyWAMMetadataMessage,
+    ): void {
+        this.send({
+            message: {
+                $case: "editMapCommandMessage",
+                editMapCommandMessage: {
+                    id: commandId,
+                    editMapMessage: {
+                        message: {
+                            $case: "modifiyWAMMetadataMessage",
+                            modifiyWAMMetadataMessage,
+                        },
+                    },
+                },
+            },
+        });
+    }
+
+    public emitMapEditorModifyCustomEntity(
+        commandId: string,
+        modifyCustomEntityMessage: ModifyCustomEntityMessage,
+    ): void {
+        this.send({
+            message: {
+                $case: "editMapCommandMessage",
+                editMapCommandMessage: {
+                    id: commandId,
+                    editMapMessage: {
+                        message: {
+                            $case: "modifyCustomEntityMessage",
+                            modifyCustomEntityMessage,
+                        },
+                    },
+                },
+            },
+        });
+    }
+
+    public emitMapEditorDeleteCustomEntity(
+        commandId: string,
+        deleteCustomEntityMessage: DeleteCustomEntityMessage,
+    ): void {
+        this.send({
+            message: {
+                $case: "editMapCommandMessage",
+                editMapCommandMessage: {
+                    id: commandId,
+                    editMapMessage: {
+                        message: {
+                            $case: "deleteCustomEntityMessage",
+                            deleteCustomEntityMessage,
+                        },
+                    },
+                },
+            },
+        });
+    }
+
+    public getAllTags(): string[] {
+        if (!this.roomConnectedMessageReceived) {
+            throw new Error("Call to getAllTags before room is initialized");
+        }
+        return this.tags;
+    }
+
+    public emitAskPosition(
+        uuid: string,
+        playUri: string,
+        type: AskPositionMessage_AskType = AskPositionMessageAskType.MOVE,
+        userId?: number,
+    ) {
+        this.send({
+            message: {
+                $case: "askPositionMessage",
+                askPositionMessage: {
+                    userIdentifier: uuid,
+                    playUri,
+                    askType: type,
+                    userId,
+                },
+            },
+        });
+    }
+
+    public emitMeetingInvitationRequest(receiverUserUuid: string, receiverUserId?: number): void {
+        this.send({
+            message: {
+                $case: "meetingInvitationRequestMessage",
+                meetingInvitationRequestMessage: {
+                    receiverUserUuid,
+                    receiverUserId,
+                },
+            },
+        });
+    }
+
+    public emitMeetingInvitationResponse(accept: boolean, requestSenderUserUuid: string): void {
+        this.send({
+            message: {
+                $case: "meetingInvitationResponseMessage",
+                meetingInvitationResponseMessage: {
+                    accept,
+                    requestSenderUserUuid,
+                },
+            },
+        });
+    }
+
+    public emitAddSpaceFilter(filter: AddSpaceFilterMessage) {
+        this.send({
+            message: {
+                $case: "addSpaceFilterMessage",
+                addSpaceFilterMessage: filter,
+            },
+        });
+    }
+
+    public emitRemoveSpaceFilter(filter: RemoveSpaceFilterMessage) {
+        this.send({
+            message: {
+                $case: "removeSpaceFilterMessage",
+                removeSpaceFilterMessage: filter,
+            },
+        });
+    }
+
+    public async queryJitsiJwtToken(jitsiRoom: string): Promise<JitsiJwtAnswer> {
+        const answer = await this.query({
+            $case: "jitsiJwtQuery",
+            jitsiJwtQuery: {
+                jitsiRoom,
+            },
+        });
+        if (answer.$case !== "jitsiJwtAnswer") {
+            throw new Error("Unexpected answer");
+        }
+        return answer.jitsiJwtAnswer;
+    }
+
+    public async queryMapStorageJwtToken(signal?: AbortSignal): Promise<MapStorageJwtAnswer> {
+        const answer = await this.query(
+            {
+                $case: "mapStorageJwtQuery",
+                mapStorageJwtQuery: {},
+            },
+            {
+                signal,
+            },
+        );
+        if (answer.$case !== "mapStorageJwtAnswer") {
+            throw new Error("Unexpected answer");
+        }
+        return answer.mapStorageJwtAnswer;
+    }
+
+    public async queryIceServers(): Promise<IceServersAnswer> {
+        const answer = await this.query({
+            $case: "iceServersQuery",
+            iceServersQuery: {},
+        });
+        if (answer.$case !== "iceServersAnswer") {
+            throw new Error("Unexpected answer");
+        }
+        return answer.iceServersAnswer;
+    }
+
+    public async queryBBBMeetingUrl(
+        meetingId: string,
+        props: Map<string, string | number | boolean>,
+    ): Promise<JoinBBBMeetingAnswer> {
+        const meetingName = props.get("meetingName") as string;
+        const localMeetingId = props.get("bbbMeeting") as string;
+
+        const answer = await this.query({
+            $case: "joinBBBMeetingQuery",
+            joinBBBMeetingQuery: {
+                meetingId,
+                localMeetingId,
+                meetingName,
+            },
+        });
+        if (answer.$case !== "joinBBBMeetingAnswer") {
+            throw new Error("Unexpected answer");
+        }
+        return answer.joinBBBMeetingAnswer;
+    }
+
+    public emitPlayerSetVariable(event: SetPlayerVariableEvent): void {
+        let scope: SetPlayerVariableMessage_Scope;
+        switch (event.scope) {
+            case "room": {
+                scope = SetPlayerVariableMessage_Scope.ROOM;
+                break;
+            }
+            case "world": {
+                scope = SetPlayerVariableMessage_Scope.WORLD;
+                break;
+            }
+            default: {
+                const _exhaustiveCheck: never = event.scope;
+                return;
+            }
+        }
+
+        this.send({
+            message: {
+                $case: "setPlayerDetailsMessage",
+                setPlayerDetailsMessage: SetPlayerDetailsMessageTsProto.fromPartial({
+                    setVariable: {
+                        name: event.key,
+                        value: JSON.stringify(event.value),
+                        public: event.public,
+                        ttl: event.ttl,
+                        scope,
+                        persist: event.persist,
+                    },
+                }),
+            },
+        });
+    }
+
+    public async emitJoinSpace(
+        spaceName: string,
+        filterType: FilterType,
+        propertiesToSync: string[],
+        options?: { signal: AbortSignal },
+    ): Promise<SpaceUser["spaceUserId"]> {
+        const answer = await this.query(
+            {
+                $case: "joinSpaceQuery",
+                joinSpaceQuery: {
+                    spaceName,
+                    filterType,
+                    propertiesToSync,
+                },
+            },
+            options,
+        );
+
+        if (answer.$case !== "joinSpaceAnswer") {
+            throw new Error("Unexpected answer");
+        }
+
+        return answer.joinSpaceAnswer.spaceUserId;
+    }
+
+    public async emitLeaveSpace(spaceName: string): Promise<void> {
+        const answer = await this.query({
+            $case: "leaveSpaceQuery",
+            leaveSpaceQuery: {
+                spaceName,
+            },
+        });
+        if (answer.$case !== "leaveSpaceAnswer") {
+            throw new Error("Unexpected answer");
+        }
+        return;
+    }
+
+    public emitUpdateSpaceMetadata(spaceName: string, metadata: { [key: string]: unknown }): void {
+        this.send({
+            message: {
+                $case: "updateSpaceMetadataMessage",
+                updateSpaceMetadataMessage: UpdateSpaceMetadataMessage.fromPartial({
+                    spaceName,
+                    metadata: JSON.stringify(metadata),
+                }),
+            },
+        });
+    }
+
+    public emitUpdateSpaceUserMessage(spaceName: string, spaceUser: Omit<Partial<SpaceUser>, "id">): void {
+        const userId = this.userId;
+        if (!userId) {
+            throw new Error("userId cannot be null when updating spaceUserMessage");
+        }
+        this.send({
+            message: {
+                $case: "updateSpaceUserMessage",
+                updateSpaceUserMessage: {
+                    spaceName,
+                    user: SpaceUser.fromPartial({
+                        spaceUserId: this.getSpaceUserId(),
+                        ...spaceUser,
+                    }),
+                    updateMask: generateFieldMask(spaceUser),
+                },
+            },
+        });
+    }
+
+    public async queryRoomTags(): Promise<string[]> {
+        const answer = await this.query({
+            $case: "roomTagsQuery",
+            roomTagsQuery: {},
+        });
+        if (answer.$case !== "roomTagsAnswer") {
+            throw new Error("Unexpected answer");
+        }
+        return answer.roomTagsAnswer.tags;
+    }
+
+    public async queryRoomsFromSameWorld(): Promise<RoomShortDescription[]> {
+        const answer = await this.query({
+            $case: "roomsFromSameWorldQuery",
+            roomsFromSameWorldQuery: {},
+        });
+        if (answer.$case !== "roomsFromSameWorldAnswer") {
+            throw new Error("Unexpected answer");
+        }
+        return answer.roomsFromSameWorldAnswer.roomDescriptions;
+    }
+
+    public async queryEmbeddableWebsite(url: string): Promise<EmbeddableWebsiteAnswer> {
+        const answer = await this.query({
+            $case: "embeddableWebsiteQuery",
+            embeddableWebsiteQuery: {
+                url,
+            },
+        });
+        if (answer.$case !== "embeddableWebsiteAnswer") {
+            throw new Error("Unexpected answer");
+        }
+        return answer.embeddableWebsiteAnswer;
+    }
+
+    public async queryTags(searchText: string): Promise<string[]> {
+        const answer = await this.query({
+            $case: "searchTagsQuery",
+            searchTagsQuery: {
+                searchText,
+            },
+        });
+        if (answer.$case !== "searchTagsAnswer") {
+            throw new Error("Unexpected answer");
+        }
+        return answer.searchTagsAnswer.tags;
+    }
+
+    public async queryMembers(searchText: string): Promise<Member[]> {
+        const answer = await this.query({
+            $case: "searchMemberQuery",
+            searchMemberQuery: {
+                searchText,
+            },
+        });
+        if (answer.$case !== "searchMemberAnswer") {
+            throw new Error("Unexpected answer");
+        }
+        return answer.searchMemberAnswer.members;
+    }
+
+    public async queryMember(memberUUID: string): Promise<Member> {
+        const answer = await this.query({
+            $case: "getMemberQuery",
+            getMemberQuery: {
+                uuid: memberUUID,
+            },
+        });
+        if (answer.$case !== "getMemberAnswer") {
+            throw new Error("Unexpected answer");
+        }
+        if (answer.getMemberAnswer.member === undefined) {
+            throw new Error("Member is undefined.");
+        }
+        return answer.getMemberAnswer.member;
+    }
+
+    public async queryChatMembers(searchText: string, signal?: AbortSignal): Promise<ChatMembersAnswer> {
+        const answer = await this.query(
+            {
+                $case: "chatMembersQuery",
+                chatMembersQuery: {
+                    searchText,
+                },
+            },
+            { signal },
+        );
+        if (answer.$case !== "chatMembersAnswer") {
+            throw new Error("Unexpected answer");
+        }
+        return answer.chatMembersAnswer;
+    }
+
+    public async queryRecordings(): Promise<NonUndefinedFields<Recording>[]> {
+        const answer = await this.query({
+            $case: "getRecordingsQuery",
+            getRecordingsQuery: {},
+        });
+        if (answer.$case !== "getRecordingsAnswer") {
+            throw new Error("Unexpected answer");
+        }
+        const nonUndefinedRecordingsAnswer: NonUndefinedFields<Recording>[] =
+            answer.getRecordingsAnswer.recordings.reduce((acc, cur) => {
+                try {
+                    const noUndefinedCurr = noUndefined(cur);
+                    acc.push(noUndefinedCurr);
+                } catch (e) {
+                    console.error("Error while removing undefined fields from recording", cur, e);
+                }
+                return acc;
+            }, [] as NonUndefinedFields<Recording>[]);
+
+        return nonUndefinedRecordingsAnswer;
+    }
+
+    /**
+     * Signed URLs of the thumbnails of one recording, for the hover preview. The recordings list only
+     * carries one poster per recording, so these are fetched only for the recording being hovered.
+     */
+    public async queryRecordingThumbnails(baseFilename: string, signal?: AbortSignal): Promise<string[]> {
+        const answer = await this.query(
+            {
+                $case: "getRecordingThumbnailsQuery",
+                getRecordingThumbnailsQuery: {
+                    baseFilename,
+                },
+            },
+            { signal },
+        );
+        if (answer.$case !== "getRecordingThumbnailsAnswer") {
+            throw new Error("Unexpected answer");
+        }
+        return answer.getRecordingThumbnailsAnswer.urls;
+    }
+
+    public async getSignedUrl(key: string): Promise<string> {
+        const answer = await this.query({
+            $case: "getSignedUrlQuery",
+            getSignedUrlQuery: {
+                key: key,
+            },
+        });
+
+        if (answer.$case !== "getSignedUrlAnswer") {
+            throw new Error("Unexpected answer");
+        }
+        return answer.getSignedUrlAnswer.signedUrl;
+    }
+
+    public async deleteRecording(recordingFileName: string): Promise<DeleteRecordingAnswer> {
+        const answer = await this.query({
+            $case: "deleteRecordingQuery",
+            deleteRecordingQuery: {
+                recordingId: recordingFileName,
+            },
+        });
+        if (answer.$case !== "deleteRecordingAnswer") {
+            throw new Error("Unexpected answer");
+        }
+        return answer.deleteRecordingAnswer;
+    }
+
+    /**
+     * Changes the state of a space. The back answers once the change is applied; by then the
+     * patch it caused has already been received (the pusher flushes it before answering).
+     */
+    public async alterSpaceState(
+        spaceName: string,
+        query: SpaceStateQuery["query"],
+        options?: { timeout?: number },
+    ): Promise<void> {
+        const answer = await this.query(
+            {
+                $case: "spaceStateQuery",
+                spaceStateQuery: {
+                    spaceName,
+                    query: { query },
+                },
+            },
+            options,
+        );
+
+        if (answer.$case !== "spaceStateAnswer") {
+            throw new Error("Unexpected answer");
+        }
+    }
+
+    public async getOauthRefreshToken(
+        tokenToRefresh: string,
+        provider?: string,
+        userIdentifier?: string,
+    ): Promise<OauthRefreshToken> {
+        try {
+            const answer = await this.query({
+                $case: "oauthRefreshTokenQuery",
+                oauthRefreshTokenQuery: {
+                    tokenToRefresh,
+                    provider,
+                    userIdentifier,
+                },
+            });
+            if (answer.$case !== "oauthRefreshTokenAnswer") {
+                throw new Error("Unexpected answer");
+            }
+            return answer.oauthRefreshTokenAnswer;
+        } catch (error) {
+            // FIWME: delete me when the fresh token query and answer are stable
+            Debug(
+                `RoomConnection => getOauthRefreshToken => Error getting oauth refresh token: ${
+                    (error as Error).message
+                }`,
+            );
+            throw error;
+        }
+    }
+
+    public emitUpdateChatId(email: string, chatId: string) {
+        if (chatId && email) {
+            this.send({
+                message: {
+                    $case: "updateChatIdMessage",
+                    updateChatIdMessage: {
+                        email,
+                        chatId,
+                    },
+                },
+            });
+        }
+    }
+
+    public async queryEnterChatRoomArea(roomID: string): Promise<void> {
+        const answer = await this.query({
+            $case: "enterChatRoomAreaQuery",
+            enterChatRoomAreaQuery: {
+                roomID,
+            },
+        });
+
+        if (answer.$case !== "enterChatRoomAreaAnswer") {
+            throw new Error("Unexpected answer");
+        }
+
+        return;
+    }
+
+    public emitLeaveChatRoomArea(roomID: string): void {
+        this.send({
+            message: {
+                $case: "leaveChatRoomAreaMessage",
+                leaveChatRoomAreaMessage: LeaveChatRoomAreaMessage.fromPartial({
+                    roomID,
+                }),
+            },
+        });
+    }
+
+    private resetPingTimeout(): void {
+        if (this.timeout) {
+            clearTimeout(this.timeout);
+            this.timeout = undefined;
+        }
+        this.timeout = setTimeout(() => {
+            console.warn(
+                "Timeout detected. No ping from the server received. Is your connection down? Closing connection.",
+            );
+            // A dead connection is a network condition, not a defect: closing here hands over to the
+            // reconnection flow (cleanupConnection emits serverDisconnected, GameScene waits for the
+            // pusher and rebuilds the scene). Reporting it as an event cost ~25k Sentry events a month
+            // without anyone ever acting on one. A breadcrumb keeps it in the timeline of a real error.
+            Sentry.addBreadcrumb({
+                category: "room-connection",
+                level: "info",
+                message: "Ping timeout - closing connection",
+                data: { manualPingDelayMs: manualPingDelay },
+            });
+            this.socket.close();
+            this.cleanupConnection(false);
+        }, manualPingDelay);
+    }
+
+    private sendPong(): void {
+        this.send({
+            message: {
+                $case: "pingMessage",
+                pingMessage: {},
+            },
+        });
+    }
+
+    public emitPublicSpaceEvent(spaceName: string, spaceEvent: NonNullable<SpaceEvent["event"]>): void {
+        this.send({
+            message: {
+                $case: "publicEvent",
+                publicEvent: {
+                    spaceName,
+                    spaceEvent: {
+                        event: spaceEvent,
+                    },
+                } satisfies PublicEventFrontToPusher,
+            },
+        });
+    }
+
+    public emitPrivateSpaceEvent(
+        spaceName: string,
+        spaceEvent: NonNullable<PrivateSpaceEvent["event"]>,
+        receiverUserId: string,
+    ): void {
+        this.send({
+            message: {
+                $case: "privateEvent",
+                privateEvent: {
+                    spaceName,
+                    receiverUserId,
+                    spaceEvent: {
+                        event: spaceEvent,
+                    },
+                } satisfies PrivateEventFrontToPusher,
+            },
+        });
+    }
+
+    public emitBackEvent(spaceName: string, backEvent: NonNullable<BackEventMessage["backEvent"]>): void {
+        this.send({
+            message: {
+                $case: "backEvent",
+                backEvent: {
+                    spaceName,
+                    backEvent,
+                } satisfies BackEventFrontToPusherMessage,
+            },
+        });
+    }
+
+    private toPositionMessage(
+        x: number,
+        y: number,
+        direction: PositionMessage_Direction,
+        moving: boolean,
+    ): PositionMessageTsProto {
+        return {
+            x: Math.floor(x),
+            y: Math.floor(y),
+            moving,
+            direction,
+        };
+    }
+
+    private toViewportMessage(viewport: ViewportInterface): ViewportMessageTsProto {
+        return {
+            left: Math.floor(viewport.left),
+            right: Math.floor(viewport.right),
+            top: Math.floor(viewport.top),
+            bottom: Math.floor(viewport.bottom),
+        };
+    }
+
+    private mapWokaTextureToResourceDescription(texture: CharacterTextureMessage): WokaTextureDescriptionInterface {
+        return {
+            id: texture.id,
+            url: texture.url,
+        };
+    }
+
+    private mapCompanionTextureToResourceDescription(
+        texture: CompanionTextureMessage,
+    ): CompanionTextureDescriptionInterface {
+        return {
+            id: texture.id,
+            url: texture.url,
+        };
+    }
+
+    // TODO: move this to protobuf utils
+    private toMessageUserJoined(message: UserJoinedMessageTsProto): MessageUserJoined {
+        const position = message.position;
+        if (position === undefined) {
+            throw new Error("Invalid JOIN_ROOM message");
+        }
+
+        const characterTextures = message.characterTextures.map(this.mapWokaTextureToResourceDescription.bind(this));
+        const companionTexture = message.companionTexture
+            ? this.mapCompanionTextureToResourceDescription(message.companionTexture)
+            : undefined;
+
+        const variables = new Map<string, unknown>();
+        for (const variable of Object.entries(message.variables)) {
+            variables.set(variable[0], RoomConnection.unserializeVariable(variable[1]));
+        }
+
+        return {
+            userId: message.userId,
+            name: message.name,
+            characterTextures,
+            visitCardUrl: message.visitCardUrl,
+            position: position,
+            availabilityStatus: message.availabilityStatus,
+            companionTexture,
+            userUuid: message.userUuid,
+            outlineColor: message.hasOutline ? message.outlineColor : undefined,
+            variables: variables,
+            chatID: message.chatID,
+            sayMessage: message.sayMessage,
+        };
+    }
+
+    private toGroupCreatedUpdatedMessage(message: GroupUpdateMessageTsProto): GroupCreatedUpdatedMessageInterface {
+        const position = message.position;
+        if (position === undefined) {
+            throw new Error("Missing position in GROUP_CREATE_UPDATE");
+        }
+
+        return {
+            groupId: message.groupId,
+            position: position,
+            groupSize: message.groupSize,
+            locked: message.locked,
+            userIds: message.userIds,
+        };
+    }
+
+    /**
+     * Sends a message to all observers: we are not going to send anything anymore on streams.
+     */
+    private completeStreams(): void {
+        this._errorMessageStream.complete();
+        this._errorScreenMessageStream.complete();
+        this._teleportMessageMessageStream.complete();
+        this._worldFullMessageStream.complete();
+        this._worldConnectionMessageStream.complete();
+        this._tokenExpiredMessageStream.complete();
+        this._userMovedMessageStream.complete();
+        this._groupUpdateMessageStream.complete();
+        this._groupUsersUpdateMessageStream.complete();
+        this._groupDeleteMessageStream.complete();
+        this._userJoinedMessageStream.complete();
+        this._userLeftMessageStream.complete();
+        this._refreshRoomMessageStream.complete();
+        this._deleteMapMessageStream.complete();
+        this._followRequestMessageStream.complete();
+        this._followConfirmationMessageStream.complete();
+        this._followAbortMessageStream.complete();
+        this._itemEventMessageStream.complete();
+        this._emoteEventMessageStream.complete();
+        this._variableMessageStream.complete();
+        this._areaPropertyVariableMessageStream.complete();
+        this._entityMessageStream.complete();
+        this._editMapCommandMessageStream.complete();
+        this._playerDetailsUpdatedMessageStream.complete();
+        this._sendUserMessageStream.complete();
+        this._banUserMessageStream.complete();
+        this._websocketErrorStream.complete();
+        this._moveToPositionMessageStream.complete();
+        this._meetingInvitationRequestReceivedStream.complete();
+        this._meetingInvitationResponseReceivedStream.complete();
+        this._addSpaceUserMessageStream.complete();
+        this._updateSpaceUserMessageStream.complete();
+        this._removeSpaceUserMessageStream.complete();
+        this._updateSpaceMetadataMessageStream.complete();
+        this._spaceStatePatchMessageStream.complete();
+        this._receivedEventMessageStream.complete();
+        this._spacePrivateMessageEvent.complete();
+        this._spacePublicMessageEvent.complete();
+        this._joinSpaceRequestMessage.complete();
+        this._leaveSpaceRequestMessage.complete();
+        this._externalModuleMessage.complete();
+        this._spaceDestroyedMessage.complete();
+    }
+
+    private goToSelectYourWokaScene(): void {
+        menuVisiblilityStore.set(false);
+        menuIconVisiblilityStore.set(false);
+        selectCharacterSceneVisibleStore.set(true);
+        gameManager.leaveGame(SelectCharacterSceneName, new SelectCharacterScene());
+    }
+
+    private goToSelectYourCompanionScene(): void {
+        menuVisiblilityStore.set(false);
+        menuIconVisiblilityStore.set(false);
+        selectCompanionSceneVisibleStore.set(true);
+        gameManager.leaveGame(SelectCompanionSceneName, new SelectCompanionScene());
+    }
+
+    public emitVideoQualityReport(message: VideoQualityReportMessage): void {
+        this.send({
+            message: {
+                $case: "videoQualityReportMessage",
+                videoQualityReportMessage: message,
+            },
+        });
+    }
+
+    public emitAnalyticsEventReport(message: AnalyticsEventReportMessage): void {
+        this.send({
+            message: {
+                $case: "analyticsEventReportMessage",
+                analyticsEventReportMessage: message,
+            },
+        });
+    }
+
+    public onCleanup(callback: () => void): void {
+        this.cleanupCallbacks.push(callback);
+    }
+
+    // "force" bypasses pre-join queuing for messages that must be sent before the room is joined (e.g. joinRoomFrontMessage).
+    private send(message: ClientToServerMessageTsProto, force: boolean = false): void {
+        if (this._closed) {
+            console.warn("Trying to send a message to the server, but the connection is closed. Message: ", message);
+            return;
+        }
+
+        if (!this.isRoomJoined && !force) {
+            this.eventBeforeRoomJoinedQueue.push(message);
+            // Expected startup race: the queue is replayed as soon as roomJoinedMessage arrives, so
+            // nothing is lost. Reporting it as an event cost ~19k Sentry events a month for a case
+            // that is handled by design. A breadcrumb keeps the information in the timeline of a real
+            // error instead, at no quota cost.
+            Sentry.addBreadcrumb({
+                category: "room-connection",
+                level: "info",
+                message: "Event queued before room joined",
+                data: { case: message.message?.$case },
+            });
+            return;
+        }
+
+        this.socket.send(message);
+    }
+
+    private query<T extends NonNullable<QueryMessage["query"]>>(
+        message: T,
+        options?: {
+            signal?: AbortSignal;
+            // timeout in milliseconds, default is 15000ms
+            timeout?: number;
+        },
+    ): Promise<NonNullable<AnswerMessage["answer"]>> {
+        if (options?.signal?.aborted) {
+            return Promise.reject(asError(options?.signal?.reason));
+        }
+        // Let's add a timeout to avoid waiting forever for an answer that will never come
+        // We cannot use AbortSignal.timeout() because it is not supported in Safari 15. Let's do it manually
+        const signals: AbortSignal[] = [];
+        if (options?.signal) {
+            signals.push(options.signal);
+        }
+        signals.push(
+            abortTimeout(options?.timeout ?? 15000, new AbortError("The query took too long and was aborted")),
+        );
+        const finalSignal = abortAny(signals);
+
+        return new Promise<NonNullable<AnswerMessage["answer"]>>((resolve, reject) => {
+            if (!message.$case.endsWith("Query")) {
+                throw new Error("Query types are supposed to be suffixed with Query");
+            }
+            const answerType = message.$case.substring(0, message.$case.length - 5) + "Answer";
+
+            const queryId = this.lastQueryId;
+            const onAbort = () => {
+                // If we abort AFTER the query was answered, nothing to do
+                if (!this.queries.has(queryId)) {
+                    return;
+                }
+
+                // Let's inform the server that we don't want the answer anymore
+                // Note that due to latency, it is possible that the answer will arrive anyway
+                // and we will have to ignore it when it arrives
+                this.send({
+                    message: {
+                        $case: "abortQueryMessage",
+                        abortQueryMessage: {
+                            id: queryId,
+                        },
+                    },
+                });
+
+                // Let's do nothing when the query answer actually finishes
+                this.queries.set(queryId, {
+                    answerType,
+                    resolve: () => {},
+                    reject: () => {},
+                });
+                // After 35 seconds, let's remove the query to avoid memory leaks. If the answer arrives after that, we will have a warning in the console, but it's better than a memory leak.
+                setTimeout(() => {
+                    this.queries.delete(queryId);
+                }, 35000);
+                reject(new AbortError());
+            };
+
+            finalSignal.addEventListener("abort", onAbort, { once: true });
+
+            this.queries.set(queryId, {
+                answerType,
+                resolve,
+                reject,
+            });
+
+            this.send({
+                message: {
+                    $case: "queryMessage",
+                    queryMessage: {
+                        id: queryId,
+                        query: message,
+                    },
+                },
+            });
+
+            this.lastQueryId++;
+        });
+    }
+
+    get closed(): boolean {
+        return this._closed;
+    }
+}

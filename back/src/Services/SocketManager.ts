@@ -1,142 +1,261 @@
-import { GameRoom } from "../Model/GameRoom";
-import {
+import crypto from "crypto";
+import type {
+    AdminRoomMessage,
+    ZoneMessage,
+    AskPositionMessage,
+    MeetingInvitationRequestMessage,
+    MeetingInvitationResponseMessage,
+    BatchToPusherRoomMessage,
+    EditMapCommandMessage,
+    EditMapCommandsArrayMessage,
+    EmoteEventMessage,
+    EmotePromptMessage,
+    FollowAbortMessage,
+    FollowConfirmationMessage,
+    FollowRequestMessage,
     ItemEventMessage,
     ItemStateMessage,
-    PlayGlobalMessage,
-    PointMessage,
-    RoomJoinedMessage,
-    ServerToClientMessage,
-    SilentMessage,
-    SubMessage,
-    UserMovedMessage,
-    UserMovesMessage,
-    WebRtcDisconnectMessage,
-    WebRtcSignalToClientMessage,
-    WebRtcSignalToServerMessage,
-    WebRtcStartMessage,
-    QueryJitsiJwtMessage,
-    SendJitsiJwtMessage,
-    SendUserMessage,
+    JitsiJwtAnswer,
+    JitsiJwtQuery,
+    JoinBBBMeetingAnswer,
+    JoinBBBMeetingQuery,
     JoinRoomMessage,
-    Zone as ProtoZone,
-    BatchToPusherMessage,
-    SubToPusherMessage,
-    UserJoinedZoneMessage,
-    GroupUpdateZoneMessage,
-    GroupLeftZoneMessage,
-    WorldFullWarningMessage,
-    UserLeftZoneMessage,
-    EmoteEventMessage,
-    BanUserMessage,
-    RefreshRoomMessage,
-    EmotePromptMessage,
-    FollowRequestMessage,
-    FollowConfirmationMessage,
-    FollowAbortMessage,
-    VariableMessage,
-    BatchToPusherRoomMessage,
-    SubToPusherRoomMessage,
-    SetPlayerDetailsMessage,
+    KickOffMessage,
+    LockGroupPromptMessage,
     PlayerDetailsUpdatedMessage,
-} from "../Messages/generated/messages_pb";
-import { User, UserSocket } from "../Model/User";
+    QueryMessage,
+    RoomDescription,
+    RoomsList,
+    WorldUser,
+    WorldUsersAnswer,
+    SendEventQuery,
+    SetPlayerDetailsMessage,
+    SubToPusherRoomMessage,
+    UpdateMapToNewestWithKeyMessage,
+    UpdateSpaceMetadataPusherToBackMessage,
+    UpdateSpaceUserMessage,
+    UserMovesMessage,
+    VariableMessage,
+    Zone as ProtoZone,
+    PublicEvent,
+    PrivateEvent,
+    LeaveSpaceMessage,
+    JoinSpaceMessage,
+    ExternalModuleMessage,
+    SyncSpaceUsersMessage,
+    SpaceQueryMessage,
+    AddSpaceUserToNotifyMessage,
+    DeleteSpaceUserToNotifyMessage,
+    AbortQueryMessage,
+    SetAreaPropertyVariableMessage,
+    EntityMessage,
+    BackEventMessage,
+    ConnectToRoomMessage,
+    HandleLivekitWebhookRequest,
+} from "@workadventure/messages";
+import {
+    AnswerMessage,
+    RoomJoinedMessage,
+    UserJoinedZoneMessage,
+    FilterType,
+    AskPositionMessage_AskType,
+} from "@workadventure/messages";
+import { SignJWT } from "jose";
+import BigbluebuttonJs from "bigbluebutton-js";
+import Debug from "debug";
+import * as Sentry from "@sentry/node";
+import { z } from "zod";
+import type { ServiceError } from "@grpc/grpc-js";
+import { asError } from "catch-unknown";
+import type { Movable } from "@workadventure/shared-utils";
+import { GameRoom } from "../Model/GameRoom";
+import type { UserSocket } from "../Model/User";
+import { User } from "../Model/User";
 import { ProtobufUtils } from "../Model/Websocket/ProtobufUtils";
 import { Group } from "../Model/Group";
-import { cpuTracker } from "./CpuTracker";
-import {
-    GROUP_RADIUS,
-    JITSI_ISS,
-    MINIMUM_DISTANCE,
-    SECRET_JITSI_KEY,
-    TURN_STATIC_AUTH_SECRET,
-} from "../Enum/EnvironmentVariable";
-import { Movable } from "../Model/Movable";
-import { PositionInterface } from "../Model/PositionInterface";
-import Jwt from "jsonwebtoken";
-import { JITSI_URL } from "../Enum/EnvironmentVariable";
-import { clientEventsEmitter } from "./ClientEventsEmitter";
+import { GROUP_RADIUS, MINIMUM_DISTANCE } from "../Enum/EnvironmentVariable";
+import type { PositionInterface } from "../Model/PositionInterface";
+import type { EventSocket, RoomSocket, VariableSocket } from "../RoomManager";
+import type { Zone, ZonePosition } from "../Model/Zone";
+import type { Admin } from "../Model/Admin";
+import { Space } from "../Model/Space";
+import { findRecording } from "../Model/CommunicationManager";
+import type { SpacesWatcher } from "../Model/SpacesWatcher";
+import { eventProcessor } from "../Model/EventProcessorInit";
+import { applyModerationRights, isModerationEvent, isModeratorOnlyPublicEvent } from "../Model/ModerationRights";
+import type { SessionEndReason } from "../Model/SessionAnalytics";
 import { gaugeManager } from "./GaugeManager";
-import { RoomSocket, ZoneSocket } from "../RoomManager";
-import { Zone } from "_Model/Zone";
-import Debug from "debug";
-import { Admin } from "_Model/Admin";
-import crypto from "crypto";
+import { clientEventsEmitter } from "./ClientEventsEmitter";
+import { getMapStorageClient } from "./MapStorageClient";
+import { emitError, endUserConnectionWithReason } from "./MessageHelpers";
+import { cpuTracker } from "./CpuTracker";
+import { isValidEmote } from "./EmoteValidator";
 
-const debug = Debug("sockermanager");
+const debug = Debug("socketmanager");
 
-function emitZoneMessage(subMessage: SubToPusherMessage, socket: ZoneSocket): void {
+function emitZoneMessage(subMessage: SubToPusherRoomMessage, socket: RoomSocket): void {
     // TODO: should we batch those every 100ms?
-    const batchMessage = new BatchToPusherMessage();
-    batchMessage.addPayload(subMessage);
-
+    const batchMessage: BatchToPusherRoomMessage = {
+        payload: [subMessage],
+    };
     socket.write(batchMessage);
 }
 
 export class SocketManager {
-    //private rooms = new Map<string, GameRoom>();
-    // List of rooms in process of loading.
+    /**
+     * Helper to generate a SubToPusherRoomMessage zoneMessage
+     */
+    private static toZoneMessage(
+        zonePosition: ZonePosition,
+        zonePayload: ZoneMessage["message"],
+    ): SubToPusherRoomMessage {
+        return {
+            message: {
+                $case: "zoneMessage",
+                zoneMessage: {
+                    x: zonePosition.x,
+                    y: zonePosition.y,
+                    message: zonePayload,
+                },
+            },
+        };
+    }
+    /**
+     * List of rooms already loaded (note: never use this directly).
+     * It is only here for the very specific getAllRooms case that needs to return all available rooms
+     * without waiting for pending rooms.
+     */
+    private resolvedRooms = new Map<string, GameRoom>();
+    // List of rooms (or rooms in process of loading).
     private roomsPromises = new Map<string, PromiseLike<GameRoom>>();
 
-    constructor() {
-        clientEventsEmitter.registerToClientJoin((clientUUid: string, roomId: string) => {
-            gaugeManager.incNbClientPerRoomGauge(roomId);
+    private spaces = new Map<string, Space>();
+
+    public async handleConnectToRoom(
+        socket: UserSocket,
+        connectToRoomMessage: ConnectToRoomMessage,
+    ): Promise<GameRoom> {
+        const roomId = connectToRoomMessage.roomId;
+        const lastCommandId = connectToRoomMessage.lastCommandId;
+        let commandsToApply: EditMapCommandMessage[] = [];
+
+        const room = await socketManager.getOrCreateRoom(roomId);
+
+        if (room.wamUrl) {
+            const updateMapToNewestWithKeyMessage: UpdateMapToNewestWithKeyMessage = {
+                mapKey: room.wamUrl,
+                updateMapToNewestMessage: {
+                    commandId: lastCommandId,
+                },
+            };
+
+            commandsToApply = await new Promise<EditMapCommandMessage[]>((resolve, reject) => {
+                getMapStorageClient().handleUpdateMapToNewestMessage(
+                    updateMapToNewestWithKeyMessage,
+                    (err: ServiceError | null, message: EditMapCommandsArrayMessage) => {
+                        if (err) {
+                            emitError(socket, err);
+                            reject(err);
+                            return;
+                        }
+                        resolve(message.editMapCommands);
+                    },
+                );
+            });
+        }
+
+        await new Promise<void>((resolve, reject) => {
+            socket.write(
+                {
+                    message: {
+                        $case: "roomConnectedMessage",
+                        roomConnectedMessage: {
+                            editMapCommandsArrayMessage: {
+                                editMapCommands: commandsToApply,
+                            },
+                            tag: connectToRoomMessage.tag,
+                            canEdit: connectToRoomMessage.canEdit,
+                        },
+                    },
+                },
+                (error: unknown) => {
+                    if (error) {
+                        reject(asError(error));
+                        return;
+                    }
+                    resolve();
+                },
+            );
         });
-        clientEventsEmitter.registerToClientLeave((clientUUid: string, roomId: string) => {
-            gaugeManager.decNbClientPerRoomGauge(roomId);
-        });
+
+        return room;
     }
 
-    public async handleJoinRoom(
-        socket: UserSocket,
-        joinRoomMessage: JoinRoomMessage
-    ): Promise<{ room: GameRoom; user: User }> {
-        //join new previous room
-        const { room, user } = await this.joinRoom(socket, joinRoomMessage);
+    public async handleJoinRoom(socket: UserSocket, room: GameRoom, joinRoomMessage: JoinRoomMessage): Promise<User> {
+        const user = await room.join(socket, joinRoomMessage);
+
+        clientEventsEmitter.clientJoinSubject.next({ clientUUid: user.uuid, roomId: room.roomUrl });
 
         if (!socket.writable) {
             console.warn("Socket was aborted");
-            return {
-                room,
-                user,
-            };
+            return user;
         }
-        const roomJoinedMessage = new RoomJoinedMessage();
-        roomJoinedMessage.setTagList(joinRoomMessage.getTagList());
-        roomJoinedMessage.setUserroomtoken(joinRoomMessage.getUserroomtoken());
 
+        const itemStateMessage: ItemStateMessage[] = [];
         for (const [itemId, item] of room.getItemsState().entries()) {
-            const itemStateMessage = new ItemStateMessage();
-            itemStateMessage.setItemid(itemId);
-            itemStateMessage.setStatejson(JSON.stringify(item));
-
-            roomJoinedMessage.addItem(itemStateMessage);
+            itemStateMessage.push({
+                itemId: itemId,
+                stateJson: JSON.stringify(item),
+            });
         }
 
         const variables = await room.getVariablesForTags(user.tags);
+        const variablesMessage: VariableMessage[] = [];
 
         for (const [name, value] of variables.entries()) {
-            const variableMessage = new VariableMessage();
-            variableMessage.setName(name);
-            variableMessage.setValue(value);
-
-            roomJoinedMessage.addVariable(variableMessage);
+            variablesMessage.push({
+                name: name,
+                value: value,
+            });
         }
 
-        roomJoinedMessage.setCurrentuserid(user.id);
+        const playerVariables = user.getVariables().getVariables();
+        const playerVariablesMessage: VariableMessage[] = [];
 
-        const serverToClientMessage = new ServerToClientMessage();
-        serverToClientMessage.setRoomjoinedmessage(roomJoinedMessage);
-        socket.write(serverToClientMessage);
+        for (const [name, value] of playerVariables.entries()) {
+            playerVariablesMessage.push({
+                name: name,
+                value: value.value,
+            });
+        }
 
-        return {
-            room,
-            user,
+        // Get area property variables for initial state
+        const areaPropertyVariables = room.getAreaPropertyVariables();
+
+        const roomJoinedMessage: Partial<RoomJoinedMessage> = {
+            userRoomToken: joinRoomMessage.userRoomToken,
+            characterTextures: joinRoomMessage.characterTextures,
+            companionTexture: joinRoomMessage.companionTexture,
+            canEdit: joinRoomMessage.canEdit,
+            item: itemStateMessage,
+            variable: variablesMessage,
+            currentUserId: user.id,
+            activatedInviteUser: user.activatedInviteUser != undefined ? user.activatedInviteUser : true,
+            applications: user.applications ?? [],
+            playerVariable: playerVariablesMessage,
+            areaPropertyVariable: areaPropertyVariables,
         };
+
+        user.write({
+            $case: "roomJoinedMessage",
+            roomJoinedMessage: RoomJoinedMessage.fromPartial(roomJoinedMessage),
+        });
+
+        return user;
     }
 
-    handleUserMovesMessage(room: GameRoom, user: User, userMovesMessage: UserMovesMessage) {
-        const userMoves = userMovesMessage.toObject();
-        const position = userMovesMessage.getPosition();
+    handleUserMovesMessage(room: GameRoom, user: User, userMoves: UserMovesMessage) {
+        const position = userMoves.position;
 
         // If CPU is high, let's drop messages of users moving (we will only dispatch the final position)
         if (cpuTracker.isOverHeating() && userMoves.position?.moving === true) {
@@ -160,87 +279,68 @@ export class SocketManager {
         room.updatePlayerDetails(user, playerDetailsMessage);
     }
 
-    handleSilentMessage(room: GameRoom, user: User, silentMessage: SilentMessage) {
-        room.setSilent(user, silentMessage.getSilent());
-    }
-
     handleItemEvent(room: GameRoom, user: User, itemEventMessage: ItemEventMessage) {
         const itemEvent = ProtobufUtils.toItemEvent(itemEventMessage);
-
-        const subMessage = new SubMessage();
-        subMessage.setItemeventmessage(itemEventMessage);
 
         // Let's send the event without using the SocketIO room.
         // TODO: move this in the GameRoom class.
         for (const user of room.getUsers().values()) {
-            user.emitInBatch(subMessage);
+            user.emitInBatch({
+                message: {
+                    $case: "itemEventMessage",
+                    itemEventMessage,
+                },
+            });
         }
 
         room.setItemState(itemEvent.itemId, itemEvent.state);
     }
 
     handleVariableEvent(room: GameRoom, user: User, variableMessage: VariableMessage): Promise<void> {
-        return room.setVariable(variableMessage.getName(), variableMessage.getValue(), user);
+        return room.setVariable(variableMessage.name, variableMessage.value, user);
     }
 
-    emitVideo(room: GameRoom, user: User, data: WebRtcSignalToServerMessage): void {
-        //send only at user
-        const remoteUser = room.getUsers().get(data.getReceiverid());
-        if (remoteUser === undefined) {
+    async handleSetAreaPropertyVariableEvent(
+        room: GameRoom,
+        user: User,
+        message: SetAreaPropertyVariableMessage,
+    ): Promise<void> {
+        const result = await room.setAreaPropertyVariableWithPermissionCheck(
+            user.tags,
+            message.areaId,
+            message.propertyId,
+            message.key,
+            message.value,
+        );
+
+        if (!result.success) {
+            // Log the permission denial for monitoring
             console.warn(
-                "While exchanging a WebRTC signal: client with id ",
-                data.getReceiverid(),
-                " does not exist. This might be a race condition."
+                `User ${user.uuid} denied permission to set area property variable: ` +
+                    `areaId=${message.areaId}, propertyId=${message.propertyId}, key=${message.key}. ` +
+                    `User tags: [${user.tags.join(", ")}]. Error: ${result.error}`,
             );
-            return;
+            // Note: We don't send an error back to the client as this is a security check
+            // The client should have already verified permissions before allowing the action
         }
-
-        const webrtcSignalToClient = new WebRtcSignalToClientMessage();
-        webrtcSignalToClient.setUserid(user.id);
-        webrtcSignalToClient.setSignal(data.getSignal());
-        // TODO: only compute credentials if data.signal.type === "offer"
-        if (TURN_STATIC_AUTH_SECRET !== "") {
-            const { username, password } = this.getTURNCredentials(user.id.toString(), TURN_STATIC_AUTH_SECRET);
-            webrtcSignalToClient.setWebrtcusername(username);
-            webrtcSignalToClient.setWebrtcpassword(password);
-        }
-
-        const serverToClientMessage = new ServerToClientMessage();
-        serverToClientMessage.setWebrtcsignaltoclientmessage(webrtcSignalToClient);
-
-        //if (!client.disconnecting) {
-        remoteUser.socket.write(serverToClientMessage);
-        //}
     }
 
-    emitScreenSharing(room: GameRoom, user: User, data: WebRtcSignalToServerMessage): void {
-        //send only at user
-        const remoteUser = room.getUsers().get(data.getReceiverid());
-        if (remoteUser === undefined) {
-            console.warn(
-                "While exchanging a WEBRTC_SCREEN_SHARING signal: client with id ",
-                data.getReceiverid(),
-                " does not exist. This might be a race condition."
-            );
-            return;
+    handleEntityMessage(room: GameRoom, message: EntityMessage): void {
+        if (message.entityEvent) {
+            room.dispatchEntityEvent(message.entityId, message.entityEvent);
         }
+    }
 
-        const webrtcSignalToClient = new WebRtcSignalToClientMessage();
-        webrtcSignalToClient.setUserid(user.id);
-        webrtcSignalToClient.setSignal(data.getSignal());
-        // TODO: only compute credentials if data.signal.type === "offer"
-        if (TURN_STATIC_AUTH_SECRET !== "") {
-            const { username, password } = this.getTURNCredentials(user.id.toString(), TURN_STATIC_AUTH_SECRET);
-            webrtcSignalToClient.setWebrtcusername(username);
-            webrtcSignalToClient.setWebrtcpassword(password);
-        }
+    async readVariable(roomUrl: string, variable: string): Promise<string | undefined> {
+        const room = await this.getOrCreateRoom(roomUrl);
+        // Info: Admin tag is given to bypass the tags checking
+        const variables = await room.getVariablesForTags(undefined);
+        return variables.get(variable);
+    }
 
-        const serverToClientMessage = new ServerToClientMessage();
-        serverToClientMessage.setWebrtcscreensharingsignaltoclientmessage(webrtcSignalToClient);
-
-        //if (!client.disconnecting) {
-        remoteUser.socket.write(serverToClientMessage);
-        //}
+    async saveVariable(roomUrl: string, variable: string, newValue: string): Promise<void> {
+        const room = await this.getOrCreateRoom(roomUrl);
+        await room.setVariable(variable, newValue, "RoomApi");
     }
 
     leaveRoom(room: GameRoom, user: User) {
@@ -248,14 +348,9 @@ export class SocketManager {
         try {
             //user leave previous world
             room.leave(user);
-            if (room.isEmpty()) {
-                this.roomsPromises.delete(room.roomUrl);
-                gaugeManager.decNbRoomGauge();
-                debug('Room is empty. Deleting room "%s"', room.roomUrl);
-            }
+            this.cleanupRoomIfEmpty(room);
         } finally {
-            clientEventsEmitter.emitClientLeave(user.uuid, room.roomUrl);
-            console.log("A user left");
+            clientEventsEmitter.clientLeaveSubject.next({ clientUUid: user.uuid, roomId: room.roomUrl });
         }
     }
 
@@ -265,23 +360,46 @@ export class SocketManager {
         if (roomPromise === undefined) {
             roomPromise = GameRoom.create(
                 roomId,
-                (user: User, group: Group) => this.joinWebRtcRoom(user, group),
-                (user: User, group: Group) => this.disConnectedUser(user, group),
+                (user: User, group: Group) => {
+                    this.joinWebRtcRoom(user, group);
+                },
+                (user: User, group: Group) => {
+                    this.disConnectedUser(user, group);
+                },
                 MINIMUM_DISTANCE,
                 GROUP_RADIUS,
-                (thing: Movable, fromZone: Zone | null, listener: ZoneSocket) =>
-                    this.onZoneEnter(thing, fromZone, listener),
-                (thing: Movable, position: PositionInterface, listener: ZoneSocket) =>
-                    this.onClientMove(thing, position, listener),
-                (thing: Movable, newZone: Zone | null, listener: ZoneSocket) =>
-                    this.onClientLeave(thing, newZone, listener),
-                (emoteEventMessage: EmoteEventMessage, listener: ZoneSocket) =>
-                    this.onEmote(emoteEventMessage, listener),
-                (playerDetailsUpdatedMessage: PlayerDetailsUpdatedMessage, listener: ZoneSocket) =>
-                    this.onPlayerDetailsUpdated(playerDetailsUpdatedMessage, listener)
+                (thing: Movable, currentZone: ZonePosition, fromZone: Zone | null, listener: RoomSocket) => {
+                    this.onZoneEnter(thing, currentZone, fromZone, listener);
+                },
+                (thing: Movable, currentZone: ZonePosition, position: PositionInterface, listener: RoomSocket) =>
+                    this.onClientMove(thing, currentZone, position, listener),
+                (thing: Movable, currentZone: ZonePosition, newZone: Zone | null, listener: RoomSocket) =>
+                    this.onClientLeave(thing, currentZone, newZone, listener),
+                (emoteEventMessage: EmoteEventMessage, currentZone: ZonePosition, listener: RoomSocket) =>
+                    this.onEmote(emoteEventMessage, currentZone, listener),
+                (currentZone: ZonePosition, groupId: number, listener: RoomSocket) => {
+                    this.onLockGroup(currentZone, groupId, listener, roomPromise).catch((e) => {
+                        console.error("An error happened while handling a lock group event:", e);
+                        Sentry.captureException(e);
+                    });
+                },
+                (
+                    currentZone: ZonePosition,
+                    playerDetailsUpdatedMessage: PlayerDetailsUpdatedMessage,
+                    listener: RoomSocket,
+                ) => this.onPlayerDetailsUpdated(currentZone, playerDetailsUpdatedMessage, listener),
+                (currentZone: ZonePosition, group: Group, listener: RoomSocket) => {
+                    this.onUserEntersOrLeavesBubble(currentZone, group, listener);
+                },
             )
                 .then((gameRoom) => {
+                    // The room may have been invalidated while it was still loading.
+                    if (this.roomsPromises.get(roomId) !== roomPromise) {
+                        gameRoom.destroy();
+                        return gameRoom;
+                    }
                     gaugeManager.incNbRoomGauge();
+                    this.resolvedRooms.set(roomId, gameRoom);
                     return gameRoom;
                 })
                 .catch((e) => {
@@ -293,325 +411,503 @@ export class SocketManager {
         return roomPromise;
     }
 
-    private async joinRoom(
-        socket: UserSocket,
-        joinRoomMessage: JoinRoomMessage
-    ): Promise<{ room: GameRoom; user: User }> {
-        const roomId = joinRoomMessage.getRoomid();
-
-        const room = await socketManager.getOrCreateRoom(roomId);
-
-        //join world
-        const user = room.join(socket, joinRoomMessage);
-
-        clientEventsEmitter.emitClientJoin(user.uuid, roomId);
-        console.log(new Date().toISOString() + " A user joined");
-        return { room, user };
-    }
-
-    private onZoneEnter(thing: Movable, fromZone: Zone | null, listener: ZoneSocket) {
+    private onZoneEnter(thing: Movable, currentZone: ZonePosition, fromZone: Zone | null, listener: RoomSocket) {
         if (thing instanceof User) {
-            const userJoinedZoneMessage = new UserJoinedZoneMessage();
-            if (!Number.isInteger(thing.id)) {
-                throw new Error(`clientUser.userId is not an integer ${thing.id}`);
-            }
-            userJoinedZoneMessage.setUserid(thing.id);
-            userJoinedZoneMessage.setUseruuid(thing.uuid);
-            userJoinedZoneMessage.setName(thing.name);
-            userJoinedZoneMessage.setCharacterlayersList(ProtobufUtils.toCharacterLayerMessages(thing.characterLayers));
-            userJoinedZoneMessage.setPosition(ProtobufUtils.toPositionMessage(thing.getPosition()));
-            userJoinedZoneMessage.setFromzone(this.toProtoZone(fromZone));
-            if (thing.visitCardUrl) {
-                userJoinedZoneMessage.setVisitcardurl(thing.visitCardUrl);
-            }
-            userJoinedZoneMessage.setCompanion(thing.companion);
-            if (thing.outlineColor === undefined) {
-                userJoinedZoneMessage.setHasoutline(false);
-            } else {
-                userJoinedZoneMessage.setHasoutline(true);
-                userJoinedZoneMessage.setOutlinecolor(thing.outlineColor);
-            }
-
-            const subMessage = new SubToPusherMessage();
-            subMessage.setUserjoinedzonemessage(userJoinedZoneMessage);
-
+            const subMessage = SocketManager.toUserJoinedZoneMessage(thing, currentZone, fromZone);
             emitZoneMessage(subMessage, listener);
             //listener.emitInBatch(subMessage);
         } else if (thing instanceof Group) {
-            this.emitCreateUpdateGroupEvent(listener, fromZone, thing);
+            this.emitCreateUpdateGroupEvent(listener, currentZone, fromZone, thing);
         } else {
             console.error("Unexpected type for Movable.");
+            Sentry.captureException("Unexpected type for Movable.");
         }
     }
 
-    private onClientMove(thing: Movable, position: PositionInterface, listener: ZoneSocket): void {
+    private static toUserJoinedZoneMessage(
+        user: User,
+        currentZone: ZonePosition,
+        fromZone?: Zone | null,
+    ): SubToPusherRoomMessage {
+        if (!Number.isInteger(user.id)) {
+            throw new Error(`clientUser.userId is not an integer ${user.id}`);
+        }
+        const userJoinedZoneMessage: Partial<UserJoinedZoneMessage> = {
+            userId: user.id,
+            userUuid: user.uuid,
+            name: user.name,
+            availabilityStatus: user.getAvailabilityStatus(),
+            characterTextures: user.characterTextures,
+            position: ProtobufUtils.toPositionMessage(user.getPosition()),
+            chatID: user.chatID,
+        };
+        if (fromZone) {
+            userJoinedZoneMessage.fromZone = SocketManager.toProtoZone(fromZone);
+        }
+        if (user.visitCardUrl) {
+            userJoinedZoneMessage.visitCardUrl = user.visitCardUrl;
+        }
+        userJoinedZoneMessage.companionTexture = user.companionTexture;
+        const outlineColor = user.getOutlineColor();
+        if (outlineColor === undefined) {
+            userJoinedZoneMessage.hasOutline = false;
+        } else {
+            userJoinedZoneMessage.hasOutline = true;
+            userJoinedZoneMessage.outlineColor = outlineColor;
+        }
+        userJoinedZoneMessage.variables = {};
+        for (const entry of user.getVariables().getVariables().entries()) {
+            const key = entry[0];
+            const value = entry[1].value;
+            const isPublic = entry[1].isPublic;
+            if (isPublic) {
+                userJoinedZoneMessage.variables[key] = value;
+            }
+        }
+        userJoinedZoneMessage.sayMessage = user.getSayMessage();
+
+        return SocketManager.toZoneMessage(currentZone, {
+            $case: "userJoinedZoneMessage",
+            userJoinedZoneMessage: UserJoinedZoneMessage.fromPartial(userJoinedZoneMessage),
+        });
+    }
+
+    private onClientMove(
+        thing: Movable,
+        currentZone: ZonePosition,
+        position: PositionInterface,
+        listener: RoomSocket,
+    ): void {
         if (thing instanceof User) {
-            const userMovedMessage = new UserMovedMessage();
-            userMovedMessage.setUserid(thing.id);
-            userMovedMessage.setPosition(ProtobufUtils.toPositionMessage(thing.getPosition()));
-
-            const subMessage = new SubToPusherMessage();
-            subMessage.setUsermovedmessage(userMovedMessage);
-
-            emitZoneMessage(subMessage, listener);
-            //listener.emitInBatch(subMessage);
-            //console.log("Sending USER_MOVED event");
+            // Note: the position parameter is not used because the thing has already been User.setPosition
+            const posMsg = ProtobufUtils.toPositionMessage(thing.getPosition());
+            /*const posMsg = ProtobufUtils.toPositionMessage({
+                x: position.x,
+                y: position.y,
+                direction: "down",
+                moving: false,
+            });*/
+            emitZoneMessage(
+                SocketManager.toZoneMessage(currentZone, {
+                    $case: "userMovedMessage",
+                    userMovedMessage: {
+                        userId: thing.id,
+                        position: posMsg,
+                    },
+                }),
+                listener,
+            );
         } else if (thing instanceof Group) {
-            this.emitCreateUpdateGroupEvent(listener, null, thing);
+            this.emitCreateUpdateGroupEvent(listener, currentZone, null, thing);
         } else {
             console.error("Unexpected type for Movable.");
+            Sentry.captureException("Unexpected type for Movable.");
         }
     }
 
-    private onClientLeave(thing: Movable, newZone: Zone | null, listener: ZoneSocket) {
+    private onClientLeave(thing: Movable, currentZone: ZonePosition, newZone: Zone | null, listener: RoomSocket) {
         if (thing instanceof User) {
-            this.emitUserLeftEvent(listener, thing.id, newZone);
+            this.emitUserLeftEvent(listener, currentZone, thing.id, newZone);
         } else if (thing instanceof Group) {
-            this.emitDeleteGroupEvent(listener, thing.getId(), newZone);
+            this.emitDeleteGroupEvent(listener, currentZone, thing.getId(), newZone);
         } else {
             console.error("Unexpected type for Movable.");
+            Sentry.captureException("Unexpected type for Movable.");
         }
     }
 
-    private onEmote(emoteEventMessage: EmoteEventMessage, client: ZoneSocket) {
-        const subMessage = new SubToPusherMessage();
-        subMessage.setEmoteeventmessage(emoteEventMessage);
-
-        emitZoneMessage(subMessage, client);
+    private onUserEntersOrLeavesBubble(currentZone: ZonePosition, group: Group, client: RoomSocket) {
+        emitZoneMessage(
+            SocketManager.toZoneMessage(currentZone, {
+                $case: "groupUsersUpdateMessage",
+                groupUsersUpdateMessage: {
+                    groupId: group.getId(),
+                    userIds: group.getUsers().map((user) => user.id),
+                },
+            }),
+            client,
+        );
     }
 
-    private onPlayerDetailsUpdated(playerDetailsUpdatedMessage: PlayerDetailsUpdatedMessage, client: ZoneSocket) {
-        const subMessage = new SubToPusherMessage();
-        subMessage.setPlayerdetailsupdatedmessage(playerDetailsUpdatedMessage);
-
-        emitZoneMessage(subMessage, client);
+    private onEmote(emoteEventMessage: EmoteEventMessage, currentZone: ZonePosition, client: RoomSocket) {
+        // Ideally, we should pass the position of the concerned user
+        emitZoneMessage(
+            SocketManager.toZoneMessage(currentZone, {
+                $case: "emoteEventMessage",
+                emoteEventMessage,
+            }),
+            client,
+        );
     }
 
-    private emitCreateUpdateGroupEvent(client: ZoneSocket, fromZone: Zone | null, group: Group): void {
+    private async onLockGroup(
+        currentZone: ZonePosition,
+        groupId: number,
+        client: RoomSocket,
+        roomPromise: PromiseLike<GameRoom> | undefined,
+    ): Promise<void> {
+        if (!roomPromise) {
+            return;
+        }
+        const group = (await roomPromise).getGroupById(groupId);
+        if (!group) {
+            return;
+        }
+        this.emitCreateUpdateGroupEvent(client, currentZone, null, group);
+    }
+
+    private onPlayerDetailsUpdated(
+        currentZone: ZonePosition,
+        playerDetailsUpdatedMessage: PlayerDetailsUpdatedMessage,
+        client: RoomSocket,
+    ) {
+        // Ideally, we should pass the position of the concerned user
+        emitZoneMessage(
+            SocketManager.toZoneMessage(currentZone, {
+                $case: "playerDetailsUpdatedMessage",
+                playerDetailsUpdatedMessage,
+            }),
+            client,
+        );
+    }
+
+    private emitCreateUpdateGroupEvent(
+        client: RoomSocket,
+        currentZone: ZonePosition,
+        fromZone: Zone | null,
+        group: Group,
+    ): void {
         const position = group.getPosition();
-        const pointMessage = new PointMessage();
-        pointMessage.setX(Math.floor(position.x));
-        pointMessage.setY(Math.floor(position.y));
-        const groupUpdateMessage = new GroupUpdateZoneMessage();
-        groupUpdateMessage.setGroupid(group.getId());
-        groupUpdateMessage.setPosition(pointMessage);
-        groupUpdateMessage.setGroupsize(group.getSize);
-        groupUpdateMessage.setFromzone(this.toProtoZone(fromZone));
-
-        const subMessage = new SubToPusherMessage();
-        subMessage.setGroupupdatezonemessage(groupUpdateMessage);
-
-        emitZoneMessage(subMessage, client);
-        //client.emitInBatch(subMessage);
+        emitZoneMessage(
+            SocketManager.toZoneMessage(currentZone, {
+                $case: "groupUpdateZoneMessage",
+                groupUpdateZoneMessage: {
+                    groupId: group.getId(),
+                    position: {
+                        x: Math.floor(position.x),
+                        y: Math.floor(position.y),
+                    },
+                    groupSize: group.getSize,
+                    fromZone: SocketManager.toProtoZone(fromZone),
+                    locked: group.isLocked(),
+                    userIds: group.getUsers().map((user) => user.id),
+                },
+            }),
+            client,
+        );
     }
 
-    private emitDeleteGroupEvent(client: ZoneSocket, groupId: number, newZone: Zone | null): void {
-        const groupDeleteMessage = new GroupLeftZoneMessage();
-        groupDeleteMessage.setGroupid(groupId);
-        groupDeleteMessage.setTozone(this.toProtoZone(newZone));
-
-        const subMessage = new SubToPusherMessage();
-        subMessage.setGroupleftzonemessage(groupDeleteMessage);
-
-        emitZoneMessage(subMessage, client);
-        //user.emitInBatch(subMessage);
+    private emitDeleteGroupEvent(
+        client: RoomSocket,
+        currentZone: ZonePosition,
+        groupId: number,
+        newZone: Zone | null,
+    ): void {
+        emitZoneMessage(
+            SocketManager.toZoneMessage(currentZone, {
+                $case: "groupLeftZoneMessage",
+                groupLeftZoneMessage: {
+                    groupId,
+                    toZone: SocketManager.toProtoZone(newZone),
+                },
+            }),
+            client,
+        );
     }
 
-    private emitUserLeftEvent(client: ZoneSocket, userId: number, newZone: Zone | null): void {
-        const userLeftMessage = new UserLeftZoneMessage();
-        userLeftMessage.setUserid(userId);
-        userLeftMessage.setTozone(this.toProtoZone(newZone));
-
-        const subMessage = new SubToPusherMessage();
-        subMessage.setUserleftzonemessage(userLeftMessage);
-
-        emitZoneMessage(subMessage, client);
+    private emitUserLeftEvent(
+        client: RoomSocket,
+        currentZone: ZonePosition,
+        userId: number,
+        newZone: Zone | null,
+    ): void {
+        emitZoneMessage(
+            SocketManager.toZoneMessage(currentZone, {
+                $case: "userLeftZoneMessage",
+                userLeftZoneMessage: {
+                    userId,
+                    toZone: SocketManager.toProtoZone(newZone),
+                },
+            }),
+            client,
+        );
     }
 
-    private toProtoZone(zone: Zone | null): ProtoZone | undefined {
+    private static toProtoZone(zone: Zone | null): ProtoZone | undefined {
         if (zone !== null) {
-            const zoneMessage = new ProtoZone();
-            zoneMessage.setX(zone.x);
-            zoneMessage.setY(zone.y);
-            return zoneMessage;
+            return {
+                x: zone.x,
+                y: zone.y,
+            };
         }
         return undefined;
     }
 
     private joinWebRtcRoom(user: User, group: Group) {
-        for (const otherUser of group.getUsers()) {
-            if (user === otherUser) {
-                continue;
-            }
-
-            // Let's send 2 messages: one to the user joining the group and one to the other user
-            const webrtcStartMessage1 = new WebRtcStartMessage();
-            webrtcStartMessage1.setUserid(otherUser.id);
-            webrtcStartMessage1.setInitiator(true);
-            if (TURN_STATIC_AUTH_SECRET !== "") {
-                const { username, password } = this.getTURNCredentials(
-                    otherUser.id.toString(),
-                    TURN_STATIC_AUTH_SECRET
-                );
-                webrtcStartMessage1.setWebrtcusername(username);
-                webrtcStartMessage1.setWebrtcpassword(password);
-            }
-
-            const serverToClientMessage1 = new ServerToClientMessage();
-            serverToClientMessage1.setWebrtcstartmessage(webrtcStartMessage1);
-
-            user.socket.write(serverToClientMessage1);
-
-            const webrtcStartMessage2 = new WebRtcStartMessage();
-            webrtcStartMessage2.setUserid(user.id);
-            webrtcStartMessage2.setInitiator(false);
-            if (TURN_STATIC_AUTH_SECRET !== "") {
-                const { username, password } = this.getTURNCredentials(user.id.toString(), TURN_STATIC_AUTH_SECRET);
-                webrtcStartMessage2.setWebrtcusername(username);
-                webrtcStartMessage2.setWebrtcpassword(password);
-            }
-
-            const serverToClientMessage2 = new ServerToClientMessage();
-            serverToClientMessage2.setWebrtcstartmessage(webrtcStartMessage2);
-
-            otherUser.socket.write(serverToClientMessage2);
-        }
-    }
-
-    /**
-     * Computes a unique user/password for the TURN server, using a shared secret between the WorkAdventure API server
-     * and the Coturn server.
-     * The Coturn server should be initialized with parameters: `--use-auth-secret --static-auth-secret=MySecretKey`
-     */
-    private getTURNCredentials(name: string, secret: string): { username: string; password: string } {
-        const unixTimeStamp = Math.floor(Date.now() / 1000) + 4 * 3600; // this credential would be valid for the next 4 hours
-        const username = [unixTimeStamp, name].join(":");
-        const hmac = crypto.createHmac("sha1", secret);
-        hmac.setEncoding("base64");
-        hmac.write(username);
-        hmac.end();
-        const password = hmac.read() as string;
-        return {
-            username: username,
-            password: password,
-        };
+        user.write({
+            $case: "joinSpaceRequestMessage",
+            joinSpaceRequestMessage: {
+                // FIXME: before fixing the fact that spaceName is undefined, let's try to understand why I don't have any info about the user in the error caught above
+                spaceName: group.spaceName,
+                propertiesToSync: ["cameraState", "microphoneState", "screenSharingState"],
+            },
+        });
     }
 
     //disconnect user
     private disConnectedUser(user: User, group: Group) {
-        // Most of the time, sending a disconnect event to one of the players is enough (the player will close the connection
-        // which will be shut for the other player).
-        // However! In the rare case where the WebRTC connection is not yet established, if we close the connection on one of the player,
-        // the other player will try connecting until a timeout happens (during this time, the connection icon will be displayed for nothing).
-        // So we also send the disconnect event to the other player.
-        for (const otherUser of group.getUsers()) {
-            if (user === otherUser) {
-                continue;
-            }
-
-            const webrtcDisconnectMessage1 = new WebRtcDisconnectMessage();
-            webrtcDisconnectMessage1.setUserid(user.id);
-
-            const serverToClientMessage1 = new ServerToClientMessage();
-            serverToClientMessage1.setWebrtcdisconnectmessage(webrtcDisconnectMessage1);
-
-            //if (!otherUser.socket.disconnecting) {
-            otherUser.socket.write(serverToClientMessage1);
-            //}
-
-            const webrtcDisconnectMessage2 = new WebRtcDisconnectMessage();
-            webrtcDisconnectMessage2.setUserid(otherUser.id);
-
-            const serverToClientMessage2 = new ServerToClientMessage();
-            serverToClientMessage2.setWebrtcdisconnectmessage(webrtcDisconnectMessage2);
-
-            //if (!user.socket.disconnecting) {
-            user.socket.write(serverToClientMessage2);
-            //}
-        }
-    }
-
-    emitPlayGlobalMessage(room: GameRoom, playGlobalMessage: PlayGlobalMessage) {
-        const serverToClientMessage = new ServerToClientMessage();
-        serverToClientMessage.setPlayglobalmessage(playGlobalMessage);
-
-        for (const [id, user] of room.getUsers().entries()) {
-            user.socket.write(serverToClientMessage);
-        }
+        user.write({
+            $case: "leaveSpaceRequestMessage",
+            leaveSpaceRequestMessage: {
+                spaceName: group.spaceName,
+            },
+        });
     }
 
     public getWorlds(): Map<string, PromiseLike<GameRoom>> {
         return this.roomsPromises;
     }
 
-    public handleQueryJitsiJwtMessage(user: User, queryJitsiJwtMessage: QueryJitsiJwtMessage) {
-        const room = queryJitsiJwtMessage.getJitsiroom();
-        const tag = queryJitsiJwtMessage.getTag(); // FIXME: this is not secure. We should load the JSON for the current room and check rights associated to room instead.
+    public async handleQueryMessage(gameRoom: GameRoom, user: User, queryMessage: QueryMessage): Promise<void> {
+        if (!queryMessage.query) {
+            console.error("QueryMessage has no query");
+            Sentry.captureException("QueryMessage has no query");
+            return;
+        }
+        const queryCase = queryMessage.query.$case;
+        const answerMessage: Partial<AnswerMessage> = {
+            id: queryMessage.id,
+        };
+        const abortController = new AbortController();
+        user.queryMessageAbortControllers.set(queryMessage.id, abortController);
 
-        if (SECRET_JITSI_KEY === "") {
+        try {
+            switch (queryCase) {
+                case "jitsiJwtQuery": {
+                    const answer = await this.handleQueryJitsiJwtMessage(
+                        gameRoom,
+                        user,
+                        queryMessage.query.jitsiJwtQuery,
+                    );
+                    answerMessage.answer = {
+                        $case: "jitsiJwtAnswer",
+                        jitsiJwtAnswer: answer,
+                    };
+                    break;
+                }
+                case "joinBBBMeetingQuery": {
+                    const answer = await this.handleJoinBBBMeetingMessage(
+                        gameRoom,
+                        user,
+                        queryMessage.query.joinBBBMeetingQuery,
+                    );
+                    answerMessage.answer = {
+                        $case: "joinBBBMeetingAnswer",
+                        joinBBBMeetingAnswer: answer,
+                    };
+                    break;
+                }
+                case "sendEventQuery": {
+                    // TODO: in the future, if the event system is abused, we can throttle message by user id, here.
+                    this.handleSendEventQuery(gameRoom, user, queryMessage.query.sendEventQuery);
+                    answerMessage.answer = {
+                        $case: "sendEventAnswer",
+                        sendEventAnswer: {},
+                    };
+                    break;
+                }
+                case "iceServersQuery":
+                case "embeddableWebsiteQuery":
+                case "roomTagsQuery":
+                case "roomsFromSameWorldQuery":
+                case "searchMemberQuery":
+                case "getMemberQuery":
+                case "searchTagsQuery":
+                case "chatMembersQuery":
+                case "oauthRefreshTokenQuery":
+                case "joinSpaceQuery":
+                case "leaveSpaceQuery":
+                case "mapStorageJwtQuery":
+                case "getRecordingsQuery":
+                case "getRecordingThumbnailsQuery":
+                case "banIpPreviewQuery":
+                case "deleteRecordingQuery":
+                case "getSignedUrlQuery":
+                case "spaceStateQuery":
+                case "enterChatRoomAreaQuery": {
+                    break;
+                }
+                default: {
+                    const _exhaustiveCheck: never = queryCase;
+                }
+            }
+        } catch (e) {
+            const error = asError(e);
+            console.error("An error happened while answering a query:", e);
+            Sentry.captureException(`An error happened while answering a query: ${error.message}`, {
+                extra: { queryMessage, userId: user.id, userUuid: user.uuid, roomId: gameRoom.roomUrl },
+            });
+            answerMessage.answer = {
+                $case: "error",
+                error: {
+                    message: error.message,
+                },
+            };
+        } finally {
+            user.queryMessageAbortControllers.delete(queryMessage.id);
+        }
+
+        user.write({
+            $case: "answerMessage",
+            answerMessage: AnswerMessage.fromPartial(answerMessage),
+        });
+    }
+
+    public handleAbortQueryMessage(room: GameRoom, user: User, abortQueryMessage: AbortQueryMessage) {
+        const controller = user.queryMessageAbortControllers.get(abortQueryMessage.id);
+        if (controller) {
+            controller.abort();
+        }
+    }
+
+    public async handleQueryJitsiJwtMessage(
+        gameRoom: GameRoom,
+        user: User,
+        queryJitsiJwtMessage: JitsiJwtQuery,
+    ): Promise<JitsiJwtAnswer> {
+        const jitsiRoom = queryJitsiJwtMessage.jitsiRoom;
+        const jitsiSettings = gameRoom.getJitsiSettings();
+
+        if (jitsiSettings === undefined || !jitsiSettings.secret) {
             throw new Error("You must set the SECRET_JITSI_KEY key to the secret to generate JWT tokens for Jitsi.");
         }
 
-        // Let's see if the current client has
-        const isAdmin = user.tags.includes(tag);
-
-        const jwt = Jwt.sign(
-            {
-                aud: "jitsi",
-                iss: JITSI_ISS,
-                sub: JITSI_URL,
-                room: room,
-                moderator: isAdmin,
-            },
-            SECRET_JITSI_KEY,
-            {
-                expiresIn: "1d",
-                algorithm: "HS256",
-                header: {
-                    alg: "HS256",
-                    typ: "JWT",
-                },
+        // Let's see if the current client has moderator rights
+        let isAdmin = false;
+        if (user.tags.includes("admin")) {
+            isAdmin = true;
+        } else {
+            const moderatorTag = await gameRoom.getModeratorTagForJitsiRoom(jitsiRoom);
+            if (moderatorTag && user.tags.includes(moderatorTag)) {
+                isAdmin = true;
             }
+        }
+
+        // Jitsi has two prosody plugins that can grant moderator rights from a JWT:
+        //   - token_moderation reads `moderator` at the top level of the token,
+        //   - token_affiliation reads `context.user.moderator`.
+        // Emit both so deployments using either plugin (#5135) work unchanged.
+        // Dropping the top-level field would break installs still on
+        // token_moderation; adding the context-level field is a no-op for them.
+        const jwt = new SignJWT({
+            context: {
+                user: {
+                    id: user.id,
+                    name: user.name,
+                    moderator: isAdmin,
+                },
+                features: {
+                    livestreaming: isAdmin,
+                    recording: isAdmin,
+                },
+            },
+            sub: jitsiSettings.url,
+            room: jitsiRoom,
+            moderator: isAdmin,
+        })
+            .setProtectedHeader({
+                alg: "HS256",
+                typ: "JWT",
+            })
+            .setAudience("jitsi")
+            .setExpirationTime("1d");
+
+        if (jitsiSettings.iss) {
+            jwt.setIssuer(jitsiSettings.iss);
+        }
+
+        return {
+            jwt: await jwt.sign(new TextEncoder().encode(jitsiSettings.secret)),
+            url: jitsiSettings.url,
+        };
+    }
+
+    public async handleJoinBBBMeetingMessage(
+        gameRoom: GameRoom,
+        user: User,
+        joinBBBMeetingQuery: JoinBBBMeetingQuery,
+    ): Promise<JoinBBBMeetingAnswer> {
+        const meetingId = joinBBBMeetingQuery.meetingId;
+        const localMeetingId = joinBBBMeetingQuery.localMeetingId;
+        const meetingName = joinBBBMeetingQuery.meetingName;
+        const bbbSettings = gameRoom.getBbbSettings();
+
+        if (bbbSettings === undefined) {
+            throw new Error(
+                "Unable to join the conference because either " +
+                    "the BBB_URL or BBB_SECRET environment variables are not set.",
+            );
+        }
+
+        // Let's see if the current client has moderator rights
+        let isAdmin = false;
+        if (user.tags.includes("admin")) {
+            isAdmin = true;
+        } else {
+            const moderatorTag = await gameRoom.getModeratorTagForBbbMeeting(localMeetingId);
+            if (moderatorTag && user.tags.includes(moderatorTag)) {
+                isAdmin = true;
+            } else if (moderatorTag === undefined) {
+                // If the bbbMeetingAdminTag is not set, everyone is a moderator.
+                isAdmin = true;
+            }
+        }
+
+        if (bbbSettings === undefined || !bbbSettings.secret) {
+            throw new Error("You must set the SECRET_BBB_KEY key to the secret to generate JWT tokens for BBB.");
+        }
+
+        const api = BigbluebuttonJs.api(bbbSettings.url, bbbSettings.secret);
+        // It seems bbb-api is limiting password length to 50 chars
+        const maxPWLen = 50;
+        const attendeePW = crypto
+            .createHmac("sha256", bbbSettings.secret)
+            .update(`attendee-${meetingId}`)
+            .digest("hex")
+            .slice(0, maxPWLen);
+        const moderatorPW = crypto
+            .createHmac("sha256", bbbSettings.secret)
+            .update(`moderator-${meetingId}`)
+            .digest("hex")
+            .slice(0, maxPWLen);
+
+        // This is idempotent, so we call it on each join in order to be sure that the meeting exists.
+        const createOptions = { attendeePW, moderatorPW, record: true, "meta_worka-room-url": gameRoom.roomUrl };
+        const createURL = api.administration.create(meetingName, meetingId, createOptions);
+        await BigbluebuttonJs.http(createURL);
+
+        const joinParams: Record<string, string> = {};
+
+        // XXX: figure out how to know if the user has admin status and use the moderatorPW
+        // in that case
+        const clientURL = api.administration.join(user.name, meetingId, isAdmin ? moderatorPW : attendeePW, {
+            ...joinParams,
+            userID: user.id,
+            joinViaHtml5: true,
+        });
+        debug(
+            `User "${user.name}" (${user.uuid}) joined the BBB meeting "${meetingName}" as ${
+                isAdmin ? "Admin" : "Participant"
+            }.`,
         );
 
-        const sendJitsiJwtMessage = new SendJitsiJwtMessage();
-        sendJitsiJwtMessage.setJitsiroom(room);
-        sendJitsiJwtMessage.setJwt(jwt);
-
-        const serverToClientMessage = new ServerToClientMessage();
-        serverToClientMessage.setSendjitsijwtmessage(sendJitsiJwtMessage);
-
-        user.socket.write(serverToClientMessage);
+        return {
+            meetingId,
+            clientURL,
+        };
     }
 
-    public handleSendUserMessage(user: User, sendUserMessageToSend: SendUserMessage) {
-        const sendUserMessage = new SendUserMessage();
-        sendUserMessage.setMessage(sendUserMessageToSend.getMessage());
-        sendUserMessage.setType(sendUserMessageToSend.getType());
-
-        const serverToClientMessage = new ServerToClientMessage();
-        serverToClientMessage.setSendusermessage(sendUserMessage);
-        user.socket.write(serverToClientMessage);
-    }
-
-    public handlerBanUserMessage(room: GameRoom, user: User, banUserMessageToSend: BanUserMessage) {
-        const banUserMessage = new BanUserMessage();
-        banUserMessage.setMessage(banUserMessageToSend.getMessage());
-        banUserMessage.setType(banUserMessageToSend.getType());
-
-        const serverToClientMessage = new ServerToClientMessage();
-        serverToClientMessage.setSendusermessage(banUserMessage);
-        user.socket.write(serverToClientMessage);
-
-        setTimeout(() => {
-            // Let's leave the room now.
-            room.leave(user);
-            // Let's close the connection when the user is banned.
-            user.socket.end();
-        }, 10000);
-    }
-
-    public async addZoneListener(call: ZoneSocket, roomId: string, x: number, y: number): Promise<void> {
+    public async addZoneListener(call: RoomSocket, roomId: string, x: number, y: number): Promise<void> {
         const room = await this.roomsPromises.get(roomId);
         if (!room) {
             throw new Error("In addZoneListener, could not find room with id '" + roomId + "'");
@@ -619,49 +915,75 @@ export class SocketManager {
 
         const things = room.addZoneListener(call, x, y);
 
-        const batchMessage = new BatchToPusherMessage();
+        const batchMessage: BatchToPusherRoomMessage = {
+            payload: [],
+        };
 
         for (const thing of things) {
             if (thing instanceof User) {
-                const userJoinedMessage = new UserJoinedZoneMessage();
-                userJoinedMessage.setUserid(thing.id);
-                userJoinedMessage.setUseruuid(thing.uuid);
-                userJoinedMessage.setName(thing.name);
-                userJoinedMessage.setCharacterlayersList(ProtobufUtils.toCharacterLayerMessages(thing.characterLayers));
-                userJoinedMessage.setPosition(ProtobufUtils.toPositionMessage(thing.getPosition()));
-                if (thing.visitCardUrl) {
-                    userJoinedMessage.setVisitcardurl(thing.visitCardUrl);
-                }
-                userJoinedMessage.setCompanion(thing.companion);
-
-                const subMessage = new SubToPusherMessage();
-                subMessage.setUserjoinedzonemessage(userJoinedMessage);
-
-                batchMessage.addPayload(subMessage);
+                const subMessage = SocketManager.toUserJoinedZoneMessage(thing, { x, y });
+                batchMessage.payload.push(subMessage);
             } else if (thing instanceof Group) {
-                const groupUpdateMessage = new GroupUpdateZoneMessage();
-                groupUpdateMessage.setGroupid(thing.getId());
-                groupUpdateMessage.setPosition(ProtobufUtils.toPointMessage(thing.getPosition()));
-
-                const subMessage = new SubToPusherMessage();
-                subMessage.setGroupupdatezonemessage(groupUpdateMessage);
-
-                batchMessage.addPayload(subMessage);
+                const position = thing.getPosition();
+                batchMessage.payload.push(
+                    SocketManager.toZoneMessage(
+                        { x, y },
+                        {
+                            $case: "groupUpdateZoneMessage",
+                            groupUpdateZoneMessage: {
+                                groupId: thing.getId(),
+                                position: ProtobufUtils.toPointMessage(position),
+                                groupSize: thing.getSize,
+                                fromZone: undefined,
+                                locked: thing.isLocked(),
+                                userIds: thing.getUsers().map((user) => user.id),
+                            },
+                        },
+                    ),
+                );
             } else {
                 console.error("Unexpected type for Movable returned by setViewport");
+                Sentry.captureException("Unexpected type for Movable returned by setViewport");
             }
         }
 
         call.write(batchMessage);
     }
 
-    async removeZoneListener(call: ZoneSocket, roomId: string, x: number, y: number): Promise<void> {
+    async removeZoneListener(call: RoomSocket, roomId: string, x: number, y: number): Promise<void> {
         const room = await this.roomsPromises.get(roomId);
         if (!room) {
-            throw new Error("In removeZoneListener, could not find room with id '" + roomId + "'");
+            console.warn("In removeZoneListener, could not find room with id '" + roomId + "'");
+            return;
         }
 
         room.removeZoneListener(call, x, y);
+        this.cleanupRoomIfEmpty(room);
+    }
+
+    /**
+     * Removes many zone listeners at once.
+     *
+     * Compared to calling removeZoneListener in a loop, the room is resolved only once and the room cleanup is
+     * only attempted once. It also lets callers get rid of a Promise.all over an unbounded number of zones
+     * (Promise.all throws a RangeError above 2^21 elements).
+     */
+    async removeZoneListeners(
+        call: RoomSocket,
+        roomId: string,
+        zones: Iterable<{ x: number; y: number }>,
+    ): Promise<void> {
+        const room = await this.roomsPromises.get(roomId);
+        if (!room) {
+            console.warn("In removeZoneListeners, could not find room with id '" + roomId + "'");
+            return;
+        }
+
+        // GameRoom.removeZoneListener is synchronous, so no Promise juggling is needed here.
+        for (const zone of zones) {
+            room.removeZoneListener(call, zone.x, zone.y);
+        }
+        this.cleanupRoomIfEmpty(room);
     }
 
     async addRoomListener(call: RoomSocket, roomId: string) {
@@ -672,9 +994,9 @@ export class SocketManager {
 
         room.addRoomListener(call);
 
-        const batchMessage = new BatchToPusherRoomMessage();
+        /*const batchMessage = new BatchToPusherRoomMessage();
 
-        call.write(batchMessage);
+        call.write(batchMessage);*/
     }
 
     async removeRoomListener(call: RoomSocket, roomId: string) {
@@ -684,6 +1006,26 @@ export class SocketManager {
         }
 
         room.removeRoomListener(call);
+    }
+
+    async addVariableListener(call: VariableSocket) {
+        const room = await this.getOrCreateRoom(call.request.room);
+        if (!room) {
+            throw new Error("In addVariableListener, could not find room with id '" + call.request.room + "'");
+        }
+
+        room.addVariableListener(call);
+    }
+
+    async removeVariableListener(call: VariableSocket) {
+        const room = await this.roomsPromises.get(call.request.room);
+        if (!room) {
+            throw new Error("In removeVariableListener, could not find room with id '" + call.request.room + "'");
+        }
+
+        room.removeVariableListener(call);
+
+        this.cleanupRoomIfEmpty(room);
     }
 
     public async handleJoinAdminRoom(admin: Admin, roomId: string): Promise<GameRoom> {
@@ -696,63 +1038,73 @@ export class SocketManager {
 
     public leaveAdminRoom(room: GameRoom, admin: Admin) {
         room.adminLeave(admin);
+        this.cleanupRoomIfEmpty(room);
+    }
+
+    public cleanupRoomIfEmpty(room: GameRoom): void {
         if (room.isEmpty()) {
             this.roomsPromises.delete(room.roomUrl);
-            gaugeManager.decNbRoomGauge();
+            this.resolvedRooms.get(room.roomUrl)?.destroy();
+            const deleted = this.resolvedRooms.delete(room.roomUrl);
+            if (deleted) {
+                gaugeManager.decNbRoomGauge();
+            }
             debug('Room is empty. Deleting room "%s"', room.roomUrl);
         }
     }
 
-    public async sendAdminMessage(roomId: string, recipientUuid: string, message: string, type: string): Promise<void> {
-        const room = await this.roomsPromises.get(roomId);
+    public forceRemoveRoom(roomId: string): void {
+        this.roomsPromises.delete(roomId);
+
+        const room = this.resolvedRooms.get(roomId);
         if (!room) {
-            console.error(
-                "In sendAdminMessage, could not find room with id '" +
-                    roomId +
-                    "'. Maybe the room was closed a few milliseconds ago and there was a race condition?"
-            );
             return;
         }
 
-        const recipients = room.getUsersByUuid(recipientUuid);
-        if (recipients.length === 0) {
-            console.error(
-                "In sendAdminMessage, could not find user with id '" +
-                    recipientUuid +
-                    "'. Maybe the user left the room a few milliseconds ago and there was a race condition?"
-            );
-            return;
+        room.destroy();
+        const deleted = this.resolvedRooms.delete(roomId);
+        if (deleted) {
+            gaugeManager.decNbRoomGauge();
         }
-
-        for (const recipient of recipients) {
-            const sendUserMessage = new SendUserMessage();
-            sendUserMessage.setMessage(message);
-            sendUserMessage.setType(type);
-
-            const serverToClientMessage = new ServerToClientMessage();
-            serverToClientMessage.setSendusermessage(sendUserMessage);
-
-            recipient.socket.write(serverToClientMessage);
-        }
+        debug('Room "%s" was forcefully deleted from cache', roomId);
     }
 
-    public async banUser(roomId: string, recipientUuid: string, message: string): Promise<void> {
+    /**
+     * Ejects a user from the room.
+     * @param type "banned" (permanent, persisted by the admin) or "kicked" (ejection only)
+     */
+    public async banUser(
+        roomId: string,
+        recipientUuid: string,
+        message: string,
+        type: "banned" | "kicked" = "banned",
+    ): Promise<void> {
         const room = await this.roomsPromises.get(roomId);
         if (!room) {
             console.error(
                 "In banUser, could not find room with id '" +
                     roomId +
-                    "'. Maybe the room was closed a few milliseconds ago and there was a race condition?"
+                    "'. Maybe the room was closed a few milliseconds ago and there was a race condition?",
+            );
+            Sentry.captureException(
+                "In banUser, could not find room with id '" +
+                    roomId +
+                    "'. Maybe the room was closed a few milliseconds ago and there was a race condition?",
             );
             return;
         }
 
         const recipients = room.getUsersByUuid(recipientUuid);
-        if (recipients.length === 0) {
+        if (recipients.size === 0) {
             console.error(
                 "In banUser, could not find user with id '" +
                     recipientUuid +
-                    "'. Maybe the user left the room a few milliseconds ago and there was a race condition?"
+                    "'. Maybe the user left the room a few milliseconds ago and there was a race condition?",
+            );
+            Sentry.captureException(
+                "In banUser, could not find user with id '" +
+                    recipientUuid +
+                    "'. Maybe the user left the room a few milliseconds ago and there was a race condition?",
             );
             return;
         }
@@ -761,40 +1113,48 @@ export class SocketManager {
             // Let's leave the room now.
             room.leave(recipient);
 
-            const banUserMessage = new BanUserMessage();
-            banUserMessage.setMessage(message);
-            banUserMessage.setType("banned");
-
-            const serverToClientMessage = new ServerToClientMessage();
-            serverToClientMessage.setBanusermessage(banUserMessage);
-
             // Let's close the connection when the user is banned.
-            recipient.socket.write(serverToClientMessage);
-            recipient.socket.end();
+            recipient.write({
+                $case: "banUserMessage",
+                banUserMessage: {
+                    message,
+                    type,
+                },
+            });
+            endUserConnectionWithReason(recipient.socket, `User was ${type}: ${message}`);
         }
     }
 
-    async sendAdminRoomMessage(roomId: string, message: string, type: string) {
+    async sendAdminRoomMessage({
+        roomId,
+        message,
+        type,
+        senderName,
+        senderTextures,
+        broadcastToWorld,
+        joinUrl,
+    }: AdminRoomMessage) {
         const room = await this.roomsPromises.get(roomId);
         if (!room) {
             //todo: this should cause the http call to return a 500
             console.error(
                 "In sendAdminRoomMessage, could not find room with id '" +
                     roomId +
-                    "'. Maybe the room was closed a few milliseconds ago and there was a race condition?"
+                    "'. Maybe the room was closed a few milliseconds ago and there was a race condition?",
+            );
+            Sentry.captureException(
+                "In sendAdminRoomMessage, could not find room with id '" +
+                    roomId +
+                    "'. Maybe the room was closed a few milliseconds ago and there was a race condition?",
             );
             return;
         }
 
         room.getUsers().forEach((recipient) => {
-            const sendUserMessage = new SendUserMessage();
-            sendUserMessage.setMessage(message);
-            sendUserMessage.setType(type);
-
-            const clientMessage = new ServerToClientMessage();
-            clientMessage.setSendusermessage(sendUserMessage);
-
-            recipient.socket.write(clientMessage);
+            recipient.write({
+                $case: "sendUserMessage",
+                sendUserMessage: { message, type, senderName, senderTextures, broadcastToWorld, joinUrl },
+            });
         });
     }
 
@@ -805,18 +1165,21 @@ export class SocketManager {
             console.error(
                 "In dispatchWorldFullWarning, could not find room with id '" +
                     roomId +
-                    "'. Maybe the room was closed a few milliseconds ago and there was a race condition?"
+                    "'. Maybe the room was closed a few milliseconds ago and there was a race condition?",
+            );
+            Sentry.captureException(
+                "In dispatchWorldFullWarning, could not find room with id '" +
+                    roomId +
+                    "'. Maybe the room was closed a few milliseconds ago and there was a race condition?",
             );
             return;
         }
 
         room.getUsers().forEach((recipient) => {
-            const worldFullMessage = new WorldFullWarningMessage();
-
-            const clientMessage = new ServerToClientMessage();
-            clientMessage.setWorldfullwarningmessage(worldFullMessage);
-
-            recipient.socket.write(clientMessage);
+            recipient.write({
+                $case: "worldFullWarningMessage",
+                worldFullWarningMessage: {},
+            });
         });
     }
 
@@ -826,34 +1189,41 @@ export class SocketManager {
             return;
         }
 
-        const versionNumber = room.incrementVersion();
+        const versionNumber = await room.incrementVersion();
         room.getUsers().forEach((recipient) => {
-            const worldFullMessage = new RefreshRoomMessage();
-            worldFullMessage.setRoomid(roomId);
-            worldFullMessage.setVersionnumber(versionNumber);
-
-            const clientMessage = new ServerToClientMessage();
-            clientMessage.setRefreshroommessage(worldFullMessage);
-
-            recipient.socket.write(clientMessage);
+            recipient.write({
+                $case: "refreshRoomMessage",
+                refreshRoomMessage: {
+                    roomId,
+                    versionNumber,
+                },
+            });
         });
     }
 
     handleEmoteEventMessage(room: GameRoom, user: User, emotePromptMessage: EmotePromptMessage) {
-        const emoteEventMessage = new EmoteEventMessage();
-        emoteEventMessage.setEmote(emotePromptMessage.getEmote());
-        emoteEventMessage.setActoruserid(user.id);
-        room.emitEmoteEvent(user, emoteEventMessage);
+        // The emote is relayed to every player nearby: refuse anything that is not an emoji.
+        if (!isValidEmote(emotePromptMessage.emote)) {
+            debug("Invalid emote received. Dropping message.");
+            return;
+        }
+        room.emitEmoteEvent(user, {
+            emote: emotePromptMessage.emote,
+            actorUserId: user.id,
+        });
     }
 
     handleFollowRequestMessage(room: GameRoom, user: User, message: FollowRequestMessage) {
-        const clientMessage = new ServerToClientMessage();
-        clientMessage.setFollowrequestmessage(message);
-        room.sendToOthersInGroupIncludingUser(user, clientMessage);
+        room.sendToOthersInGroupIncludingUser(user, {
+            message: {
+                $case: "followRequestMessage",
+                followRequestMessage: message,
+            },
+        });
     }
 
     handleFollowConfirmationMessage(room: GameRoom, user: User, message: FollowConfirmationMessage) {
-        const leader = room.getUserById(message.getLeader());
+        const leader = room.getUserById(message.leader);
         if (!leader) {
             const message = `Could not follow user "{message.getLeader()}" in room "{room.roomUrl}".`;
             console.info(message, "Maybe the user just left.");
@@ -870,13 +1240,605 @@ export class SocketManager {
     }
 
     handleFollowAbortMessage(room: GameRoom, user: User, message: FollowAbortMessage) {
-        if (user.id === message.getLeader()) {
-            user?.group?.leader?.stopLeading();
+        const leader = room.getUserById(message.leader);
+        if (user.id === message.leader) {
+            // Leader is aborting: notify confirmed followers
+            leader?.stopLeading();
+
+            // Also broadcast to the group to notify users who received the request but haven't accepted yet
+            room.sendToOthersInGroupIncludingUser(user, {
+                message: {
+                    $case: "followAbortMessage",
+                    followAbortMessage: message,
+                },
+            });
         } else {
-            // Forward message
-            const leader = room.getUserById(message.getLeader());
+            // Follower is aborting: forward message to leader
             leader?.delFollower(user);
         }
+    }
+
+    handleLockGroupPromptMessage(room: GameRoom, user: User, message: LockGroupPromptMessage) {
+        const group = user.group;
+        if (!group) {
+            return;
+        }
+        group.lock(message.lock);
+        room.emitLockGroupEvent(group);
+    }
+
+    handleUpdateMapToNewestMessage(room: GameRoom, user: User, message: UpdateMapToNewestWithKeyMessage) {
+        getMapStorageClient().handleUpdateMapToNewestMessage(
+            message,
+            (err: ServiceError | null, message: EditMapCommandsArrayMessage) => {
+                if (err) {
+                    emitError(user.socket, err);
+                    throw err;
+                }
+                const commands = message.editMapCommands;
+                for (const editMapCommandMessage of commands) {
+                    user.emitInBatch({
+                        message: {
+                            $case: "editMapCommandMessage",
+                            editMapCommandMessage,
+                        },
+                    });
+                }
+            },
+        );
+    }
+
+    getWorldUsers(world: string): WorldUsersAnswer {
+        const users: WorldUser[] = [];
+        for (const room of this.resolvedRooms.values()) {
+            if (!room.roomUrl.startsWith(world)) {
+                continue;
+            }
+            for (const user of room.getUsers().values()) {
+                users.push({ uuid: user.uuid, name: user.name, ipAddress: user.IPAddress, roomUrl: room.roomUrl });
+            }
+        }
+        return { users };
+    }
+
+    getAllRooms(): RoomsList {
+        const roomsList: RoomDescription[] = [];
+
+        for (const room of this.resolvedRooms.values()) {
+            const roomDescription = {
+                roomId: room.roomUrl,
+                nbUsers: room.getUsers().size,
+            };
+
+            roomsList.push(roomDescription);
+        }
+
+        return {
+            roomDescription: roomsList,
+        };
+    }
+
+    handleAskPositionMessage(room: GameRoom, user: User, askPositionMessage: AskPositionMessage) {
+        if (room) {
+            // Get user by uuid, is obligatory. If userId is provided, use it to get the user.
+            let userToJoin = room.getUserByUuid(askPositionMessage.userIdentifier);
+            if (userToJoin === undefined) {
+                return;
+            }
+            if (askPositionMessage.userId !== undefined) {
+                // Try to get user by id, if it exists.
+                // Improve multi user connected management.
+                // If the user is connected twice, have the same uuid.
+                // In this case, we could apply an ask poition message to the user by id to be more efficient.
+                const userToJoinById = room.getUserById(askPositionMessage.userId);
+                if (userToJoinById !== undefined) {
+                    userToJoin = userToJoinById;
+                }
+            }
+            const position = userToJoin?.getPosition();
+            if (position && askPositionMessage.askType === AskPositionMessage_AskType.MOVE) {
+                user.write({
+                    $case: "moveToPositionMessage",
+                    moveToPositionMessage: {
+                        position: ProtobufUtils.toPositionMessage(position),
+                    },
+                });
+            } else if (userToJoin && position && askPositionMessage.askType === AskPositionMessage_AskType.LOCATE) {
+                user.write({
+                    $case: "locatePositionMessage",
+                    locatePositionMessage: {
+                        position: ProtobufUtils.toPositionMessage(position),
+                        userId: userToJoin.id,
+                        userUuid: userToJoin.uuid,
+                    },
+                });
+            }
+
+            if (room.isEmpty()) {
+                // TODO delete room;
+            }
+        }
+    }
+
+    handleMeetingInvitationRequestMessage(
+        room: GameRoom,
+        sender: User,
+        message: MeetingInvitationRequestMessage,
+    ): void {
+        const isAdmin = sender.tags.includes("admin");
+        if (!isAdmin && room.isMeetingInvitationRequestTooHigh(sender.uuid, message.receiverUserUuid)) {
+            sender.write({
+                $case: "meetingInvitationRequestTooHighMessage",
+                meetingInvitationRequestTooHighMessage: {},
+            });
+            return;
+        }
+        if (!isAdmin) {
+            room.logMeetingInvitationRequest(sender.uuid, message.receiverUserUuid);
+        }
+        const invitees = room.getUsersByUuid(message.receiverUserUuid);
+        if (invitees.size === 0) {
+            return;
+        }
+        for (const invitee of invitees) {
+            if (invitee.id === sender.id) {
+                continue;
+            }
+            invitee.write({
+                $case: "meetingInvitationRequestReceivedMessage",
+                meetingInvitationRequestReceivedMessage: {
+                    senderUserUuid: sender.uuid,
+                    senderPlayUri: room.roomUrl,
+                    senderName: sender.name,
+                    senderUserId: sender.id,
+                },
+            });
+        }
+    }
+
+    handleMeetingInvitationResponseMessage(
+        room: GameRoom,
+        responder: User,
+        message: MeetingInvitationResponseMessage,
+    ): void {
+        const requesters = room.getUsersByUuid(message.requestSenderUserUuid);
+        if (requesters.size === 0) {
+            return;
+        }
+        for (const requester of requesters) {
+            if (requester.id === responder.id) {
+                continue;
+            }
+            requester.write({
+                $case: "meetingInvitationResponseReceivedMessage",
+                meetingInvitationResponseReceivedMessage: {
+                    accepted: message.accept,
+                    responderName: responder.name,
+                },
+            });
+        }
+
+        // When the invitee accepts, reset the sender's antispam counter
+        if (message.accept) {
+            room.clearMeetingInvitationRequestLog(message.requestSenderUserUuid);
+        }
+
+        // Clear the invitation if the user accepts or declines the invitation
+        const responders = room.getUsersByUuid(responder.uuid);
+        if (responders.size === 0) {
+            return;
+        }
+        for (const responder_ of responders) {
+            if (responder_.id === responder.id) {
+                continue;
+            }
+            responder_.write({
+                $case: "meetingInvitationRequestClosedMessage",
+                meetingInvitationRequestClosedMessage: {},
+            });
+        }
+    }
+
+    handleJoinSpaceMessage(pusher: SpacesWatcher, joinSpaceMessage: JoinSpaceMessage) {
+        let space: Space | undefined = this.spaces.get(joinSpaceMessage.spaceName);
+        if (!space) {
+            if (joinSpaceMessage.filterType === FilterType.UNRECOGNIZED) {
+                throw new Error("Unrecognized filter type when joining space");
+            }
+            space = new Space(
+                joinSpaceMessage.spaceName,
+                joinSpaceMessage.filterType,
+                eventProcessor,
+                joinSpaceMessage.propertiesToSync,
+                joinSpaceMessage.world,
+            );
+            this.spaces.set(joinSpaceMessage.spaceName, space);
+            clientEventsEmitter.newSpaceSubject.next(space);
+        }
+
+        if (space.filterType !== joinSpaceMessage.filterType) {
+            throw new Error("Filter type mismatch when joining space");
+        }
+
+        pusher.watchSpace(space.name);
+        try {
+            space.addWatcher(pusher);
+        } catch (e) {
+            pusher.unwatchSpace(space.name);
+            throw e;
+        }
+    }
+
+    handleLeaveSpaceMessage(pusher: SpacesWatcher, leaveSpaceMessage: LeaveSpaceMessage) {
+        const space: Space | undefined = this.spaces.get(leaveSpaceMessage.spaceName);
+        if (!space) {
+            throw new Error(
+                `In handleLeaveSpaceMessage, can't unwatch space ${leaveSpaceMessage.spaceName}, space not found`,
+            );
+        }
+        this.removeSpaceWatcher(pusher, space);
+    }
+
+    handleUnwatchAllSpaces(pusher: SpacesWatcher) {
+        pusher.spacesWatched.forEach((spaceName) => {
+            const space = this.spaces.get(spaceName);
+            if (!space) {
+                console.error(`In handleUnwatchAllSpaces, can't unwatch space ${spaceName}, space not found`);
+                return;
+            }
+            this.removeSpaceWatcher(pusher, space);
+        });
+    }
+
+    private removeSpaceWatcher(watcher: SpacesWatcher, space: Space) {
+        watcher.unwatchSpace(space.name);
+        space.removeWatcher(watcher);
+
+        // If there are no more watchers, we delete the space
+        if (space.canBeDeleted()) {
+            debug("[space] Space %s => deleted", space.name);
+            const spaceToDelete = this.spaces.get(space.name);
+            if (spaceToDelete) {
+                spaceToDelete.destroy();
+            }
+            this.spaces.delete(space.name);
+            clientEventsEmitter.deleteSpaceSubject.next(space);
+        }
+    }
+
+    handleUpdateSpaceUserMessage(pusher: SpacesWatcher, updateSpaceUserMessage: UpdateSpaceUserMessage) {
+        const updateMask = updateSpaceUserMessage.updateMask;
+        if (!updateSpaceUserMessage.user || !updateMask) {
+            console.error("UpdateSpaceUserMessage has no user or updateMask");
+            Sentry.captureException("UpdateSpaceUserMessage has no user or updateMask");
+            return;
+        }
+
+        const space = this.spaces.get(updateSpaceUserMessage.spaceName);
+        if (!space) {
+            console.error("Could not find space to update in UpdateSpaceUserMessage");
+            Sentry.captureException("Could not find space to update in UpdateSpaceUserMessage");
+            return;
+        }
+
+        space.updateUser(pusher, updateSpaceUserMessage.user, updateMask);
+    }
+
+    handleUpdateSpaceMetadataMessage(
+        pusher: SpacesWatcher,
+        updateSpaceMetadataMessage: UpdateSpaceMetadataPusherToBackMessage,
+    ) {
+        const space = this.spaces.get(updateSpaceMetadataMessage.spaceName);
+
+        const isMetadata = z.record(z.string(), z.unknown()).safeParse(JSON.parse(updateSpaceMetadataMessage.metadata));
+        if (!isMetadata.success) {
+            console.error("Metadata is not a valid json object");
+            return;
+        }
+
+        // Free-form metadata (scripting API, external modules): published as sent. Data the server is the
+        // authority on lives in the space state instead.
+        space?.publishMetadata(isMetadata.data);
+    }
+
+    handleKickSpaceUserMessage(pusher: SpacesWatcher, kickUserMessage: KickOffMessage) {
+        const space = this.spaces.get(kickUserMessage.spaceName);
+        if (!space) return;
+        pusher.write({
+            message: {
+                $case: "kickOffMessage",
+                kickOffMessage: {
+                    spaceName: kickUserMessage.spaceName,
+                    userId: kickUserMessage.userId,
+                },
+            },
+        });
+    }
+
+    handleSyncSpaceUsersMessage(pusher: SpacesWatcher, syncSpaceUsersMessage: SyncSpaceUsersMessage) {
+        const { spaceName, users } = syncSpaceUsersMessage;
+        const space = this.spaces.get(spaceName);
+        if (!space) {
+            console.error("Could not find space to sync users in SyncSpaceUsersMessage");
+            Sentry.captureException("Could not find space to sync users in SyncSpaceUsersMessage");
+            return;
+        }
+        space.syncUsersFromPusher(pusher, users);
+    }
+
+    handlePublicEvent(pusher: SpacesWatcher, publicEvent: PublicEvent) {
+        const space = this.spaces.get(publicEvent.spaceName);
+        if (!space) {
+            throw new Error(`Could not find space ${publicEvent.spaceName} to dispatch public event`);
+        }
+        const dispatch = isModeratorOnlyPublicEvent(publicEvent.spaceEvent?.event)
+            ? this.canModerateSpace(space, publicEvent.senderUserId).then((canModerate) => {
+                  if (!canModerate) {
+                      debug(`${publicEvent.senderUserId} cannot moderate space ${space.getSpaceName()}, event dropped`);
+                      return;
+                  }
+                  return space.dispatchPublicEvent(publicEvent);
+              })
+            : space.dispatchPublicEvent(publicEvent);
+        dispatch.catch((error) => {
+            console.error(error);
+            Sentry.captureException(error);
+        });
+    }
+
+    handlePrivateEvent(pusher: SpacesWatcher, privateEvent: PrivateEvent) {
+        const space = this.spaces.get(privateEvent.spaceName);
+        if (!space) {
+            throw new Error(`Could not find space ${privateEvent.spaceName} to dispatch public event`);
+        }
+        const event = privateEvent.spaceEvent?.event;
+        if (!isModerationEvent(event)) {
+            space.dispatchPrivateEvent(privateEvent);
+            return;
+        }
+        this.canModerateSpace(space, privateEvent.senderUserId)
+            .then((canModerate) => {
+                const moderatedEvent = applyModerationRights(event, canModerate);
+                if (moderatedEvent === undefined) {
+                    debug(`${privateEvent.senderUserId} cannot moderate space ${space.getSpaceName()}, event dropped`);
+                    return;
+                }
+                space.dispatchPrivateEvent({ ...privateEvent, spaceEvent: { event: moderatedEvent } });
+            })
+            .catch((error) => {
+                console.error(error);
+                Sentry.captureException(error);
+            });
+    }
+
+    /**
+     * An admin moderates every conversation; a meeting room can also name a moderator tag in its advanced options
+     * (`livekitRoomAdminTag`).
+     */
+    private async canModerateSpace(space: Space, spaceUserId: string): Promise<boolean> {
+        const sender = space.getUser(spaceUserId);
+        if (!sender) {
+            return false;
+        }
+        if (sender.tags.includes("admin")) {
+            return true;
+        }
+        const room = await this.roomsPromises.get(sender.playUri);
+        // The pusher names the space "<world>.<name>", and a meeting room name is a slug: it holds no dot.
+        const spaceName = space.getSpaceName();
+        const moderatorTag = room?.getModeratorTagForLivekitRoom(spaceName.slice(spaceName.lastIndexOf(".") + 1));
+        return moderatorTag !== undefined && sender.tags.includes(moderatorTag);
+    }
+
+    handleBackEvent(pusher: SpacesWatcher, backEvent: BackEventMessage) {
+        const space = this.spaces.get(backEvent.spaceName);
+        if (!space) {
+            throw new Error(`Could not find space ${backEvent.spaceName} to dispatch back event`);
+        }
+        if (!backEvent.backEvent) {
+            throw new Error(`Back event is undefined in BackEventMessage`);
+        }
+        space.handleBackEvent(backEvent);
+    }
+
+    private handleSendEventQuery(gameRoom: GameRoom, user: User, sendEventQuery: SendEventQuery) {
+        gameRoom.dispatchEvent(sendEventQuery.name, sendEventQuery.data, user.id, sendEventQuery.targetUserIds);
+    }
+
+    async dispatchEvent(roomUrl: string, name: string, value: unknown, targetUserIds: number[]): Promise<void> {
+        const roomPromise = this.roomsPromises.get(roomUrl);
+        if (!roomPromise) {
+            // The room does not exist. No need to instantiate it, there is no one in.
+            return Promise.resolve();
+        }
+        const room = await roomPromise;
+        room.dispatchEvent(name, value, "RoomApi", targetUserIds);
+    }
+
+    async addEventListener(call: EventSocket) {
+        const room = await this.getOrCreateRoom(call.request.room);
+        if (!room) {
+            throw new Error("In addEventListener, could not find room with id '" + call.request.room + "'");
+        }
+
+        room.addEventListener(call);
+    }
+
+    async removeEventListener(call: EventSocket) {
+        const room = await this.roomsPromises.get(call.request.room);
+        if (!room) {
+            throw new Error("In removeEventListener, could not find room with id '" + call.request.room + "'");
+        }
+
+        room.removeEventListener(call);
+
+        this.cleanupRoomIfEmpty(room);
+    }
+
+    dispatchGlobalEvent(name: string, value: unknown) {
+        for (const room of this.resolvedRooms.values()) {
+            room.dispatchEvent(name, value, "RoomApi", []);
+        }
+    }
+
+    // TODO: connect this.
+    handleKickOffUserMessage(user: User, userKickedUuid: string) {
+        const group = user.group;
+        if (!group) {
+            return;
+        }
+        if (!user.tags.includes("admin")) {
+            return;
+        }
+        const usersKiked = group.getUsers().filter((user) => user.uuid === userKickedUuid);
+        if (usersKiked.length === 0) return;
+        for (const userKiked of usersKiked) {
+            group.leave(userKiked);
+        }
+        // TODO fixme to notify only user kiked
+        group.setOutOfBounds(true);
+    }
+
+    async handleExternalModuleMessage(externalModuleMessage: ExternalModuleMessage) {
+        if (!externalModuleMessage.roomId) {
+            console.error("externalModuleMessage has no roomId. This feature isn't implemented yet.");
+            return;
+        }
+        if (!externalModuleMessage.recipientUuid) {
+            console.error("externalModuleMessage has no recipientUuid. This feature isn't implemented yet.");
+            return;
+        }
+        const roomId = externalModuleMessage.roomId;
+        const recipientUuid = externalModuleMessage.recipientUuid;
+
+        const room = await this.roomsPromises.get(externalModuleMessage.roomId);
+        if (!room) {
+            console.info(
+                "In handleExternalModuleMessage, could not find room with id '" +
+                    roomId +
+                    "'. Maybe the room was closed a few milliseconds ago and there was a race condition?",
+            );
+            return;
+        }
+
+        const recipients = room.getUsersByUuid(recipientUuid);
+        if (recipients.size === 0) {
+            console.info(
+                "In handleExternalModuleMessage, could not find user with id '" +
+                    recipientUuid +
+                    "'. Maybe the user left the room a few milliseconds ago and there was a race condition?",
+            );
+            return;
+        }
+
+        for (const recipient of recipients) {
+            recipient.write({
+                $case: "externalModuleMessage",
+                externalModuleMessage: externalModuleMessage,
+            });
+        }
+    }
+
+    /**
+     * Ends every open meeting and broadcast, for a shutdown that is about to take the
+     * process with them. A session only exists once it has ended, so a deploy that kills
+     * the back without this loses every live conversation silently.
+     *
+     * Only enqueues — the caller drains afterwards. Returns how many were closed.
+     */
+    closeAllSpaceSessions(endReason: SessionEndReason): number {
+        let closed = 0;
+        for (const space of this.spaces.values()) {
+            if (space.closeSession(endReason)) {
+                closed += 1;
+            }
+        }
+        return closed;
+    }
+
+    /*
+     * This function is used to close the connection of the space. for testing purpose.
+     */
+    closeSpaceConnection(spaceName: string) {
+        const space = this.spaces.get(spaceName);
+        if (!space) {
+            throw new Error(`Space ${spaceName} not found`);
+        }
+        space.closeAllWatcherConnections();
+        this.spaces.delete(spaceName);
+        clientEventsEmitter.deleteSpaceSubject.next(space);
+    }
+
+    async handleSpaceQueryMessage(pusher: SpacesWatcher, spaceQueryMessage: SpaceQueryMessage) {
+        const space = this.spaces.get(spaceQueryMessage.spaceName);
+
+        if (!space) {
+            throw new Error(`Could not find space ${spaceQueryMessage.spaceName} to handle query`);
+        }
+
+        if (!spaceQueryMessage.query) {
+            console.error("SpaceQueryMessage has no query");
+            Sentry.captureException("SpaceQueryMessage has no query");
+            return;
+        }
+
+        try {
+            const answer = await space.handleQuery(pusher, spaceQueryMessage);
+            pusher.write({
+                message: {
+                    $case: "spaceAnswerMessage",
+                    spaceAnswerMessage: {
+                        id: spaceQueryMessage.id,
+                        answer: answer.answer,
+                        spaceName: spaceQueryMessage.spaceName,
+                    },
+                },
+            });
+        } catch (e) {
+            console.error("Error while handling space query", e);
+            Sentry.captureException("Error while handling space query");
+            return;
+        }
+    }
+
+    async handleLivekitWebhook(request: HandleLivekitWebhookRequest): Promise<void> {
+        const recording = findRecording(request.recordingSessionId);
+        if (!recording) {
+            // Retrying cannot recreate a recording session that is already gone, so the pusher should acknowledge this as ignored.
+            console.warn(
+                `Received LiveKit webhook for missing recording session ${request.recordingSessionId}. Ignoring.`,
+            );
+            return;
+        }
+
+        await recording.handleLivekitWebhook(request);
+    }
+
+    handleAddSpaceUserToNotifyMessage(pusher: SpacesWatcher, addSpaceUserToNotifyMessage: AddSpaceUserToNotifyMessage) {
+        const space = this.spaces.get(addSpaceUserToNotifyMessage.spaceName);
+        if (!space) {
+            throw new Error(`Could not find space ${addSpaceUserToNotifyMessage.spaceName} to add user to notify`);
+        }
+        if (!addSpaceUserToNotifyMessage.user) {
+            throw new Error(`User to add to notify is undefined in AddSpaceUserToNotifyMessage`);
+        }
+        space.addUserToNotify(pusher, addSpaceUserToNotifyMessage.user);
+    }
+
+    handleDeleteSpaceUserToNotifyMessage(
+        pusher: SpacesWatcher,
+        deleteSpaceUserToNotifyMessage: DeleteSpaceUserToNotifyMessage,
+    ) {
+        const space = this.spaces.get(deleteSpaceUserToNotifyMessage.spaceName);
+        if (!space) {
+            throw new Error(
+                `Could not find space ${deleteSpaceUserToNotifyMessage.spaceName} to delete user to notify`,
+            );
+        }
+        if (!deleteSpaceUserToNotifyMessage.user) {
+            throw new Error(`User to delete from notify is undefined in DeleteSpaceUserToNotifyMessage`);
+        }
+        space.deleteUserToNotify(pusher, deleteSpaceUserToNotifyMessage.user);
     }
 }
 

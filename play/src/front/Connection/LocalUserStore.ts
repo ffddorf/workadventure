@@ -1,0 +1,1103 @@
+import { z } from "zod";
+import type { Emoji } from "../Stores/Utils/emojiSchema";
+import { arrayEmoji } from "../Stores/Utils/emojiSchema";
+import type { RequestedStatus } from "../Rules/StatusRules/statusRules";
+import { requestedStatusFactory } from "../Rules/StatusRules/StatusFactory/RequestedStatusFactory";
+import { INITIAL_SIDEBAR_WIDTH } from "../Stores/ChatStore";
+import type { LocalUser } from "./LocalUser";
+import { areCharacterTexturesValid, isUserNameValid } from "./LocalUserUtils";
+
+const playerNameKey = "playerName";
+const selectedPlayerKey = "selectedPlayer";
+const customCursorPositionKey = "customCursorPosition";
+const requestedCameraStateKey = "requestedCameraStateKey";
+const requestedMicrophoneStateKey = "requestedMicrophoneStateKey";
+const characterTexturesKey = "characterTextures";
+const companionKey = "companion";
+const audioPlayerVolumeKey = "audioVolume";
+const audioPlayerMuteKey = "audioMute";
+const helpCameraSettingsShown = "helpCameraSettingsShown";
+const fullscreenKey = "fullscreen";
+const blockAudio = "blockAudio";
+const forceCowebsiteTriggerKey = "forceCowebsiteTrigger";
+const ignoreFollowRequests = "ignoreFollowRequests";
+const decreaseAudioPlayerVolumeWhileTalking = "decreaseAudioPlayerVolumeWhileTalking";
+const disableAnimations = "disableAnimations";
+const displayVideoQualityStats = "displayVideoQualityStats";
+const lastRoomUrl = "lastRoomUrl";
+const authToken = "authToken";
+const notification = "notificationPermission";
+const allowPictureInPicture = "allowPictureInPicture";
+const chatSounds = "chatSounds";
+const preferredVideoInputDevice = "preferredVideoInputDevice";
+const preferredAudioInputDevice = "preferredAudioInputDevice";
+const cacheAPIIndex = "workavdenture-cache";
+const userProperties = "user-properties";
+const cameraPrivacySettings = "cameraPrivacySettings";
+const microphonePrivacySettings = "microphonePrivacySettings";
+const emojiFavorite = "emojiFavorite";
+const speakerDeviceId = "speakerDeviceId";
+const ignoredNewMediaDeviceIdsKey = "ignoredNewMediaDeviceIds";
+const matrixUserId = "matrixUserId";
+const matrixAccessToken = "matrixAccessToken";
+const matrixAccessTokenExpireDate = "matrixAccessTokenExpireDate";
+const matrixRefreshToken = "matrixRefreshToken";
+const matrixDeviceId = "matrixDeviceId";
+const matrixLoginToken = "matrixLoginToken";
+const matrixStoresNeedClearing = "matrixStoresNeedClearing";
+const matrixSessionOwner = "matrixSessionOwner";
+const requestedStatus = "RequestedStatus";
+const matrixGuest = "matrixGuest";
+const pwaInstallPromptShownKey = "workadventure_pwa_install_prompt_shown";
+const volumeProximityDiscussion = "volumeProximityDiscussion";
+const foldersOpened = "foldersOpened";
+const ignoredSuggestedRoomIdsKey = "ignoredSuggestedRoomIds";
+const cameraContainerHeightKey = "cameraContainerHeight";
+const chatSideBarWidthKey = "chatSideBarWidth";
+const chatRoomListWidthKey = "chatRoomListWidth";
+const mapEditorSideBarWidthKey = "mapEditorSideBarWidthKey";
+const bubbleSound = "bubbleSound";
+const notAskAgainHelpWebRtcSettingsPopup = "notAskAgainHelpWebRtcSettingsPopup";
+const duplicateUserDontRemindKey = "workadventure_duplicate_user_dont_remind";
+const recordingsViewMode = "wa-recordings-view-mode";
+export const languageKey = "language";
+const videoQualityKey = "videoQuality";
+const screenShareQualityKey = "screenShareQuality";
+const bandwidthConstrainedScreenSharePreferenceKey = "bandwidthConstrainedScreenSharePreference";
+const codecRetryTimesKey = "codecRetryTimes";
+const legacyVideoBandwidthKey = "videoBandwidth";
+const legacyScreenShareBandwidthKey = "screenShareBandwidth";
+const noiseSuppressionEnabledKey = "noiseSuppressionEnabled";
+const noiseSuppressionProviderKey = "noiseSuppressionProvider";
+const noiseSuppressionEngineKey = "noiseSuppressionEngine";
+const microphoneAutoGainControlKey = "microphoneAutoGainControl";
+const microphoneEchoCancellationKey = "microphoneEchoCancellation";
+const microphoneBrowserNoiseSuppressionKey = "microphoneBrowserNoiseSuppression";
+const INITIAL_MAP_EDITOR_SIDEBAR_WIDTH = 448;
+
+export type VideoQualitySetting = "low" | "recommended" | "high";
+export type BandwidthConstrainedPreference = "maintain-framerate" | "maintain-resolution" | "balanced";
+export type NoiseSuppressionProvider = "workadventure" | "voiceIsolation";
+/** The model behind the "workadventure" provider: DeepFilterNet3 (48 kHz, default) or the legacy DTLN (16 kHz). */
+export type NoiseSuppressionEngine = "deepfilternet" | "dtln";
+
+const JwtAuthToken = z
+    .object({
+        accessToken: z.string().optional().nullable(),
+    })
+    .partial();
+
+type JwtAuthToken = z.infer<typeof JwtAuthToken>;
+
+const FoldersOpenedSchema = z.union([z.null(), z.array(z.string()).transform((arr) => new Set(arr))]);
+
+interface PlayerVariable {
+    value: undefined;
+    isPublic: boolean;
+}
+
+class LocalUserStore {
+    private jwt: JwtAuthToken | undefined;
+    private name: string | undefined;
+    /** Last in-session display name (from {@link #setName} or {@link #notifyPlayerDisplayNameChanged}). */
+    private latestSessionDisplayName: string | undefined;
+    private displayNameListeners = new Set<(name: string) => void>();
+
+    private emitDisplayNameListeners(name: string): void {
+        for (const listener of this.displayNameListeners) {
+            try {
+                listener(name);
+            } catch (e) {
+                console.error("LocalUserStore displayName listener", e);
+            }
+        }
+    }
+
+    /**
+     * Subscribe to display name changes (persisted name via {@link #setName} or session updates via
+     * {@link #notifyPlayerDisplayNameChanged}).
+     */
+    subscribeDisplayNameChange(listener: (name: string) => void): () => void {
+        this.displayNameListeners.add(listener);
+        return () => {
+            this.displayNameListeners.delete(listener);
+        };
+    }
+
+    /**
+     * Notifies display name listeners without persisting to localStorage (e.g. when the name is set
+     * on the game manager only after a successful server-side save).
+     */
+    notifyPlayerDisplayNameChanged(name: string): void {
+        const trimmed = name.trim();
+        this.latestSessionDisplayName = trimmed;
+        this.emitDisplayNameListeners(trimmed);
+    }
+
+    /**
+     * Effective display name for Matrix profile sync: in-session name (including OpenID / API flows
+     * that only update the game manager) or persisted {@link #getName}.
+     */
+    getDisplayNameForMatrixProfile(): string | undefined {
+        const s = this.latestSessionDisplayName?.trim() || this.getName()?.trim();
+        return s || undefined;
+    }
+
+    saveUser(localUser: LocalUser) {
+        localStorage.setItem("localUser", JSON.stringify(localUser));
+    }
+
+    getLocalUser(): LocalUser | null {
+        const data = localStorage.getItem("localUser");
+        return data ? JSON.parse(data) : null;
+    }
+
+    setName(name: string): void {
+        this.name = name;
+        this.latestSessionDisplayName = name.trim();
+        localStorage.setItem(playerNameKey, name);
+        this.emitDisplayNameListeners(name);
+    }
+
+    getName(): string | null {
+        if (this.name) {
+            return this.name;
+        }
+        const value = localStorage.getItem(playerNameKey) || "";
+        return isUserNameValid(value) ? value : null;
+    }
+
+    setPlayerCharacterIndex(playerCharacterIndex: number): void {
+        localStorage.setItem(selectedPlayerKey, "" + playerCharacterIndex);
+    }
+
+    getPlayerCharacterIndex(): number {
+        return parseInt(localStorage.getItem(selectedPlayerKey) || "");
+    }
+
+    setCustomCursorPosition(activeRow: number, selectedLayers: number[]): void {
+        localStorage.setItem(customCursorPositionKey, JSON.stringify({ activeRow, selectedLayers }));
+    }
+
+    getCustomCursorPosition(): { activeRow: number; selectedLayers: number[] } | null {
+        return JSON.parse(localStorage.getItem(customCursorPositionKey) || "null");
+    }
+
+    getRequestedCameraState(): boolean {
+        return JSON.parse(localStorage.getItem(requestedCameraStateKey) || "true");
+    }
+
+    setRequestedCameraState(value: boolean): void {
+        localStorage.setItem(requestedCameraStateKey, JSON.stringify(value));
+    }
+
+    getRequestedMicrophoneState(): boolean {
+        return JSON.parse(localStorage.getItem(requestedMicrophoneStateKey) || "true");
+    }
+
+    setRequestedMicrophoneState(value: boolean): void {
+        localStorage.setItem(requestedMicrophoneStateKey, JSON.stringify(value));
+    }
+
+    setCharacterTextures(textureIds: string[]): void {
+        localStorage.setItem(characterTexturesKey, JSON.stringify(textureIds));
+    }
+
+    getCharacterTextures(): string[] | null {
+        const value = JSON.parse(localStorage.getItem(characterTexturesKey) || "null");
+        return areCharacterTexturesValid(value) ? value : null;
+    }
+
+    setCompanionTextureId(textureId: string | null): void {
+        return localStorage.setItem(companionKey, JSON.stringify(textureId));
+    }
+
+    getCompanionTextureId(): string | null {
+        const companion = JSON.parse(localStorage.getItem(companionKey) || "null");
+
+        if (typeof companion !== "string" || companion === "") {
+            return null;
+        }
+
+        return companion;
+    }
+
+    wasCompanionSet(): boolean {
+        return localStorage.getItem(companionKey) ? true : false;
+    }
+
+    setAudioPlayerVolume(value: number): void {
+        localStorage.setItem(audioPlayerVolumeKey, "" + value);
+    }
+
+    getAudioPlayerVolume(): number {
+        return parseFloat(localStorage.getItem(audioPlayerVolumeKey) || "1");
+    }
+
+    setAudioPlayerMuted(value: boolean): void {
+        localStorage.setItem(audioPlayerMuteKey, value.toString());
+    }
+
+    getAudioPlayerMuted(): boolean {
+        return localStorage.getItem(audioPlayerMuteKey) === "true";
+    }
+
+    setHelpCameraSettingsShown(): void {
+        localStorage.setItem(helpCameraSettingsShown, "1");
+    }
+
+    getHelpCameraSettingsShown(): boolean {
+        return localStorage.getItem(helpCameraSettingsShown) === "1";
+    }
+
+    setNotAskAgainHelpWebRtcSettingsPopup(value: boolean): void {
+        localStorage.setItem(notAskAgainHelpWebRtcSettingsPopup, value.toString());
+    }
+
+    getNotAskAgainHelpWebRtcSettingsPopup(): boolean {
+        return localStorage.getItem(notAskAgainHelpWebRtcSettingsPopup) === "true";
+    }
+
+    setDuplicateUserDontRemind(value: boolean): void {
+        localStorage.setItem(duplicateUserDontRemindKey, value ? "1" : "0");
+    }
+
+    getDuplicateUserDontRemind(): boolean {
+        return localStorage.getItem(duplicateUserDontRemindKey) === "1";
+    }
+
+    setRecordingsViewMode(value: "list" | "card"): void {
+        localStorage.setItem(recordingsViewMode, value);
+    }
+
+    getRecordingsViewMode(): string | null {
+        return localStorage.getItem(recordingsViewMode);
+    }
+
+    setLanguage(value: string): void {
+        localStorage.setItem(languageKey, value);
+    }
+
+    getLanguage(): string | null {
+        return localStorage.getItem(languageKey);
+    }
+
+    hasPwaInstallPromptBeenShown(): boolean {
+        return localStorage.getItem(pwaInstallPromptShownKey) === "1";
+    }
+
+    setPwaInstallPromptShown(): void {
+        localStorage.setItem(pwaInstallPromptShownKey, "1");
+    }
+
+    clearPwaInstallPromptShown(): void {
+        localStorage.removeItem(pwaInstallPromptShownKey);
+    }
+
+    setFullscreen(value: boolean): void {
+        localStorage.setItem(fullscreenKey, value.toString());
+    }
+
+    getFullscreen(): boolean {
+        return localStorage.getItem(fullscreenKey) === "true";
+    }
+
+    setBlockAudio(value: boolean): void {
+        localStorage.setItem(blockAudio, value.toString());
+    }
+    getBlockAudio(): boolean {
+        return localStorage.getItem(blockAudio) === "true";
+    }
+
+    setForceCowebsiteTrigger(value: boolean): void {
+        localStorage.setItem(forceCowebsiteTriggerKey, value.toString());
+    }
+
+    getForceCowebsiteTrigger(): boolean {
+        return localStorage.getItem(forceCowebsiteTriggerKey) === "true";
+    }
+
+    setIgnoreFollowRequests(value: boolean): void {
+        localStorage.setItem(ignoreFollowRequests, value.toString());
+    }
+
+    getIgnoreFollowRequests(): boolean {
+        return localStorage.getItem(ignoreFollowRequests) === "true";
+    }
+    setDecreaseAudioPlayerVolumeWhileTalking(value: boolean): void {
+        localStorage.setItem(decreaseAudioPlayerVolumeWhileTalking, value.toString());
+    }
+    getDecreaseAudioPlayerVolumeWhileTalking(): boolean {
+        return localStorage.getItem(decreaseAudioPlayerVolumeWhileTalking) !== "false";
+    }
+
+    setDisableAnimations(value: boolean): void {
+        localStorage.setItem(disableAnimations, value.toString());
+    }
+    getDisableAnimations(): boolean {
+        return localStorage.getItem(disableAnimations) === "true";
+    }
+
+    setDisplayVideoQualityStats(value: boolean): void {
+        localStorage.setItem(displayVideoQualityStats, value.toString());
+    }
+
+    getDisplayVideoQualityStats(): boolean {
+        return localStorage.getItem(displayVideoQualityStats) === "true";
+    }
+
+    async setLastRoomUrl(roomUrl: string): Promise<void> {
+        localStorage.setItem(lastRoomUrl, roomUrl.toString());
+        if ("caches" in window) {
+            try {
+                const cache = await caches.open(cacheAPIIndex);
+                const stringResponse = new Response(JSON.stringify({ roomUrl }));
+                await cache.put(`/${lastRoomUrl}`, stringResponse);
+            } catch (e) {
+                console.error("Could not store last room url in Browser cache. Are you using private browser mode?", e);
+            }
+        }
+    }
+
+    getLastRoomUrl(): string {
+        return localStorage.getItem(lastRoomUrl) ?? window.location.protocol + "//" + window.location.host + "/";
+    }
+
+    getLastRoomUrlCacheApi(): Promise<string | undefined> {
+        if (!("caches" in window)) {
+            return Promise.resolve(undefined);
+        }
+        return caches.open(cacheAPIIndex).then((cache) => {
+            return cache.match(`/${lastRoomUrl}`).then((res) => {
+                return res?.json().then((data) => {
+                    return data.roomUrl;
+                });
+            });
+        });
+    }
+
+    setAuthToken(value: string | null) {
+        if (value !== null) {
+            localStorage.setItem(authToken, value);
+            this.jwt = JwtAuthToken.parse(LocalUserStore.parseJwt(value));
+        } else {
+            localStorage.removeItem(authToken);
+        }
+    }
+
+    getAuthToken(): string | null {
+        return localStorage.getItem(authToken);
+    }
+
+    isLogged(): boolean {
+        return this.jwt?.accessToken !== undefined && this.jwt?.accessToken !== null;
+    }
+
+    private static parseJwt(token: string) {
+        const base64Url = token.split(".")[1];
+        const base64 = base64Url.replace(/-/g, "+").replace(/_/g, "/");
+        const jsonPayload = decodeURIComponent(
+            window
+                .atob(base64)
+                .split("")
+                .map(function (c) {
+                    return "%" + ("00" + c.charCodeAt(0).toString(16)).slice(-2);
+                })
+                .join(""),
+        );
+
+        return JSON.parse(jsonPayload);
+    }
+
+    setNotification(value: boolean): void {
+        localStorage.setItem(notification, value.toString());
+    }
+
+    getNotification(): boolean {
+        return localStorage.getItem(notification) === "true";
+    }
+
+    setAllowPictureInPicture(value: boolean): void {
+        localStorage.setItem(allowPictureInPicture, value.toString());
+    }
+
+    getAllowPictureInPicture(): boolean {
+        return localStorage.getItem(allowPictureInPicture) !== "false";
+    }
+
+    setChatSounds(value: boolean): void {
+        localStorage.setItem(chatSounds, value.toString());
+    }
+
+    getChatSounds(): boolean {
+        return localStorage.getItem(chatSounds) !== "false";
+    }
+
+    private getFoldersOpened(): Set<string> {
+        const foldersStr = localStorage.getItem(foldersOpened);
+        if (!foldersStr) {
+            return new Set<string>();
+        }
+        try {
+            const parsed = FoldersOpenedSchema.parse(JSON.parse(foldersStr));
+            return parsed ?? new Set<string>();
+        } catch (e) {
+            console.warn("Error parsing folders opened from localStorage:", e);
+            localStorage.removeItem(foldersOpened);
+            return new Set<string>();
+        }
+    }
+
+    private setFoldersOpened(folders: Set<string>) {
+        localStorage.setItem(foldersOpened, JSON.stringify(Array.from(folders)));
+    }
+
+    hasFolderOpened(folderId: string): boolean {
+        return this.getFoldersOpened().has(folderId);
+    }
+
+    addFolderOpened(folderId: string) {
+        const folders = this.getFoldersOpened();
+        folders.add(folderId);
+        this.setFoldersOpened(folders);
+    }
+
+    removeFolderOpened(folderId: string) {
+        const folders = this.getFoldersOpened();
+        folders.delete(folderId);
+        this.setFoldersOpened(folders);
+    }
+
+    getIgnoredSuggestedRoomIds(): Set<string> {
+        try {
+            const raw = localStorage.getItem(ignoredSuggestedRoomIdsKey);
+            if (!raw) {
+                return new Set();
+            }
+            const parsed = JSON.parse(raw) as unknown;
+            if (!Array.isArray(parsed)) {
+                return new Set();
+            }
+            return new Set(parsed.filter((id): id is string => typeof id === "string" && id.length > 0));
+        } catch {
+            return new Set();
+        }
+    }
+
+    addIgnoredSuggestedRoom(roomId: string): void {
+        if (!roomId) {
+            return;
+        }
+        const set = this.getIgnoredSuggestedRoomIds();
+        set.add(roomId);
+        localStorage.setItem(ignoredSuggestedRoomIdsKey, JSON.stringify([...set]));
+    }
+
+    clearIgnoredSuggestedRoomIds(): void {
+        localStorage.removeItem(ignoredSuggestedRoomIdsKey);
+    }
+
+    setPreferredVideoInputDevice(deviceId?: string) {
+        if (deviceId === undefined) {
+            localStorage.removeItem(preferredVideoInputDevice);
+            return;
+        }
+
+        localStorage.setItem(preferredVideoInputDevice, deviceId);
+    }
+
+    setPreferredAudioInputDevice(deviceId?: string) {
+        if (deviceId === undefined) {
+            localStorage.removeItem(preferredAudioInputDevice);
+            return;
+        }
+
+        localStorage.setItem(preferredAudioInputDevice, deviceId);
+    }
+
+    getPreferredVideoInputDevice(): string | undefined {
+        const deviceId = localStorage.getItem(preferredVideoInputDevice);
+
+        if (deviceId === null) {
+            return undefined;
+        }
+
+        return deviceId;
+    }
+
+    getPreferredAudioInputDevice(): string | undefined {
+        const deviceId = localStorage.getItem(preferredAudioInputDevice);
+
+        if (deviceId === null) {
+            return undefined;
+        }
+
+        return deviceId;
+    }
+
+    getIgnoredNewMediaDeviceIds(): Set<string> {
+        try {
+            const raw = localStorage.getItem(ignoredNewMediaDeviceIdsKey);
+            if (!raw) {
+                return new Set();
+            }
+            const parsed = JSON.parse(raw) as unknown;
+            if (!Array.isArray(parsed)) {
+                return new Set();
+            }
+            return new Set(parsed.filter((id): id is string => typeof id === "string" && id.length > 0));
+        } catch {
+            return new Set();
+        }
+    }
+
+    addIgnoredNewMediaDeviceId(deviceId: string): void {
+        if (!deviceId) {
+            return;
+        }
+        const set = this.getIgnoredNewMediaDeviceIds();
+        set.add(deviceId);
+        localStorage.setItem(ignoredNewMediaDeviceIdsKey, JSON.stringify([...set]));
+    }
+
+    setCameraPrivacySettings(option: boolean) {
+        localStorage.setItem(cameraPrivacySettings, option.toString());
+    }
+
+    /** Returns the camera privacy setting, or the given default if the user has not stored a preference yet. */
+    getCameraPrivacySettings(defaultCameraPrivacySettings: boolean = false) {
+        const storedValue = localStorage.getItem(cameraPrivacySettings);
+        if (storedValue == null) {
+            return defaultCameraPrivacySettings;
+        }
+        return storedValue === "true";
+    }
+
+    setMicrophonePrivacySettings(option: boolean) {
+        localStorage.setItem(microphonePrivacySettings, option.toString());
+    }
+
+    /** Returns the microphone privacy setting, or the given default if the user has not stored a preference yet. */
+    getMicrophonePrivacySettings(defaultMicrophonePrivacySettings: boolean = true) {
+        const storedValue = localStorage.getItem(microphonePrivacySettings);
+        if (storedValue == null) {
+            return defaultMicrophonePrivacySettings;
+        }
+        return storedValue === "true";
+    }
+
+    getAllUserProperties(context: string): Map<string, PlayerVariable> {
+        const now = new Date().getTime();
+        const result = new Map<string, PlayerVariable>();
+        for (let i = 0; i < localStorage.length; i++) {
+            const key = localStorage.key(i);
+            if (key) {
+                if (key.startsWith(userProperties + "_" + context + "__|__")) {
+                    const storedValue = localStorage.getItem(key);
+                    if (storedValue) {
+                        const userKey = key.substring((userProperties + "_" + context + "__|__").length);
+
+                        const [expireStr, isPublicStr] = storedValue.split(":", 2);
+                        const value = storedValue.split(":").slice(2).join(":");
+                        if (isPublicStr === undefined || value === undefined) {
+                            console.error(
+                                'Invalid value stored in Redis. Expecting the value to be in the "ttl:0|1:value" format. Got: ',
+                                storedValue,
+                            );
+                            continue;
+                        }
+                        let isPublic: boolean;
+                        if (isPublicStr === "0") {
+                            isPublic = false;
+                        } else if (isPublicStr === "1") {
+                            isPublic = true;
+                        } else {
+                            console.error('Invalid value stored in Redis for isPublic. Expecting "0" or "1"');
+                            continue;
+                        }
+                        let expire: number | undefined;
+                        if (expireStr === "") {
+                            expire = undefined;
+                        } else {
+                            expire = parseInt(expireStr);
+                            if (isNaN(expire)) {
+                                console.error("Invalid value stored in Redis. The TTL is not a number");
+                                continue;
+                            }
+
+                            // Let's check the TTL. If it is less than current date, let's remove the key.
+                            if (expire < now) {
+                                localStorage.removeItem(key);
+                                continue;
+                            }
+                        }
+
+                        let valueReturned;
+                        try {
+                            valueReturned = JSON.parse(value);
+                        } catch (err) {
+                            console.info(
+                                "getAllUserProperties => value cannot be parsed to JSON, undefined returned.",
+                                err,
+                            );
+                            valueReturned = undefined;
+                        }
+                        result.set(userKey, {
+                            isPublic,
+                            value: valueReturned,
+                        });
+                    }
+                }
+            }
+        }
+        return result;
+    }
+
+    setUserProperty(
+        name: string,
+        value: unknown,
+        context: string,
+        isPublic: boolean,
+        expire: number | undefined,
+    ): void {
+        const key = userProperties + "_" + context + "__|__" + name;
+
+        if (value === undefined) {
+            localStorage.removeItem(key);
+            return;
+        }
+
+        const storedValue =
+            (expire !== undefined ? expire : "") + ":" + (isPublic ? "1" : "0") + ":" + JSON.stringify(value);
+
+        localStorage.setItem(key, storedValue);
+    }
+
+    setEmojiFavorite(value: Map<number, Emoji>) {
+        const valueToSave: Array<Emoji> = new Array<Emoji>();
+        for (const data of value.values()) {
+            valueToSave.push(data);
+        }
+        localStorage.setItem(emojiFavorite, JSON.stringify(valueToSave));
+    }
+    getEmojiFavorite(): Map<number, Emoji> | null {
+        const value = localStorage.getItem(emojiFavorite);
+        if (value == undefined) return null;
+        try {
+            const emojis: Emoji[] = JSON.parse(value);
+            arrayEmoji.parse(emojis);
+            const map = new Map<number, Emoji>();
+            emojis.forEach((value, index) => {
+                map.set(index + 1, value);
+            });
+            return map;
+        } catch (e) {
+            localStorage.removeItem(emojiFavorite);
+            console.error("The localStorage key 'emojiFavorite' format is incorrect:", e);
+            return null;
+        }
+    }
+
+    setSpeakerDeviceId(value: string) {
+        localStorage.setItem(speakerDeviceId, value);
+    }
+
+    getSpeakerDeviceId() {
+        return localStorage.getItem(speakerDeviceId);
+    }
+
+    setVideoQuality(value: VideoQualitySetting) {
+        localStorage.setItem(videoQualityKey, value);
+    }
+
+    getVideoQuality(): VideoQualitySetting {
+        const value = localStorage.getItem(videoQualityKey);
+
+        if (value === "low" || value === "recommended" || value === "high") {
+            return value;
+        }
+
+        const legacyValue = localStorage.getItem(legacyVideoBandwidthKey);
+        if (legacyValue) {
+            let derivedQuality: VideoQualitySetting = "recommended";
+            if (legacyValue === "unlimited") {
+                derivedQuality = "high";
+            } else {
+                const parsed = Number.parseInt(legacyValue, 10);
+                if (!Number.isNaN(parsed)) {
+                    if (parsed <= 150) {
+                        derivedQuality = "low";
+                    } else if (parsed >= 1000) {
+                        derivedQuality = "high";
+                    }
+                }
+            }
+            localStorage.setItem(videoQualityKey, derivedQuality);
+            return derivedQuality;
+        }
+
+        return "recommended";
+    }
+
+    setScreenShareQuality(value: VideoQualitySetting) {
+        localStorage.setItem(screenShareQualityKey, value);
+    }
+
+    getScreenShareQuality(): VideoQualitySetting {
+        const value = localStorage.getItem(screenShareQualityKey);
+
+        if (value === "low" || value === "recommended" || value === "high") {
+            return value;
+        }
+
+        const legacyValue = localStorage.getItem(legacyScreenShareBandwidthKey);
+        if (legacyValue) {
+            let derivedQuality: VideoQualitySetting = "recommended";
+            if (legacyValue === "unlimited") {
+                derivedQuality = "high";
+            } else {
+                const parsed = Number.parseInt(legacyValue, 10);
+                if (!Number.isNaN(parsed)) {
+                    if (parsed <= 250) {
+                        derivedQuality = "low";
+                    } else if (parsed >= 1500) {
+                        derivedQuality = "high";
+                    }
+                }
+            }
+            localStorage.setItem(screenShareQualityKey, derivedQuality);
+            return derivedQuality;
+        }
+
+        return "recommended";
+    }
+
+    setBandwidthConstrainedScreenSharePreference(value: BandwidthConstrainedPreference) {
+        localStorage.setItem(bandwidthConstrainedScreenSharePreferenceKey, value);
+    }
+
+    getBandwidthConstrainedScreenSharePreference(): BandwidthConstrainedPreference {
+        const value = localStorage.getItem(bandwidthConstrainedScreenSharePreferenceKey);
+
+        if (value === "maintain-framerate" || value === "maintain-resolution" || value === "balanced") {
+            return value;
+        }
+
+        return "maintain-resolution";
+    }
+
+    // When each video codec the browser called not smooth was last tried again, keyed by direction and codec
+    // ("encode:vp9"), as a timestamp
+    getCodecRetryTimes(): Record<string, number> {
+        try {
+            const raw = localStorage.getItem(codecRetryTimesKey);
+            if (!raw) {
+                return {};
+            }
+            const parsed = z.record(z.number()).safeParse(JSON.parse(raw));
+            return parsed.success ? parsed.data : {};
+        } catch {
+            return {};
+        }
+    }
+
+    setCodecRetryTime(codec: string, time: number): void {
+        localStorage.setItem(codecRetryTimesKey, JSON.stringify({ ...this.getCodecRetryTimes(), [codec]: time }));
+    }
+
+    // Background transformation settings
+    setBackgroundMode(value: string) {
+        localStorage.setItem("backgroundMode", value);
+    }
+
+    getBackgroundMode(): string | null {
+        return localStorage.getItem("backgroundMode");
+    }
+
+    setBackgroundBlurAmount(value: number) {
+        localStorage.setItem("backgroundBlurAmount", value.toString());
+    }
+
+    getBackgroundBlurAmount(): number | null {
+        const value = localStorage.getItem("backgroundBlurAmount");
+        return value ? parseInt(value) : null;
+    }
+
+    setBackgroundImage(value: string) {
+        localStorage.setItem("backgroundImage", value);
+    }
+
+    getBackgroundImage(): string | null {
+        return localStorage.getItem("backgroundImage");
+    }
+
+    setNoiseSuppressionEnabled(value: boolean) {
+        localStorage.setItem(noiseSuppressionEnabledKey, value.toString());
+    }
+
+    getNoiseSuppressionEnabled(): boolean {
+        if (localStorage.getItem(noiseSuppressionProviderKey) === "browser") {
+            localStorage.setItem(noiseSuppressionEnabledKey, "false");
+            localStorage.setItem(noiseSuppressionProviderKey, "workadventure");
+            return false;
+        }
+        // On by default: only an explicit "false" turns it off.
+        return localStorage.getItem(noiseSuppressionEnabledKey) !== "false";
+    }
+
+    setNoiseSuppressionProvider(value: NoiseSuppressionProvider) {
+        localStorage.setItem(noiseSuppressionProviderKey, value);
+    }
+
+    getNoiseSuppressionProvider(): NoiseSuppressionProvider {
+        const value = localStorage.getItem(noiseSuppressionProviderKey);
+        if (value === "voiceIsolation" || value === "workadventure") {
+            return value;
+        }
+        return "workadventure";
+    }
+
+    setNoiseSuppressionEngine(value: NoiseSuppressionEngine) {
+        localStorage.setItem(noiseSuppressionEngineKey, value);
+    }
+
+    getNoiseSuppressionEngine(): NoiseSuppressionEngine {
+        return localStorage.getItem(noiseSuppressionEngineKey) === "dtln" ? "dtln" : "deepfilternet";
+    }
+
+    setMicrophoneAutoGainControl(value: boolean) {
+        localStorage.setItem(microphoneAutoGainControlKey, value.toString());
+    }
+
+    getMicrophoneAutoGainControl(): boolean {
+        return localStorage.getItem(microphoneAutoGainControlKey) !== "false";
+    }
+
+    setMicrophoneEchoCancellation(value: boolean) {
+        localStorage.setItem(microphoneEchoCancellationKey, value.toString());
+    }
+
+    getMicrophoneEchoCancellation(): boolean {
+        return localStorage.getItem(microphoneEchoCancellationKey) !== "false";
+    }
+
+    setMicrophoneBrowserNoiseSuppression(value: boolean) {
+        localStorage.setItem(microphoneBrowserNoiseSuppressionKey, value.toString());
+    }
+
+    getMicrophoneBrowserNoiseSuppression(): boolean {
+        return localStorage.getItem(microphoneBrowserNoiseSuppressionKey) !== "false";
+    }
+
+    getRequestedStatus(): RequestedStatus | null {
+        return requestedStatusFactory.createRequestedStatus(localStorage.getItem(requestedStatus));
+    }
+
+    setRequestedStatus(newStatus: RequestedStatus | null) {
+        localStorage.setItem(requestedStatus, String(newStatus));
+    }
+
+    getLastNotificationPermissionRequest(): string | null {
+        return localStorage.getItem("lastNotificationPermissionRequest");
+    }
+    setLastNotificationPermissionRequest() {
+        localStorage.setItem("lastNotificationPermissionRequest", new Date().toString());
+    }
+
+    setMatrixUserId(value: string | null) {
+        if (value !== null) {
+            localStorage.setItem(matrixUserId, value);
+        } else {
+            localStorage.removeItem(matrixUserId);
+        }
+    }
+
+    getMatrixUserId(): string | null {
+        return localStorage.getItem(matrixUserId);
+    }
+
+    setMatrixAccessToken(value: string | null) {
+        if (value !== null) {
+            localStorage.setItem(matrixAccessToken, value);
+        } else {
+            localStorage.removeItem(matrixAccessToken);
+        }
+    }
+
+    getMatrixAccessToken(): string | null {
+        return localStorage.getItem(matrixAccessToken);
+    }
+
+    setMatrixAccessTokenExpireDate(value: Date | null) {
+        if (value !== null) {
+            localStorage.setItem(matrixAccessTokenExpireDate, value.toString());
+        } else {
+            localStorage.removeItem(matrixAccessTokenExpireDate);
+        }
+    }
+
+    getMatrixAccessTokenExpireDate(): Date | null {
+        const value = localStorage.getItem(matrixAccessTokenExpireDate);
+        if (value === null) {
+            return null;
+        }
+        return new Date(value);
+    }
+
+    setMatrixRefreshToken(value: string | null) {
+        if (value !== null) {
+            localStorage.setItem(matrixRefreshToken, value);
+        } else {
+            localStorage.removeItem(matrixRefreshToken);
+        }
+    }
+
+    getMatrixRefreshToken(): string | null {
+        return localStorage.getItem(matrixRefreshToken);
+    }
+
+    setMatrixDeviceId(value: string | null, userUuid: string) {
+        if (value !== null) {
+            localStorage.setItem(matrixDeviceId + "_" + userUuid, value);
+        } else {
+            localStorage.removeItem(matrixDeviceId + "_" + userUuid);
+        }
+    }
+
+    getMatrixDeviceId(userUuid: string): string | null {
+        return localStorage.getItem(matrixDeviceId + "_" + userUuid) ?? "";
+    }
+
+    /** The uuid of the WorkAdventure user who opened the stored Matrix session. */
+    getMatrixSessionOwner(): string | null {
+        return localStorage.getItem(matrixSessionOwner);
+    }
+
+    setMatrixSessionOwner(userUuid: string | null) {
+        if (userUuid !== null) {
+            localStorage.setItem(matrixSessionOwner, userUuid);
+        } else {
+            localStorage.removeItem(matrixSessionOwner);
+        }
+    }
+
+    /**
+     * Older versions stored the single-use Matrix login token, which is now exchanged as soon as the page lands with
+     * it and kept in memory only. Drops the one they may have left behind.
+     */
+    removeLegacyMatrixLoginToken() {
+        localStorage.removeItem(matrixLoginToken);
+    }
+
+    /** Whether the Matrix stores (IndexedDB) still hold the data of the Matrix user who used this browser before. */
+    getMatrixStoresNeedClearing(): boolean {
+        return localStorage.getItem(matrixStoresNeedClearing) === "true";
+    }
+
+    setMatrixStoresNeedClearing(value: boolean) {
+        if (value) {
+            localStorage.setItem(matrixStoresNeedClearing, "true");
+        } else {
+            localStorage.removeItem(matrixStoresNeedClearing);
+        }
+    }
+
+    /**
+     * Forgets everything that identifies the current Matrix session.
+     *
+     * Called on logout, and whenever the homeserver tells us the session is dead: credentials left behind
+     * are replayed on the next page load, and MatrixClientWrapper only resets its stores when the stored
+     * user id differs from the one it just logged in with - so a leftover user id would restore the broken
+     * session instead of starting over. The device id is deliberately kept: it is stored per user and the
+     * next login overwrites it with the one the homeserver hands out.
+     */
+    clearMatrixSession() {
+        this.setMatrixSessionOwner(null);
+        this.setMatrixUserId(null);
+        this.setMatrixAccessToken(null);
+        this.setMatrixRefreshToken(null);
+        this.setMatrixAccessTokenExpireDate(null);
+    }
+
+    //TODO : Remove duplicate code (getMatrixUserId) and change matrix id to chatID in localStorage
+    getChatId(): string | null {
+        return localStorage.getItem(matrixUserId);
+    }
+
+    isGuest(): boolean {
+        return localStorage.getItem(matrixGuest) === "true";
+    }
+
+    setGuest(isGuest: boolean): void {
+        localStorage.setItem(matrixGuest, isGuest.toString());
+    }
+
+    getVolumeProximityDiscussion(): number {
+        return parseFloat(localStorage.getItem(volumeProximityDiscussion) || "1");
+    }
+
+    setVolumeProximityDiscussion(value: number): void {
+        localStorage.setItem(volumeProximityDiscussion, `${value}`);
+    }
+
+    setCameraContainerHeight(ratio: number): void {
+        localStorage.setItem(cameraContainerHeightKey, ratio.toString());
+    }
+
+    getCameraContainerHeight(): number {
+        const value = localStorage.getItem(cameraContainerHeightKey);
+        if (!value) {
+            return 0.2; // Default value of 20%
+        }
+        return parseFloat(value);
+    }
+
+    setChatSideBarWidth(width: number): void {
+        localStorage.setItem(chatSideBarWidthKey, width.toString());
+    }
+
+    getChatSideBarWidth(): number {
+        const value = localStorage.getItem(chatSideBarWidthKey);
+        if (!value) {
+            return INITIAL_SIDEBAR_WIDTH;
+        }
+        const floatValue = parseFloat(value);
+        return isNaN(floatValue) ? INITIAL_SIDEBAR_WIDTH : floatValue;
+    }
+
+    setChatRoomListWidth(width: number): void {
+        localStorage.setItem(chatRoomListWidthKey, width.toString());
+    }
+
+    getChatRoomListWidth(): number | undefined {
+        const floatValue = parseFloat(localStorage.getItem(chatRoomListWidthKey) ?? "");
+        return isNaN(floatValue) ? undefined : floatValue;
+    }
+
+    setMapEditorSideBarWidth(width: number): void {
+        localStorage.setItem(mapEditorSideBarWidthKey, width.toString());
+    }
+
+    getMapEditorSideBarWidth(): number {
+        const value = localStorage.getItem(mapEditorSideBarWidthKey);
+        if (!value) {
+            return INITIAL_MAP_EDITOR_SIDEBAR_WIDTH;
+        }
+        const floatValue = parseFloat(value);
+        return isNaN(floatValue) ? INITIAL_MAP_EDITOR_SIDEBAR_WIDTH : floatValue;
+    }
+
+    setBubbleSound(value: "ding" | "wobble"): void {
+        localStorage.setItem(bubbleSound, value);
+    }
+
+    getBubbleSound(): "ding" | "wobble" {
+        const value = localStorage.getItem(bubbleSound);
+        if (value === "wobble") {
+            return "wobble";
+        }
+        return "ding";
+    }
+}
+
+export const localUserStore = new LocalUserStore();

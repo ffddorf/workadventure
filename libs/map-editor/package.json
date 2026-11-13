@@ -1,0 +1,56 @@
+{
+  "name": "@workadventure/map-editor",
+  "version": "1.0.0",
+  "description": "Map Editor commands types",
+  "type": "module",
+  "main": "./src/index.ts",
+  "scripts": {
+    "lint": "eslint \"{src,apps,libs,test}/**/*.ts\"",
+    "lint-fix": "eslint \"{src,apps,libs,test}/**/*.ts\" --fix",
+    "precommit": "lint-staged && ([ \"$(uname)\" != \"Darwin\" ] && npm run export-json-schema || echo 'Skipping export-json-schema on MacOS')",
+    "pretty": "prettier --write \"src/**/*.ts\" \"tests/**/*.ts\"",
+    "pretty-check": "prettier --check 'src/**/*.{ts,tsx}' 'tests/**/*.{ts,tsx}'",
+    "test": "vitest run",
+    "test:watch": "vitest watch",
+    "test:cov": "vitest run --coverage",
+    "test:debug": "NODE_OPTIONS='--loader tsx' node --inspect-brk -r tsconfig-paths/register node_modules/.bin/vitest --runInBand",
+    "typecheck": "tsc --noEmit",
+    "build": "tsc",
+    "export-json-schema": "tsx ./src/exportJsonSchema.ts"
+  },
+  "author": "WorkAdventure",
+  "license": "ISC",
+  "dependencies": {
+    "@types/uuid": "^10.0.0",
+    "@workadventure/math-utils": "1.0.0",
+    "@workadventure/messages": "1.0.0",
+    "@workadventure/shared-utils": "^1.0.0",
+    "@workadventure/tiled-map-type-guard": "^2.1.2",
+    "axios": "^1.16.1",
+    "catch-unknown": "^2.0.0",
+    "deepmerge-ts": "^7.1.5",
+    "ipaddr.js": "^2.4.0",
+    "uuid": "^14.0.0",
+    "zod": "^3.25.76",
+    "zod-to-json-schema": "^3.25.2"
+  },
+  "devDependencies": {
+    "@types/node": "^25.9.1",
+    "@workadventure/eslint-config": "1.0.0",
+    "eslint": "^9.39.4",
+    "lint-staged": "^17.0.5",
+    "prettier": "^3.8.3",
+    "tsx": "^4.22.3",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.7"
+  },
+  "files": [
+    "src"
+  ],
+  "lint-staged": {
+    "*.ts": [
+      "eslint --fix",
+      "prettier --write"
+    ]
+  }
+}

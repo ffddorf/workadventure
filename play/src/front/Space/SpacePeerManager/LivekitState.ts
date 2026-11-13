@@ -1,0 +1,65 @@
+import * as Sentry from "@sentry/svelte";
+import type { Readable } from "svelte/store";
+import { LivekitConnection } from "../../Livekit/LivekitConnection";
+import type { SpaceInterface } from "../SpaceInterface";
+import type { LocalStreamStoreValue } from "../../Stores/MediaStore";
+import type { SimplePeerConnectionInterface, ICommunicationState, StreamableSubjects } from "./SpacePeerManager";
+
+export class LivekitState implements ICommunicationState {
+    private livekitConnection: LivekitConnection;
+    constructor(
+        private _space: SpaceInterface,
+        private _streamableSubjects: StreamableSubjects,
+        private _blockedUsersStore: Readable<Set<string>>,
+        private _screenSharingLocalStreamStore: Readable<LocalStreamStoreValue | undefined>,
+    ) {
+        this.livekitConnection = new LivekitConnection(
+            this._space,
+            this._streamableSubjects,
+            this._blockedUsersStore,
+            this._screenSharingLocalStreamStore,
+        );
+    }
+
+    destroy() {
+        this.livekitConnection.destroy();
+    }
+
+    getPeer(): SimplePeerConnectionInterface | undefined {
+        return undefined;
+    }
+
+    shouldSynchronizeMediaState(): boolean {
+        return true;
+    }
+
+    dispatchStream(mediaStream: MediaStream): void {
+        this.livekitConnection.dispatchStream(mediaStream).catch((err) => {
+            console.error("An error occurred in dispatchStream", err);
+            Sentry.captureException(err);
+        });
+    }
+
+    /**
+     * Starts the shutdown process of the communication state. It does not remove all video peers immediately,
+     * but any asynchronous operation receiving a new stream should be ignored after this call.
+     */
+    shutdown(): void {
+        this.livekitConnection.shutdown();
+    }
+
+    retryAllFailedConnections(): void {
+        console.warn(
+            "[LivekitState] retryAllFailedConnections called but LiveKit does not support failed connection retry. This case should not happen.",
+        );
+    }
+
+    /**
+     * [DEBUG] Forces the WebSocket connection to close to test reconnection mechanism.
+     * This method is for development/testing purposes only.
+     * @returns true if the WebSocket was closed, false if no connection exists
+     */
+    forceWebSocketClose(): boolean {
+        return this.livekitConnection.forceWebSocketClose();
+    }
+}

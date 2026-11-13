@@ -1,0 +1,234 @@
+<script lang="ts">
+    import { fly } from "svelte/transition";
+    import type { KlaxoonEvent } from "@workadventure/shared-utils/src/types";
+    import { KlaxoonService } from "@workadventure/shared-utils";
+    import appOnImg from "../images/applications/appOn.png";
+    import appOffImg from "../images/applications/appOff.png";
+    import klaxoonImg from "../images/applications/icon_klaxoon.svg";
+    import googleDriveSvg from "../images/applications/icon_google_drive.svg";
+    import googleDocsSvg from "../images/applications/icon_google_docs.svg";
+    import googleSheetsSvg from "../images/applications/icon_google_sheets.svg";
+    import googleSlidesSvg from "../images/applications/icon_google_slides.svg";
+    import eraserSvg from "../images/applications/icon_eraser.svg";
+    import excalidrawSvg from "../images/applications/icon_excalidraw.svg";
+    import cardsPng from "../images/applications/icon_cards.svg";
+    import tldrawsJpeg from "../images/applications/icon_tldraw.jpeg";
+    import { helpSettingsPopupBlockedStore } from "../../Stores/HelpSettingsPopupBlockedStore";
+    import { LL } from "../../../i18n/i18n-svelte";
+    import Tooltip from "../Util/Tooltip.svelte";
+    import { openedMenuStore } from "../../Stores/MenuStore";
+    import { gameManager } from "../../Phaser/Game/GameManager";
+
+    //let unsubscriptionSecondaryZoneMenuStore: Unsubscriber | null = null;
+    const applicationManager = gameManager.getCurrentGameScene().applicationManager;
+
+    function klaxoonButtonHandler() {
+        if (!applicationManager.klaxoonToolClientId) return;
+        KlaxoonService.openKlaxoonActivityPicker(applicationManager.klaxoonToolClientId, (payload: KlaxoonEvent) => {
+            if (!payload.url) return;
+            const openNewTab = window.open(payload.url, "_blank");
+            if (!openNewTab || openNewTab.closed || typeof openNewTab.closed == "undefined") {
+                helpSettingsPopupBlockedStore.set(true);
+            }
+        });
+    }
+
+    function oneApplicationIsActivated() {
+        return (
+            applicationManager.klaxoonToolActivated ||
+            applicationManager.googleDriveToolActivated ||
+            applicationManager.googleDocsToolActivated ||
+            applicationManager.googleSheetsToolActivated ||
+            applicationManager.googleSlidesToolActivated ||
+            applicationManager.eraserToolActivated
+        );
+    }
+</script>
+
+{#if oneApplicationIsActivated()}
+    <!-- svelte-ignore a11y_click_events_have_key_events -->
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div
+        in:fly={{}}
+        ondragstart={(event) => {
+            event.preventDefault();
+        }}
+        onkeyup={(event) => {
+            event.preventDefault();
+        }}
+        onkeypress={(event) => {
+            event.preventDefault();
+        }}
+        onkeydown={(event) => {
+            event.preventDefault();
+        }}
+        onfocus={(event) => {
+            event.preventDefault();
+        }}
+        onblur={(event) => {
+            event.preventDefault();
+        }}
+        onclick={() => {
+            openedMenuStore.toggle("appMenu");
+        }}
+        class="bottom-action-button"
+    >
+        <Tooltip text={$LL.actionbar.app()} />
+        <button id="klaxoon">
+            {#if $openedMenuStore === "appMenu"}
+                <img draggable="false" src={appOnImg} style="padding: 2px" alt={$LL.actionbar.app()} />
+            {:else}
+                <img draggable="false" src={appOffImg} style="padding: 2px" alt={$LL.actionbar.app()} />
+            {/if}
+        </button>
+    </div>
+{/if}
+
+{#if $openedMenuStore === "appMenu"}
+    <div
+        class="flex justify-center m-auto absolute left-0 right-0 bottom-0"
+        style="margin-bottom: 4.5rem; height: auto;"
+    >
+        <div class="bottom-action-bar">
+            {#if applicationManager.klaxoonToolActivated}
+                <div class="bottom-action-section flex animate">
+                    <div class="transition-all bottom-action-button">
+                        <Tooltip text={$LL.mapEditor.properties.klaxoon.label()} />
+                        <button
+                            onclick={() => {
+                                klaxoonButtonHandler();
+                                openedMenuStore.close("appMenu");
+                            }}
+                            id="button-app-klaxoon"
+                            disabled={!applicationManager.klaxoonToolActivated}
+                        >
+                            <img draggable="false" src={klaxoonImg} style="padding: 2px" alt="Klaxoon" />
+                        </button>
+                    </div>
+                </div>
+            {/if}
+            <div class="bottom-action-section flex animate">
+                {#if applicationManager.googleDriveToolActivated}
+                    <div class="transition-all bottom-action-button">
+                        <Tooltip text={$LL.mapEditor.properties.googleDrive.label()} />
+                        <button
+                            onclick={() => {
+                                window.open(`https://drive.google.com/drive/home`, "_blanck");
+                                openedMenuStore.close("appMenu");
+                            }}
+                            id="button-app-klaxoon"
+                            disabled={!applicationManager.googleDriveToolActivated}
+                        >
+                            <img draggable="false" src={googleDriveSvg} style="padding: 2px" alt="Goodle Doc" />
+                        </button>
+                    </div>
+                {/if}
+                {#if applicationManager.googleDocsToolActivated}
+                    <div class="transition-all bottom-action-button">
+                        <Tooltip text={$LL.mapEditor.properties.googleDocs.label()} />
+                        <button
+                            onclick={() => {
+                                window.open(`https://docs.google.com/document/u/1/`, "_blanck");
+                                openedMenuStore.close("appMenu");
+                            }}
+                            id="button-app-klaxoon"
+                            disabled={!applicationManager.googleDocsToolActivated}
+                        >
+                            <img draggable="false" src={googleDocsSvg} style="padding: 2px" alt="Goodle Doc" />
+                        </button>
+                    </div>
+                {/if}
+                {#if applicationManager.googleSheetsToolActivated}
+                    <div class="transition-all bottom-action-button">
+                        <Tooltip text={$LL.mapEditor.properties.googleSheets.label()} />
+                        <button
+                            onclick={() => {
+                                window.open(`https://docs.google.com/spreadsheets/u/1/`, "_blanck");
+                                openedMenuStore.close("appMenu");
+                            }}
+                            id="button-app-klaxoon"
+                            disabled={!applicationManager.googleSheetsToolActivated}
+                        >
+                            <img draggable="false" src={googleSheetsSvg} style="padding: 2px" alt="Google Sheet" />
+                        </button>
+                    </div>
+                {/if}
+                {#if applicationManager.googleSlidesToolActivated}
+                    <div class="transition-all bottom-action-button">
+                        <Tooltip text={$LL.mapEditor.properties.googleSlides.label()} />
+                        <button
+                            onclick={() => {
+                                window.open(`https://docs.google.com/presentation/u/1/`, "_blanck");
+                                openedMenuStore.close("appMenu");
+                            }}
+                            id="button-app-klaxoon"
+                            disabled={!applicationManager.googleSlidesToolActivated}
+                        >
+                            <img draggable="false" src={googleSlidesSvg} style="padding: 2px" alt="Google Slide" />
+                        </button>
+                    </div>
+                {/if}
+                {#if applicationManager.eraserToolActivated}
+                    <div class="transition-all bottom-action-button">
+                        <Tooltip text={$LL.mapEditor.properties.eraser.label()} />
+                        <button
+                            onclick={() => {
+                                window.open(`https://app.eraser.io/dashboard/all`, "_blanck");
+                                openedMenuStore.close("appMenu");
+                            }}
+                            id="button-app-klaxoon"
+                            disabled={!applicationManager.eraserToolActivated}
+                        >
+                            <img draggable="false" src={eraserSvg} style="padding: 2px" alt="Eraser" />
+                        </button>
+                    </div>
+                {/if}
+                {#if applicationManager.excalidrawToolActivated}
+                    <div class="transition-all bottom-action-button">
+                        <Tooltip text={$LL.mapEditor.properties.excalidraw.label()} />
+                        <button
+                            onclick={() => {
+                                window.open(`https://excalidraw.com`, "_blanck");
+                                openedMenuStore.close("appMenu");
+                            }}
+                            id="button-app-klaxoon"
+                            disabled={!applicationManager.excalidrawToolActivated}
+                        >
+                            <img draggable="false" src={excalidrawSvg} style="padding: 2px" alt="Excalidraw" />
+                        </button>
+                    </div>
+                {/if}
+                {#if applicationManager.cardsToolActivated}
+                    <div class="transition-all bottom-action-button">
+                        <Tooltip text={$LL.mapEditor.properties.cards.label()} />
+                        <button
+                            onclick={() => {
+                                window.open(`https://excalidraw.com`, "_blanck");
+                                openedMenuStore.close("appMenu");
+                            }}
+                            id="button-app-klaxoon"
+                            disabled={!applicationManager.cardsToolActivated}
+                        >
+                            <img draggable="false" src={cardsPng} style="padding: 2px" alt="Excalidraw" />
+                        </button>
+                    </div>
+                {/if}
+                {#if applicationManager.tldrawToolActivated}
+                    <div class="transition-all bottom-action-button">
+                        <Tooltip text={$LL.mapEditor.properties.tldraw.label()} />
+                        <button
+                            onclick={() => {
+                                window.open(`https://www.tldraw.com`, "_blanck");
+                                openedMenuStore.close("appMenu");
+                            }}
+                            id="button-app-tldraw"
+                            disabled={!applicationManager.tldrawToolActivated}
+                        >
+                            <img draggable="false" src={tldrawsJpeg} style="padding: 2px" alt="tldraw" />
+                        </button>
+                    </div>
+                {/if}
+            </div>
+        </div>
+    </div>
+{/if}

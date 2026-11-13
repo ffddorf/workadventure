@@ -1,0 +1,75 @@
+import type { Translation } from "../i18n-types";
+import type { DeepPartial } from "../DeepPartial";
+
+const warning: DeepPartial<Translation["warning"]> = {
+    title: "Waarschuwing!",
+    content: `Deze wereld nadert zijn limiet! Je kunt de capaciteit upgraden <a href="{upgradeLink}" target="_blank">hier</a>`,
+    limit: "Deze wereld nadert zijn limiet!",
+    accessDenied: {
+        camera: "Camera toegang geweigerd. Klik hier en controleer je browserrechten.",
+        teleport: "Je hebt geen recht om naar deze gebruiker te teleporteren.",
+        room: "Toegang tot de kamer geweigerd. Je mag deze kamer niet betreden.",
+    },
+    connectionLost: "Verbinding verloren. Herverbinden...",
+    connectionLostTitle: "Verbinding verloren",
+    connectionLostSubtitle: "Herverbinden",
+    waitingConnectionTitle: "Wachten op verbinding",
+    waitingConnectionSubtitle: "Verbinden",
+    megaphoneNeeds: "Om de megaphone te gebruiken, moet je je camera of je microfoon inschakelen of je scherm delen.",
+    mapEditorShortCut: "Er is een fout opgetreden bij het openen van de kaarteditor.",
+    mapEditorNotEnabled: "De kaarteditor is niet ingeschakeld op deze wereld.",
+    backgroundProcessing: {
+        failedToApply: "Achtergrondeffecten toepassen mislukt",
+        notSupportedOnThisBrowser: "Achtergrondeffecten worden niet ondersteund door deze browser",
+    },
+    popupBlocked: {
+        title: "Popup geblokkeerd",
+        content: "Sta popups toe voor deze website in je browserinstellingen.",
+        done: "Ok",
+    },
+    duplicateUserConnected: {
+        title: "Al verbonden",
+        message:
+            "Deze gebruiker is al verbonden met deze ruimte vanuit een ander tabblad of apparaat. Sluit het andere tabblad of venster om conflicten te voorkomen.",
+        confirmContinue: "Begrepen, doorgaan",
+        dontRemindAgain: "Dit bericht niet meer tonen",
+    },
+    browserNotSupported: {
+        title: "😢 Browser niet ondersteund",
+        message: "Uw browser ({browserName}) wordt niet meer ondersteund door WorkAdventure.",
+        description:
+            "Uw browser is te oud om WorkAdventure uit te voeren. Werk deze bij naar de nieuwste versie om door te gaan.",
+        whatToDo: "Wat kunt u doen?",
+        option1: "{browserName} bijwerken naar de nieuwste versie",
+        option2: "WorkAdventure verlaten en een andere browser gebruiken",
+        updateBrowser: "Browser bijwerken",
+        leave: "Verlaten",
+    },
+    pwaInstall: {
+        title: "WorkAdventure installeren",
+        description:
+            "Installeer de app voor een betere ervaring: snelle toegang, starten bij het opstarten en een app-achtige ervaring.",
+        descriptionIos: "Voeg WorkAdventure toe aan je beginscherm voor een betere ervaring en snelle toegang.",
+        feature1Title: "Snelle toegang",
+        feature1Description: "Start WorkAdventure vanuit je startmenu, Dock of vanaf je bureaublad.",
+        feature2Title: "Eigen appvenster",
+        feature2Description:
+            "Houd WorkAdventure gescheiden van je browsertabbladen en vind WorkAdventure in een oogopslag terug op je taakbalk.",
+        feature3Title: "Start met je computer",
+        feature3Description: "Start WorkAdventure wanneer je apparaat opstart.",
+        iosStepsTitle: "Hoe te installeren",
+        iosStep1: "Tik op de deelknop (vierkant met pijl) onderaan in Safari.",
+        iosStep2: 'Scroll naar beneden en tik op "Voeg toe aan startscherm".',
+        iosStep3: 'Tik op "Toevoegen" om te bevestigen.',
+        install: "WorkAdventure-app installeren",
+        installing: "Installeren…",
+        skip: "Doorgaan in browser",
+        continue: "Doorgaan in browser",
+        neverShowPage: "Niet opnieuw vragen",
+    },
+    otherMeetingMuted:
+        "Je zit nu hier in een vergadering. Je microfoon, camera en schermdeling zijn uitgeschakeld in {world}.",
+    desktopAppOutdated: "Er is een nieuwe versie van de WorkAdventure-app beschikbaar: {url}",
+};
+
+export default warning;

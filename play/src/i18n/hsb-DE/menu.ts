@@ -1,0 +1,220 @@
+import type { DeepPartial } from "../DeepPartial";
+import type { Translation } from "../i18n-types";
+
+const menu: DeepPartial<Translation["menu"]> = {
+    title: "meni",
+    icon: {
+        open: {
+            menu: "meni wočinić",
+            invite: "přeprošenje wozjewić",
+            register: "registrować",
+            chat: "chat wočinić",
+            userlist: "wužiwarska lisćina",
+            openEmoji: "wuzwoleny emojijowy popup wočinić",
+            closeEmoji: "emoji-meni zawrěć",
+            mobile: "mobilny meni wočinić",
+            calendar: "kalender wočinić",
+            todoList: "lisćinu nadawkow wočinić",
+        },
+    },
+    visitCard: {
+        close: "zawrěć",
+        sendMessage: "powěsć pósłać",
+    },
+    profile: {
+        login: "přizjewić",
+        logout: "wotzjewić",
+        helpAndTips: "Pomoc a pokiwki",
+    },
+    settings: {
+        videoBandwidth: {
+            title: "Kwalita wideja",
+            low: "Niska",
+            recommended: "Doporučena",
+            high: "High",
+        },
+        shareScreenBandwidth: {
+            title: "Kwalita přenosowaneje wobrazowki",
+            low: "Niska",
+            recommended: "Doporučena",
+            high: "High",
+        },
+        bandwidthConstrainedPreference: {
+            title: "Hdyž je syćowa šěrokosć pasma wobmjezowana",
+            maintainFramerateTitle: "Płynne animacije wobchować",
+            maintainFramerateDescription:
+                "Płynnosć (frejmratu) před wubraženosću preferować. To wužiwaj, hdyž su płynne animacije wažne, na př. při streamowanju widejohrow.",
+            maintainResolutionTitle: "Tekst čitajomny wostajić",
+            maintainResolutionDescription:
+                "Wubraženosć před frejmratu preferować. To wužiwaj, hdyž je čitajomnosć teksta wažna, na př. při prezentacijach abo při dźělenju koda.",
+            balancedTitle: "Płynnosć a wubraženosć w balansu wostajić",
+            balancedDescription: "Sprochuj, balansu mjez płynnosću a wubraženosću wostajić.",
+        },
+        microphone: {
+            title: "Mikrofonowe nastajenja",
+            autoGainControl: "Awtomatiske zesylnjenje",
+            autoGainControlDescription: "Awtomatisce přiměrja sylnosć wašeho mikrofona.",
+            echoCancellation: "Wotstronjenje echa",
+            enableAdvancedNoiseReduction: "Rozšěrjene potłóčowanje šuma zmóžnić",
+            noiseSuppressionMode: "Modus potłóčowanja šuma:",
+            workAdventureNoiseSuppression: "Potłóčowanje šuma WorkAdventure",
+            workAdventureNoiseSuppressionDescription: "Předźěłajće swój mikrofon z potłóčowanjom šuma WorkAdventure.",
+            recommended: "Doporučene",
+            browserNoiseSuppression: "Potłóčowanje šuma wobhladowaka",
+            browserNoiseSuppressionDescription: "Wužiwajće zatwarjene potłóčowanje šuma swojeho wobhladowaka.",
+            voiceIsolation: "Izolacija hłosa",
+            voiceIsolationDescription:
+                "Wužiwajće izolaciju hłosa wobhladowaka a dźěłoweho systema, jeli je k dispoziciji.",
+            noiseSuppressionEngine: "Mašina za potłóčowanje šuma",
+            noiseSuppressionEngineDeepFilterNet: "DeepFilterNet (nowy, hłós połneho pasma)",
+            noiseSuppressionEngineDtln: "DTLN (předchadna mašina)",
+        },
+        language: {
+            title: "rěč",
+        },
+        privacySettings: {
+            title: "modus njepřitomnosće",
+            explanation:
+                'Hdyž do druheho wokna abo taba přeńdźeće, so do „modusa njepřitomnosće" přešaltuje, nic pak w rozmołwje abo při wusyłanju.',
+            cameraToggle: 'Kameru w „modusu njepřitomnosće" aktiwěrowanu wostajić.',
+            microphoneToggle: 'Mikrofon w „modusu njepřitomnosće" aktiwěrowany wostajić.',
+        },
+        save: "składować",
+        otherSettings: "Druhe nastajenja",
+        fullscreen: "połny wobraz",
+        notifications: "powěsće",
+        enablePictureInPicture: "wobraz-we-wobrazu aktiwěrować",
+        chatSounds: "zwuki chata",
+        cowebsiteTrigger: "Kóždy raz so naprašować, prjedy hač so webstrony abo Jitsi Meet rumy wotewrje",
+        ignoreFollowRequest: "Ignoruj naprašowanja wo sćěhowanje wot druhich wužiwarjow",
+        proximityDiscussionVolume: "hłošnosć diskusijow w bliskosći",
+        blockAudio: "wokolne zwuki a hudźbu blokować",
+        disableAnimations: "animacije karty znjemóžnić",
+        bubbleSound: "zwuk bubliny",
+        bubbleSoundOptions: {
+            ding: "Ding",
+            wobble: "Wobble",
+        },
+        displayVideoQualityStats: "statistiki kwaliteje wideja pokazać",
+    },
+    invite: {
+        description: "Link do tuteho ruma dźělić!",
+        copy: "kopěrować",
+        copied: "kopěrowany",
+        share: "dźělić",
+        walkAutomaticallyToPosition: "awtomatisce k mojej poziciji hić",
+        selectEntryPoint: "druhi startowy dypk wužiwać",
+        selectEntryPointSelect: "wubjer startowy dypk, přez kotryž wužiwarjo přidu",
+    },
+    globalMessage: {
+        enter: "Zapisaj tu swoju powěsć...",
+    },
+    contact: {
+        gettingStarted: {
+            title: "prěnje kročele",
+            description:
+                "Z Work Adventure móžeš onlinowy swět stworić w kotrymž móžeš so spontanje z druhimi zetkać a rozmołwjeć. Zestajej jako prěnje swójsku kartu. Steji ći wulki wuběr na hotowych kartach wot našeho teama na wuběr.",
+        },
+        createMap: {
+            title: "swójsku kartu zestajeć",
+            description: "Móžeš tež swoju swójsku kartu zestajeć. Sćěhuj k tomu naš kročel-za kročel nawod.",
+        },
+    },
+    about: {
+        mapInfo: "informacije wo tutej karće",
+        mapLink: "link ke karće",
+        copyrights: {
+            map: {
+                title: "awtorske prawo karty",
+                empty: "Zestajer karty njeje žane informacije k awtorskemu prawu zapołožił.",
+            },
+            tileset: {
+                title: "awtorske prawo Tilesetow",
+                empty: "Zestajer karty njeje žane informacije k awtorskemu prawu Tilesetow zapołožił. To njewoznamjenja, zo Tilesety žanej licency njepodleža.",
+            },
+            audio: {
+                title: "awtorske prawo awdijodatajow",
+                empty: "Zestajer karty njeje žane informacije k awtorskemu prawu awdijodatajow zapołožił. Tole njewoznamjenja, zo awdiodataje žanej licency njepodleža.",
+            },
+        },
+    },
+    chat: {
+        resetKeyStorageUpButtonLabel: "wašu klučowu składarnju wróćo stajić",
+        resetKeyStorageConfirmationModal: {
+            title: "wobkrućenje wróćo stajenja klučoweje składarnje",
+            content: "Chceće wašu klučowu składarnju wróćo stajić. Sće wěsty?",
+            warning:
+                "Wróćo stajenje klučoweje składarnje wotstroni wašu aktualnu sesiju a wšěch dowěry hódnych wužiwarjow. Móžeće přistup k někotrym předchadnym powěsćam zhubić a wjace njejsće jako dowěry hódny wužiwar spóznaty. Zawěsćće, zo rozumjeće wuslědki tuteje akcije před pokročowanjom.",
+            cancel: "přetorhnyć",
+            continue: "pokročować",
+        },
+    },
+    sub: {
+        profile: "profil",
+        settings: "nastajenja",
+        credit: "wo karće",
+        contact: "kontakt",
+        report: "zmylki připowědźić",
+        help: "pomoc a nawody",
+        contextualActions: "kontekstowe akcije",
+        shortcuts: "tastowe skrótšenki",
+    },
+    shortcuts: {
+        title: "tastowe skrótšenki",
+        speedUp: "běhać",
+        interact: "interagować",
+        follow: "sćěhować",
+        openChat: "chat wočinić",
+        openUserList: "lisćinu wužiwarjow wočinić",
+        toggleMapEditor: "kartowy editor pokazać/schować",
+        rotatePlayer: "hrajerja wobwjertować",
+        openSayPopup: 'popup „rěkać" wočinić',
+        openThinkPopup: 'popup „myslić" wočinić',
+        walkMyDesk: "k mojemu blidkej hić",
+        edit: {
+            start: "Wobdźěłać",
+            title: "Wobdźěłowanski modus",
+            help: "Klikń na tastowu skrótšenku a tłóč potom nowu kombinaciju. Escape přetorhnje. Twój wuběr so w tutym wobhladowaku składuje.",
+            resetAll: "Wšo wróćo stajić",
+            done: "Hotowo",
+            pressKey: "Tłóč tastu…",
+            none: "Žana",
+            change: "Tastowu skrótšenku za „{action}“ změnić",
+            reset: "Standardnu tastowu skrótšenku za „{action}“ wobnowić",
+            locked: "Njehodźi so změnić",
+            modified: "Změnjene",
+            usedBy: "{keys} so hižo za „{action}“ wužiwa. Hdyž to narunaš, nima „{action}“ hižo tastowu skrótšenku.",
+            usedByFixed: "{keys} so hižo za „{action}“ wužiwa, kotraž njehodźi so změnić.",
+            reserved: "{keys} je za wobhladowak wuhrabane. Wubjer druhu tastu.",
+            replace: "Narunać",
+            cancel: "Přetorhnyć",
+        },
+        subtitle: "Su znjemóžnjene, mjeztym zo do tekstoweho pola pišeš.",
+        searchLabel: "Tastowu skrótšenku pytać",
+        searchPlaceholder: "Akciju abo tastu pytać…",
+        noResult: "Žana tastowa skrótšenka njewotpowěduje „{query}“.",
+        or: "abo",
+        layout: "Wuhotowanje tastatury",
+        walk: "Hić",
+        sendEmote: "Emote pósłać",
+        groups: {
+            move: "Pohibować so",
+            communicate: "Komunikować",
+            express: "So wuprajić",
+            interact: "Interagować",
+        },
+        hints: {
+            speedUp: "Při chodźenju dźeržeć",
+            follow: "Blisko někoho",
+            emotes: "W rjedźe emote-lajsty",
+            mapEditor: "Hdyž móžeš kartu wobdźěłać",
+        },
+        keyNames: {
+            shift: "Shift",
+            enter: "Enter",
+            space: "Mjezerowa tasta",
+        },
+    },
+};
+
+export default menu;

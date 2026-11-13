@@ -1,0 +1,787 @@
+<script lang="ts">
+    //STYLE: Classes factorizing tailwind's ones are defined in video-ui.css
+    import { getContext, onDestroy, onMount } from "svelte";
+    import * as Sentry from "@sentry/svelte";
+    import type { Subscription } from "rxjs";
+    import { get } from "svelte/store";
+    import { AvailabilityStatus } from "@workadventure/messages";
+    import SoundMeterWidget from "../SoundMeterWidget.svelte";
+    import { highlightedEmbedScreen } from "../../Stores/HighlightedEmbedScreenStore";
+    import type { VideoBox, VideoBoxStreamableEntry } from "../../Space/VideoBox";
+    import { LL } from "../../../i18n/i18n-svelte";
+    import { analyticsClient } from "../../Administration/AnalyticsClient";
+    import { meetingOf } from "../../Administration/CurrentMeeting";
+    import loaderImg from "../images/loader.svg";
+    import { highlightFullScreen } from "../../Stores/ActionsCamStore";
+    import { showFloatingUi } from "../../Utils/svelte-floatingui-show";
+    import { displayVideoQualityStore } from "../../Stores/DisplayVideoQualityStore";
+    import { requestedMegaphoneStore } from "../../Stores/MegaphoneStore";
+    import { rawLocalVideoTrackStore, requestedCameraState, requestedMicrophoneState } from "../../Stores/MediaStore";
+    import { requestedScreenSharingState } from "../../Stores/ScreenSharingStore";
+    import { blackListManager } from "../../WebRtc/BlackListManager";
+    import { activePictureInPictureStore } from "../../Stores/PeerStore";
+    import { blocker } from "../../Utils/screenBlocker";
+    import { findHandPosition, raisedHandsOrderStore } from "../../Stores/RaisedHandsStore";
+    import { gameManager } from "../../Phaser/Game/GameManager";
+    import { screenAnnotationManager } from "../../Space/ScreenAnnotation/ScreenAnnotationManager";
+    import { localAnnotationTargetStore, screenAnnotationEnabledStore } from "../../Stores/ScreenAnnotationStore";
+    import { getColorHexOfStatus } from "../../Utils/AvailabilityStatus";
+    import ActionMediaBox from "./ActionMediaBox.svelte";
+    import AwayPausedOverlay from "./AwayPausedOverlay.svelte";
+    import RaisedHandBadge from "./RaisedHandBadge.svelte";
+    import UserName from "./UserName.svelte";
+    import UpDownChevron from "./UpDownChevron.svelte";
+    import CenteredVideo from "./CenteredVideo.svelte";
+    import ScreenAnnotationOverlay from "./ScreenAnnotationOverlay.svelte";
+    import PresenterEffectsOverlay from "./PresenterEffectsOverlay.svelte";
+    import ScreenAnnotationToolbar from "./ScreenAnnotationToolbar.svelte";
+    import WebRtcStats from "./WebRtcStatsBox.svelte";
+    import EncoderStatsBox from "./EncoderStatsBox.svelte";
+    import { IconArrowsMinimize, IconArrowsMaximize, IconEyeOff, IconMicrophoneOff, IconPencil } from "@wa-icons";
+
+    interface Props {
+        fullScreen?: boolean;
+        videoBox: VideoBox; // If true, and if there is no video, the height of the video box will be 11rem
+        miniMode?: boolean;
+        activeUserName?: boolean;
+    }
+
+    let { fullScreen = false, videoBox, miniMode = false, activeUserName = true }: Props = $props();
+
+    let streamableStore = $derived(videoBox.streamable);
+    let streamablesStore = $derived(videoBox.streamables);
+    let effectiveStatusStore = $derived(videoBox.statusStore);
+    let effectiveStatus = $derived($effectiveStatusStore);
+    let streamableEntries = $derived($streamablesStore);
+    let activeStreamableEntry = $derived(streamableEntries.find((entry) => !entry.isPending));
+    let streamable = $derived(activeStreamableEntry?.streamable ?? $streamableStore);
+
+    // The inCameraContainer is used to know if the VideoMediaBox is part of a series of video or if it is the highlighted video.
+    let inCameraContainer: boolean = !!getContext("inCameraContainer");
+    let inHighlightFullscreenParticipantList: boolean = !!getContext("inHighlightFullscreenParticipantList");
+
+    let extendedSpaceUser = $derived(videoBox.spaceUser);
+    let megaphoneState = $derived(extendedSpaceUser?.reactiveUser.megaphoneState);
+    let microphoneStateStore = $derived(extendedSpaceUser?.reactiveUser.microphoneState);
+
+    let pictureStore = $derived(extendedSpaceUser?.pictureStore);
+
+    let name = $derived(extendedSpaceUser?.name);
+
+    let showUserSubMenu = $state(false);
+
+    let hasVideoStore = $derived(streamable?.hasVideo);
+    let hasAudioStore = $derived(streamable?.hasAudio);
+    let volumeMeterStore = $derived(streamable?.volumeStore);
+    let showVoiceIndicatorStore = $derived(streamable?.showVoiceIndicator);
+    let isBlockedStore = $derived(streamable?.media?.isBlocked);
+    let mediaStreamStore = $derived(
+        streamable?.media.type === "webrtc" || streamable?.media.type === "livekit"
+            ? streamable.media.streamStore
+            : undefined,
+    );
+    let volumeStore = $derived(streamable?.volume);
+    let volumeMeter = $derived($volumeMeterStore);
+    let webRtcStatsStore = $derived($displayVideoQualityStore ? streamable?.webrtcStats : undefined);
+    let webRtcStats = $derived($webRtcStatsStore);
+    let encoderStatsStore = $derived($displayVideoQualityStore ? streamable?.senderStats : undefined);
+    let encoderStats = $derived($encoderStatsStore);
+
+    // Check if user is currently reconnecting (WebRTC retry in progress)
+    let isReconnecting = $derived(effectiveStatus === "reconnecting");
+
+    let showVoiceIndicator = $derived(showVoiceIndicatorStore ? $showVoiceIndicatorStore : false);
+
+    // If there is no constraintStore, we are in a screen sharing (so video is enabled)
+
+    let videoEnabled = $derived($hasVideoStore);
+
+    let isMegaphoneSpace = $derived(videoBox.isMegaphoneSpace ?? false);
+
+    // Check if this is the local user's video box
+    let isLocalUser = $derived(videoBox.uniqueId === "-1" || extendedSpaceUser?.spaceUserId === "local");
+    // The local tile's space user is a placeholder ("local"): its raised hand is queued under our real spaceUserId.
+    let raisedHandSpaceUserId = $derived(
+        isLocalUser ? (gameManager.getCurrentGameScene().connection?.getSpaceUserId() ?? "") : videoBox.uniqueId,
+    );
+    // The local tile's space user is a placeholder: its hand is looked up in every queue (see findHandPosition).
+    let raisedHandSpaceName = $derived(isLocalUser ? undefined : extendedSpaceUser?.space.getName());
+    let isHandRaised = $derived(
+        findHandPosition($raisedHandsOrderStore, raisedHandSpaceName, raisedHandSpaceUserId) !== undefined,
+    );
+    // Debugging aid for the rare case where the space says the remote microphone is enabled but this receiver has no audio.
+    let audioStateMismatch = $derived(
+        effectiveStatus === "connected" &&
+            streamable?.videoType === "video" &&
+            !isLocalUser &&
+            $isBlockedStore !== true &&
+            $microphoneStateStore === true &&
+            $hasAudioStore === false,
+    );
+    // A muted P2P peer keeps its audio track (paused sender, see RemotePeer): hasAudio alone would still show it as
+    // speaking. Only for remote cameras: the local user's space state is a constant, and a screen share carries tab audio.
+    let remoteMicrophoneMuted = $derived(
+        streamable?.videoType === "video" && !isLocalUser && $microphoneStateStore === false,
+    );
+    let availabilityStatusStore = $derived(extendedSpaceUser?.reactiveUser.availabilityStatus);
+    let cameraHeldStore = $derived(extendedSpaceUser?.reactiveUser.cameraHeld);
+    let microphoneHeldStore = $derived(extendedSpaceUser?.reactiveUser.microphoneHeld);
+    // Someone walking up to a user in away mode sees why they get no answer. Only on another user's camera tile.
+    let away = $derived(
+        streamable?.videoType === "video" && !isLocalUser && $availabilityStatusStore === AvailabilityStatus.AWAY,
+    );
+    // A camera away mode holds off gets the shutter of the user's own tile, instead of the centered Woka of a camera turned off
+    let awayCameraHeld = $derived(
+        away && ($cameraHeldStore ?? false) && effectiveStatus === "connected" && !$isBlockedStore,
+    );
+    // Like audioStateMismatch, but with a 3 seconds delay.
+    let showAudioStateMismatch = $state(false);
+    let loggedAudioMismatchKey: string | undefined = undefined;
+
+    $effect(() => {
+        if (!audioStateMismatch) {
+            return;
+        }
+
+        const audioMismatchKey = `${streamable?.uniqueId ?? "unknown"}:${extendedSpaceUser?.spaceUserId ?? "unknown"}:${streamable?.media.type ?? "unknown"}`;
+        if (loggedAudioMismatchKey === audioMismatchKey) {
+            return;
+        }
+
+        const timeout = setTimeout(() => {
+            const audioTracks =
+                $mediaStreamStore?.getAudioTracks().map((track) => ({
+                    id: track.id,
+                    enabled: track.enabled,
+                    muted: track.muted,
+                    readyState: track.readyState,
+                })) ?? [];
+            const details = {
+                streamableUniqueId: streamable?.uniqueId,
+                streamableType: streamable?.media.type,
+                videoType: streamable?.videoType,
+                spaceUserId: extendedSpaceUser?.spaceUserId,
+                status: effectiveStatus,
+                hasAudio: $hasAudioStore,
+                microphoneState: $microphoneStateStore,
+                audioTrackCount: audioTracks.length,
+                audioTracks,
+            };
+
+            console.warn(
+                "Audio state mismatch: remote microphone is enabled in the space but no receiver audio track is present",
+                details,
+            );
+            Sentry.captureMessage(
+                "Audio state mismatch: remote microphone is enabled in the space but no receiver audio track is present",
+                {
+                    level: "warning",
+                    tags: {
+                        component: "VideoMediaBox",
+                        streamableType: streamable?.media.type ?? "unknown",
+                        videoType: streamable?.videoType ?? "unknown",
+                    },
+                    extra: details,
+                },
+            );
+
+            loggedAudioMismatchKey = audioMismatchKey;
+            showAudioStateMismatch = true;
+        }, 3000);
+
+        return () => {
+            clearTimeout(timeout);
+            showAudioStateMismatch = false;
+        };
+    });
+
+    // Check if the local user is streaming with megaphone
+    // requestedMegaphoneStore is true when user has requested megaphone
+    // We also need to check if they are actually streaming (camera, mic, or screen)
+    let isLocalUserStreamingMegaphone = $derived(
+        isLocalUser &&
+            $requestedMegaphoneStore &&
+            ($requestedCameraState || $requestedMicrophoneState || $requestedScreenSharingState),
+    );
+
+    let blackListSubject: Subscription | undefined;
+    let unBlackListSubject: Subscription | undefined;
+    let blackListVersion = $state(0);
+    let spaceUserId = $derived(extendedSpaceUser?.spaceUserId);
+    let userUuidStore = $derived(extendedSpaceUser?.reactiveUser.uuid);
+    let userUuid = $derived($userUuidStore);
+    let isCurrentUserBlackListed = $derived(computeIsCurrentUserBlackListed(blackListVersion, spaceUserId, userUuid));
+
+    // Which stream never showed a frame, over which backend, and what its receiving track looked like at that
+    // moment: enough to tell a publisher that sends nothing from a subscription that never started.
+    function reportMissingVideo({ streamable, isPending }: VideoBoxStreamableEntry): void {
+        const media = streamable.media;
+        if (media.type !== "webrtc" && media.type !== "livekit") {
+            return;
+        }
+        // The user's own camera and screen-share previews are "webrtc" streamables with no space user.
+        const local = streamable.spaceUserId === undefined;
+        // For LiveKit, streamStore only carries the audio: the video track is on the subscription.
+        const remoteVideoTrack = media.type === "livekit" ? get(media.remoteVideoTrack) : undefined;
+        let track: MediaStreamTrack | undefined;
+        if (media.type === "livekit") {
+            track = remoteVideoTrack?.mediaStreamTrack;
+        } else if (local && streamable.videoType === "video") {
+            // The local camera preview shows the background effect's output when one is on: the camera's own
+            // state (a frozen camera is muted) is on the raw track.
+            const rawCamera = get(rawLocalVideoTrackStore);
+            track = rawCamera.type === "success" ? rawCamera.track : undefined;
+        } else {
+            track = get(media.streamStore)?.getVideoTracks()[0];
+        }
+        analyticsClient.trackAdminEvent("media.video_stream_missing", {
+            meetingProvider: local ? undefined : media.type,
+            local,
+            streamCategory: streamable.videoType,
+            remoteSpaceUserId: streamable.spaceUserId,
+            pending: isPending,
+            trackMuted: track?.muted,
+            trackEnded: track ? track.readyState === "ended" : undefined,
+            remoteMuted: remoteVideoTrack?.isMuted,
+            pictureInPicture: get(activePictureInPictureStore),
+        });
+    }
+
+    function computeIsCurrentUserBlackListed(
+        _blackListVersion: number,
+        currentSpaceUserId: string | undefined,
+        currentUserUuid: string | undefined,
+    ): boolean {
+        return (
+            currentSpaceUserId !== undefined &&
+            currentSpaceUserId !== "local" &&
+            (blackListManager.isBlackListed(currentSpaceUserId) ||
+                (currentUserUuid !== undefined && blackListManager.isBlackListed(currentUserUuid)))
+        );
+    }
+
+    function setFullScreen() {
+        exitFullScreen();
+        highlightPeer();
+        highlightFullScreen.set(true);
+    }
+
+    function exitFullScreen() {
+        highlightFullScreen.set(false);
+    }
+
+    function removeHighlight() {
+        highlightedEmbedScreen.removeHighlight();
+    }
+
+    let userMenuButton: HTMLDivElement | undefined = $state();
+
+    let closeFloatingUi: (() => void) | undefined;
+
+    function toggleUserMenu() {
+        showUserSubMenu = !showUserSubMenu;
+        const spaceUser = extendedSpaceUser;
+        if (showUserSubMenu && spaceUser && userMenuButton) {
+            closeFloatingUi = showFloatingUi(
+                userMenuButton,
+                // @ts-ignore See https://github.com/storybookjs/storybook/issues/21884
+                ActionMediaBox,
+                {
+                    spaceUser,
+                    videoEnabled: videoEnabled ?? false,
+                    volumeStore,
+                    videoType: streamable?.videoType,
+                    onClose: () => {
+                        showUserSubMenu = false;
+                        closeFloatingUi?.();
+                    },
+                },
+                {
+                    placement: "bottom",
+                },
+                8,
+                false,
+            );
+            // onclose={() => (showUserSubMenu = false)}
+        } else {
+            closeFloatingUi?.();
+            closeFloatingUi = undefined;
+        }
+    }
+
+    let showAfterDelay = $state(true);
+    let connectingTimer: ReturnType<typeof setTimeout> | null = null;
+    let markStreamableReadyTimer: ReturnType<typeof setTimeout> | undefined = $state();
+
+    // When the status is "connecting", do not show the loader for 500ms to avoid visual glitches during fast connections.
+    // EXCEPT when reconnecting: in that case, show the loader immediately to avoid black screen.
+    function updateShowAfterDelay(status: string | undefined, reconnecting: boolean): void {
+        if (status === "reconnecting") {
+            // Reconnecting: show loader immediately (no delay) to avoid black screen
+            showAfterDelay = true;
+            if (connectingTimer) {
+                clearTimeout(connectingTimer);
+                connectingTimer = null;
+            }
+        } else if (status === "connecting") {
+            // Initial connection: wait 500ms before showing loader
+            showAfterDelay = false;
+            if (connectingTimer) clearTimeout(connectingTimer);
+            connectingTimer = setTimeout(() => {
+                showAfterDelay = true;
+            }, 500);
+        } else {
+            showAfterDelay = true;
+            if (connectingTimer) {
+                clearTimeout(connectingTimer);
+                connectingTimer = null;
+            }
+        }
+    }
+
+    $effect(() => {
+        updateShowAfterDelay(effectiveStatus, isReconnecting);
+    });
+
+    function highlightPeer() {
+        highlightedEmbedScreen.highlight(videoBox);
+        analyticsClient.trackAdminEvent("meeting.participant.pinned", meetingOf(videoBox.spaceUser.space));
+        window.focus();
+    }
+
+    // Enlarge the shared screen and enter drawing mode in a single click.
+    function startAnnotating(targetUserId: string) {
+        highlightPeer();
+        localAnnotationTargetStore.set(targetUserId);
+    }
+
+    onMount(() => {
+        blackListSubject = blackListManager.onBlockStream.subscribe(() => {
+            blackListVersion += 1;
+        });
+        unBlackListSubject = blackListManager.onUnBlockStream.subscribe(() => {
+            blackListVersion += 1;
+        });
+    });
+
+    onDestroy(() => {
+        blackListSubject?.unsubscribe();
+        unBlackListSubject?.unsubscribe();
+        closeFloatingUi?.();
+        if (connectingTimer) clearTimeout(connectingTimer);
+        if (markStreamableReadyTimer) clearTimeout(markStreamableReadyTimer);
+    });
+</script>
+
+<div
+    {@attach blocker}
+    class="group/screenshare relative flex justify-center mx-auto h-full w-full @container/videomediabox z-20 select-none"
+>
+    <div
+        class={"w-full transition-all bg-center bg-no-repeat " +
+            (fullScreen || effectiveStatus !== "connected"
+                ? effectiveStatus === "connecting" || effectiveStatus === "reconnecting"
+                    ? "bg-gray-700/80 backdrop-blur"
+                    : "bg-contrast/80 backdrop-blur"
+                : "")}
+        style={videoEnabled && effectiveStatus === "connecting" ? "background-image: url(" + loaderImg + ")" : ""}
+        class:h-full={videoEnabled || !miniMode}
+        class:h-11={!videoEnabled && miniMode}
+        class:flex-col={videoEnabled}
+        class:items-center={!videoEnabled || effectiveStatus === "connecting" || effectiveStatus === "reconnecting"}
+        class:flex-row={!videoEnabled}
+        class:relative={!videoEnabled}
+        class:rounded-lg={!fullScreen}
+        class:justify-center={effectiveStatus === "connecting" || effectiveStatus === "reconnecting"}
+    >
+        <!-- Status messages based on connection state -->
+        {#if (effectiveStatus === "connecting" || effectiveStatus === "reconnecting" || effectiveStatus === "error") && showAfterDelay}
+            <!-- Connecting/Reconnecting state: show spinner with appropriate message -->
+            <div class="absolute w-full h-full overflow-hidden">
+                <div
+                    class="flex w-8 h-8 justify-center items-center absolute right-2 top-2 @[22rem]/videomediabox:w-full @[22rem]/videomediabox:right-auto @[22rem]/videomediabox:top-auto @[22rem]/videomediabox:h-full @[22rem]/videomediabox:justify-center @[22rem]/videomediabox:items-center @[22rem]/videomediabox:right-none @[22rem]/videomediabox:top-none"
+                >
+                    <div class="connecting-spinner"></div>
+                </div>
+            </div>
+            <div class="absolute w-full h-full pointer-events-none">
+                <div class="w-full h-full flex flex-col justify-end items-center pb-4">
+                    {#if effectiveStatus === "error"}
+                        <!-- Persistent issue: show warning message while still reconnecting -->
+                        <div class="text-lg text-white font-bold text-center px-4">
+                            {$LL.video.persistent_connection_issue()}
+                        </div>
+                    {:else}
+                        <div class="text-lg text-white font-bold">
+                            {#if isReconnecting}
+                                {$LL.video.reconnecting()}
+                            {:else}
+                                {$LL.video.connecting()}
+                            {/if}
+                        </div>
+                    {/if}
+                </div>
+            </div>
+        {/if}
+
+        {#if showAfterDelay}
+            {#each streamableEntries as streamableEntry (streamableEntry.id)}
+                <div
+                    class="absolute inset-0"
+                    class:pointer-events-none={streamableEntry.isPending}
+                    style={streamableEntry.isPending ? "opacity: 0" : undefined}
+                >
+                    <CenteredVideo
+                        media={streamableEntry.streamable.media}
+                        videoEnabled={streamableEntry.isPending ? true : (videoEnabled ?? false)}
+                        status={streamableEntry.isPending ? "connected" : effectiveStatus}
+                        verticalAlign={!inCameraContainer && !inHighlightFullscreenParticipantList && !fullScreen
+                            ? "top"
+                            : "center"}
+                        isTalking={streamableEntry.isPending ? false : (showVoiceIndicator ?? false)}
+                        flipX={streamableEntry.streamable.flipX ?? false}
+                        cover={streamableEntry.streamable.displayMode === "cover" &&
+                            (inCameraContainer || inHighlightFullscreenParticipantList || fullScreen)}
+                        isBlocked={streamableEntry.isPending ? false : ($isBlockedStore ?? false)}
+                        withBackground={streamableEntry.isPending
+                            ? false
+                            : ((((inCameraContainer || inHighlightFullscreenParticipantList) &&
+                                  effectiveStatus !== "connecting" &&
+                                  effectiveStatus !== "reconnecting") ||
+                                  $isBlockedStore) ??
+                              false)}
+                        isMegaphoneSpace={streamableEntry.isPending
+                            ? false
+                            : (isMegaphoneSpace && $megaphoneState) || isLocalUserStreamingMegaphone || false}
+                        onnoVideo={() => reportMissingVideo(streamableEntry)}
+                        onvideo={() => {
+                            markStreamableReadyTimer = setTimeout(() => {
+                                if (streamableEntry.isPending) {
+                                    videoBox.markPendingStreamableReady(streamableEntry.id);
+                                }
+                                markStreamableReadyTimer = undefined;
+                                // Even by waiting the first frame, we see a first glitch.
+                                // Maybe the first LiveKit frame is not correctly rendered?
+                                // We noticed waiting a bit makes the glitch disappear.
+                            }, 200);
+                        }}
+                    >
+                        {#snippet children(videoDisplayed: boolean)}
+                            {#if !streamableEntry.isPending && activeUserName}
+                                <UserName
+                                    name={name ?? "unknown"}
+                                    picture={pictureStore}
+                                    isPlayingAudio={showVoiceIndicator ?? false}
+                                    {isHandRaised}
+                                    isCameraDisabled={!awayCameraHeld &&
+                                        ((!(videoEnabled ?? false) && !miniMode) || effectiveStatus !== "connected")}
+                                    isBlocked={$isBlockedStore ?? false}
+                                    position={(videoEnabled || awayCameraHeld) &&
+                                    !$isBlockedStore &&
+                                    effectiveStatus === "connected"
+                                        ? "absolute bottom-0 left-0 @[17.5rem]/videomediabox:bottom-2 @[17.5rem]/videomediabox:left-2"
+                                        : "absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2"}
+                                    grayscale={effectiveStatus === "connecting" || effectiveStatus === "reconnecting"}
+                                >
+                                    {#snippet leading()}
+                                        <!-- Only by the centered Woka: a visible camera or the held overlay already tells -->
+                                        {#if away && !videoEnabled && !awayCameraHeld}
+                                            <span
+                                                role="img"
+                                                aria-label={$LL.video.remoteAway.inAnotherWindow({
+                                                    name: name ?? "unknown",
+                                                })}
+                                                title={$LL.video.remoteAway.inAnotherWindow({
+                                                    name: name ?? "unknown",
+                                                })}
+                                                class="me-1.5 inline-block h-2 w-2 shrink-0 rounded-full align-middle"
+                                                style:background-color={getColorHexOfStatus(AvailabilityStatus.AWAY)}
+                                                data-testid="away-notice"
+                                            ></span>
+                                        {/if}
+                                    {/snippet}
+                                    <RaisedHandBadge
+                                        spaceUserId={raisedHandSpaceUserId}
+                                        spaceName={raisedHandSpaceName}
+                                    />
+                                    {#if extendedSpaceUser && extendedSpaceUser.spaceUserId !== "local"}
+                                        <div
+                                            class="flex items-center justify-center picture-in-picture:hidden"
+                                            bind:this={userMenuButton}
+                                        >
+                                            <UpDownChevron enabled={showUserSubMenu} onclick={toggleUserMenu} />
+                                        </div>
+                                    {/if}
+                                </UserName>
+
+                                {#if effectiveStatus === "connected" && !$isBlockedStore}
+                                    <div
+                                        class="z-[251] absolute p-2 right-1 white"
+                                        class:top-1={videoEnabled}
+                                        class:top-0={!videoEnabled}
+                                        class:text-white={$activePictureInPictureStore}
+                                        class:opacity-20={$activePictureInPictureStore}
+                                    >
+                                        {#if $hasAudioStore && !remoteMicrophoneMuted && !audioStateMismatch}
+                                            <SoundMeterWidget
+                                                volume={volumeMeter}
+                                                cssClass="voice-meter-cam-off relative mr-0 ml-auto translate-x-0 transition-transform"
+                                                barColor="white"
+                                            />
+                                        {:else if streamable?.videoType === "video"}
+                                            <span class="relative flex">
+                                                <IconMicrophoneOff
+                                                    aria-label={$LL.video.user_is_muted({ name: name ?? "unknown" })}
+                                                    data-testid={$LL.video.user_is_muted({ name: name ?? "unknown" })}
+                                                    class="{showAudioStateMismatch
+                                                        ? 'text-red-500 '
+                                                        : ''}{$microphoneHeldStore
+                                                        ? 'opacity-50 '
+                                                        : ''}[filter:drop-shadow(0_0_3px_rgb(0,0,0))_drop-shadow(0_0_6px_rgb(0,0,0))_drop-shadow(0_0_9px_rgb(0,0,0))]"
+                                                />
+                                                <!-- Held off by their status, as on the action bar's buttons: comes back with them -->
+                                                {#if $microphoneHeldStore && $availabilityStatusStore !== undefined}
+                                                    <span
+                                                        class="absolute -top-0.5 -end-0.5 h-2 w-2 rounded-full"
+                                                        style:background-color={getColorHexOfStatus(
+                                                            $availabilityStatusStore,
+                                                        )}
+                                                    ></span>
+                                                {/if}
+                                            </span>
+                                        {/if}
+                                    </div>
+                                {/if}
+                                {#if awayCameraHeld}
+                                    <!-- The shutter of the user's own tile (AwayPausedOverlay), seen from the visitor's side -->
+                                    {@const awayText = $LL.video.remoteAway.inAnotherWindow({
+                                        name: name ?? "unknown",
+                                    })}
+                                    {@const awayDetail = $microphoneHeldStore
+                                        ? $LL.video.remoteAway.cameraAndMicPaused()
+                                        : $LL.video.remoteAway.cameraPaused()}
+                                    <div
+                                        class="absolute inset-0 z-[251] pointer-events-none flex flex-col items-center justify-center rounded-lg border border-dashed border-warning/60 px-4 pb-8 text-center text-white"
+                                        data-testid="away-camera-held"
+                                    >
+                                        <!-- Small tiles keep only the icon, with the text in its tooltip -->
+                                        <div
+                                            class="pointer-events-auto flex flex-col items-center gap-0.5"
+                                            title="{awayText}. {awayDetail}"
+                                        >
+                                            <IconEyeOff class="text-warning shrink-0" font-size="20" />
+                                            <div class="hidden @[14rem]/videomediabox:block text-sm leading-tight">
+                                                {awayText}
+                                            </div>
+                                            <div class="hidden @[14rem]/videomediabox:block text-xs text-white/60">
+                                                {awayDetail}
+                                            </div>
+                                        </div>
+                                    </div>
+                                {/if}
+                                {#if webRtcStats}
+                                    <WebRtcStats {webRtcStats} />
+                                {/if}
+                                {#if encoderStats}
+                                    <EncoderStatsBox {encoderStats} />
+                                {/if}
+
+                                <!-- The menu to go fullscreen -->
+                                {#if !inCameraContainer && videoEnabled}
+                                    <div
+                                        class="absolute m-auto top-0 right-0 left-0 z-[256] h-14 w-fit rounded-lg bg-contrast/50 backdrop-blur transition-all opacity-0 hover:!opacity-100 group-hover/centered-video:opacity-20 [@media(pointer:coarse)]:opacity-100 flex items-center justify-center cursor-pointer"
+                                    >
+                                        <div class="h-full w-full flex flex-row justify-evenly cursor-pointer">
+                                            {#if !fullScreen && !$highlightFullScreen}
+                                                <button
+                                                    class="svg p-4 h-full w-full hover:bg-white/10 flex justify-start items-center z-25 rounded-lg text-base"
+                                                    onclick={removeHighlight}
+                                                    data-testid="highlight-minimize-button"
+                                                >
+                                                    <IconArrowsMinimize font-size="20" class="text-white" />
+                                                </button>
+                                            {/if}
+                                            {#if fullScreen}
+                                                <button
+                                                    class="muted-video p-4 h-full w-full hover:bg-white/10 flex justify-start cursor-pointer items-center z-25 rounded-lg text-base"
+                                                    onclick={exitFullScreen}
+                                                >
+                                                    <IconArrowsMinimize font-size="20" class="text-white" />
+                                                </button>
+                                            {:else}
+                                                <button
+                                                    class="muted-video p-4 h-full w-full hover:bg-white/10 flex justify-start cursor-pointer items-center z-25 rounded-lg text-base"
+                                                    onclick={setFullScreen}
+                                                    data-testid="highlight-enter-fullscreen-button"
+                                                >
+                                                    <IconArrowsMaximize font-size="20" class="text-white" />
+                                                </button>
+                                            {/if}
+                                        </div>
+                                    </div>
+                                {/if}
+                            {/if}
+
+                            <!-- Annotation layer: on the image of the enlarged shared screen only (not in the camera grid,
+                             nor over a placeholder while the image is missing) -->
+                            {#if streamableEntry.streamable.videoType === "screenSharing" && !inCameraContainer && videoDisplayed}
+                                {@const annotationTargetUserId = isLocalUser
+                                    ? screenAnnotationManager.localUserId
+                                    : streamableEntry.streamable.spaceUserId}
+                                {#if annotationTargetUserId}
+                                    {@const canDraw =
+                                        isLocalUser ||
+                                        ($screenAnnotationEnabledStore.get(annotationTargetUserId) ?? false)}
+                                    {@const effectStream =
+                                        streamableEntry.streamable.media.type === "webrtc" ||
+                                        streamableEntry.streamable.media.type === "livekit"
+                                            ? streamableEntry.streamable.media.streamStore
+                                            : undefined}
+                                    <ScreenAnnotationOverlay targetUserId={annotationTargetUserId} {canDraw} />
+                                    <PresenterEffectsOverlay
+                                        targetUserId={annotationTargetUserId}
+                                        stream={effectStream}
+                                    />
+                                    {#if canDraw}
+                                        <ScreenAnnotationToolbar
+                                            targetUserId={annotationTargetUserId}
+                                            isPresenter={isLocalUser}
+                                        />
+                                    {/if}
+                                {/if}
+                            {/if}
+                        {/snippet}
+                    </CenteredVideo>
+                </div>
+            {/each}
+        {/if}
+    </div>
+
+    {#if isLocalUser && streamable?.videoType === "video"}
+        <AwayPausedOverlay />
+    {/if}
+
+    {#if inCameraContainer && videoEnabled && $isBlockedStore === false}
+        {@const isScreenShare = streamable?.videoType === "screenSharing"}
+        {@const annotationTargetUserId = isLocalUser ? screenAnnotationManager.localUserId : streamable?.spaceUserId}
+        {@const canAnnotate =
+            isScreenShare &&
+            !!annotationTargetUserId &&
+            (isLocalUser || ($screenAnnotationEnabledStore.get(annotationTargetUserId) ?? false))}
+        <div
+            class="absolute top-0 bottom-0 right-0 left-0 m-auto h-14 w-fit z-20 flex items-center justify-center gap-2 opacity-0 group-hover/screenshare:opacity-100 [@media(pointer:coarse)]:opacity-100 transition-all"
+        >
+            <button
+                class="full-screen-button h-14 w-14 p-4 rounded-lg bg-contrast/50 backdrop-blur hover:bg-white/10 cursor-pointer"
+                data-testid={isScreenShare ? "screenshare-fullscreen-button" : undefined}
+                onclick={highlightPeer}
+            >
+                <IconArrowsMaximize font-size="20" class="text-white" />
+            </button>
+            {#if canAnnotate}
+                <button
+                    class="h-14 w-14 p-4 rounded-lg bg-contrast/50 backdrop-blur hover:bg-white/10 cursor-pointer"
+                    data-testid="screenshare-annotate-button"
+                    title={$LL.screenAnnotation.startAnnotating()}
+                    aria-label={$LL.screenAnnotation.startAnnotating()}
+                    onclick={() => {
+                        if (annotationTargetUserId) {
+                            startAnnotating(annotationTargetUserId);
+                        }
+                    }}
+                >
+                    <IconPencil font-size="20" class="text-white" />
+                </button>
+            {/if}
+        </div>
+    {/if}
+
+    {#if isCurrentUserBlackListed}
+        <!-- svelte-ignore a11y_click_events_have_key_events -->
+        <!-- svelte-ignore a11y_no_static_element_interactions -->
+        <div
+            class="absolute w-full h-full aspect-video mx-auto flex justify-center items-center bg-contrast/50 rounded-lg z-20 cursor-pointer"
+            onclick={() => {
+                if (userUuid !== undefined) blackListManager.cancelBlackList(userUuid);
+                if (spaceUserId !== undefined) blackListManager.cancelBlackList(spaceUserId);
+            }}
+            data-testid="click-to-unblock"
+        >
+            <div class="text-center">
+                <div class="text-lg text-white bold">{$LL.video.click_to_unblock()}</div>
+            </div>
+        </div>
+    {/if}
+</div>
+
+<style>
+    /* Spinner */
+    .connecting-spinner {
+        display: flex;
+        left: calc(50% - 62px);
+        top: calc(50% - 62px);
+
+        /*width: 6rem;*/
+        height: 75%;
+        aspect-ratio: 1 / 1;
+    }
+
+    .connecting-spinner:after {
+        content: " ";
+        display: block;
+        height: 100%;
+        aspect-ratio: 1 / 1;
+        border-radius: 50%;
+        border: 6px solid var(--color-light-blue);
+        border-color: var(--color-light-blue) transparent var(--color-light-blue) transparent;
+        animation: connecting-spinner 1.2s linear infinite;
+    }
+
+    @keyframes connecting-spinner {
+        0% {
+            transform: rotate(0deg);
+        }
+        100% {
+            transform: rotate(360deg);
+        }
+    }
+
+    .rtc-error {
+        left: calc(50% - 68px);
+        top: calc(42% - 68px);
+
+        width: 8rem;
+        height: 8rem;
+    }
+
+    .rtc-error:after {
+        content: " ";
+        display: block;
+        width: 8rem;
+        height: 8rem;
+        border-radius: 50%;
+        border: 6px solid #f00;
+        animation: blinker 1s linear infinite;
+    }
+
+    @keyframes blinker {
+        50% {
+            opacity: 0;
+        }
+    }
+
+    /* Black outline for mute icon SVG */
+    /* Black outline for mute icon SVG */
+    /* :global(.mute-icon-outline svg) {
+        filter: drop-shadow(0 0 3px rgb(0, 0, 0)) drop-shadow(0 0 6px rgb(0, 0, 0))
+            drop-shadow(0 0 9px rgb(0, 0, 0));
+    } */
+
+    /* Styles for mute icon SVG paths */
+    :global(.mute-icon svg path) {
+        stroke: #646464;
+        stroke-width: 1px;
+        stroke-dasharray: 2, 2;
+        stroke-linejoin: round;
+    }
+</style>

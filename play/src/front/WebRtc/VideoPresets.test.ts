@@ -1,0 +1,256 @@
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { negotiableVideoCodecs, preferredVideoCodecs, selectVideoPreset, videoCodecFromMimeType } from "./VideoPresets";
+import { isAndroid, isIOS } from "./DeviceUtils";
+import { codecPerformance, demotedCodecStore, retryGranted } from "./CodecPerformance";
+
+vi.mock("./DeviceUtils", () => ({ isAndroid: vi.fn(() => false), isIOS: vi.fn(() => false) }));
+vi.mock("./CodecPerformance", async () => ({
+    codecPerformance: vi.fn(() => undefined),
+    retryGranted: vi.fn(() => false),
+    demotedCodecStore: {
+        video: (await import("svelte/store")).writable(undefined),
+        screenSharing: (await import("svelte/store")).writable(undefined),
+    },
+}));
+
+describe("preferredVideoCodecs", () => {
+    const verdict = (smooth: boolean, powerEfficient = false) => ({ supported: true, smooth, powerEfficient });
+
+    beforeEach(() => {
+        vi.mocked(isAndroid).mockReturnValue(false);
+        vi.mocked(isIOS).mockReturnValue(false);
+        vi.mocked(codecPerformance).mockReturnValue(undefined);
+        vi.mocked(retryGranted).mockReturnValue(false);
+        demotedCodecStore.video.set(undefined);
+        demotedCodecStore.screenSharing.set(undefined);
+    });
+
+    it("leaves out a codec demoted this session, and every codec above it", () => {
+        demotedCodecStore.screenSharing.set("vp9");
+
+        expect(preferredVideoCodecs("screenSharing", "recommended", "encode", 1920 * 1080, "P2P")).toEqual(["h264"]);
+        expect(preferredVideoCodecs("screenSharing", "recommended", "decode", 1920 * 1080, "P2P")).toEqual(["h264"]);
+        expect(negotiableVideoCodecs("screenSharing", "recommended")).toEqual(["h264"]);
+        // Categories are independent
+        expect(preferredVideoCodecs("video", "recommended", "encode", 1280 * 720, "P2P")).toEqual(["vp9", "h264"]);
+    });
+
+    it("keeps AV1 for a screen share unless the quality setting is low, H.264 as the floor, without a verdict", () => {
+        expect(preferredVideoCodecs("screenSharing", "recommended", "encode", 1920 * 1080, "P2P")).toEqual([
+            "av1",
+            "vp9",
+            "h264",
+        ]);
+        expect(preferredVideoCodecs("screenSharing", "low", "encode", 1920 * 1080, "P2P")).toEqual(["vp9", "h264"]);
+        expect(preferredVideoCodecs("video", "high", "encode", 1280 * 720, "P2P")).toEqual(["vp9", "h264"]);
+    });
+
+    it("drops a codec the browser remembers as not smooth at that size", () => {
+        vi.mocked(codecPerformance).mockImplementation((_direction, codec, pixels) =>
+            codec === "vp9" ? verdict(pixels <= 640 * 360) : verdict(false),
+        );
+        expect(preferredVideoCodecs("screenSharing", "high", "encode", 1920 * 1080, "P2P")).toEqual(["h264"]);
+        expect(preferredVideoCodecs("video", "high", "encode", 1280 * 720, "P2P")).toEqual(["h264"]);
+        expect(preferredVideoCodecs("video", "high", "encode", 480 * 270, "P2P")).toEqual(["vp9", "h264"]);
+        expect(codecPerformance).toHaveBeenCalledWith("encode", "vp9", 480 * 270);
+    });
+
+    it("retries a not smooth codec when the weekly retry is granted", () => {
+        vi.mocked(codecPerformance).mockReturnValue(verdict(false));
+        vi.mocked(retryGranted).mockReturnValue(true);
+        expect(preferredVideoCodecs("video", "high", "decode", 1280 * 720, "P2P")).toEqual(["vp9", "h264"]);
+        expect(retryGranted).toHaveBeenCalledWith("decode", "vp9");
+    });
+
+    it("never retries an unsupported codec", () => {
+        vi.mocked(codecPerformance).mockReturnValue({ supported: false, smooth: false, powerEfficient: false });
+        vi.mocked(retryGranted).mockReturnValue(true);
+        expect(preferredVideoCodecs("screenSharing", "high", "encode", 1920 * 1080, "P2P")).toEqual(["h264"]);
+    });
+
+    it("only gives a phone codecs its hardware handles", () => {
+        vi.mocked(isAndroid).mockReturnValue(true);
+        expect(preferredVideoCodecs("video", "high", "encode", 1280 * 720, "P2P")).toEqual(["h264"]);
+        vi.mocked(codecPerformance).mockImplementation((_direction, codec) =>
+            codec === "vp9" ? verdict(true, true) : verdict(true, false),
+        );
+        expect(preferredVideoCodecs("screenSharing", "high", "encode", 1280 * 720, "P2P")).toEqual(["vp9", "h264"]);
+        expect(preferredVideoCodecs("video", "high", "decode", 1280 * 720, "P2P")).toEqual(["vp9", "h264"]);
+    });
+
+    it("skips a software H.264 on LiveKit for VP8, smooth or not", () => {
+        // Chrome on a Mac: Constrained Baseline is OpenH264, whatever its history says
+        vi.mocked(codecPerformance).mockImplementation((_direction, codec) => verdict(codec === "h264"));
+        expect(preferredVideoCodecs("video", "recommended", "encode", 1280 * 720, "Livekit")).toEqual(["vp8"]);
+        vi.mocked(codecPerformance).mockReturnValue(verdict(true));
+        expect(preferredVideoCodecs("video", "recommended", "encode", 1280 * 720, "Livekit")).toEqual(["vp9", "vp8"]);
+        // P2P negotiates Baseline, hardware there: H.264 stays the floor whatever the verdict
+        vi.mocked(codecPerformance).mockReturnValue(verdict(false));
+        expect(preferredVideoCodecs("video", "recommended", "encode", 1280 * 720, "P2P")).toEqual(["h264"]);
+
+        // A hardware H.264, or no verdict at all, is kept as before, on a phone too
+        vi.mocked(codecPerformance).mockImplementation((_direction, codec) =>
+            codec === "h264" ? verdict(false, true) : undefined,
+        );
+        expect(preferredVideoCodecs("video", "recommended", "encode", 1280 * 720, "Livekit")).toEqual([
+            "vp9",
+            "h264",
+            "vp8",
+        ]);
+        vi.mocked(isIOS).mockReturnValue(true);
+        vi.mocked(codecPerformance).mockReturnValue(undefined);
+        expect(preferredVideoCodecs("video", "high", "encode", 1280 * 720, "Livekit")).toEqual(["h264", "vp8"]);
+    });
+
+    it("leaves a demoted H.264 for VP8 on LiveKit, and keeps it in P2P", () => {
+        demotedCodecStore.video.set("h264");
+
+        expect(preferredVideoCodecs("video", "recommended", "encode", 1280 * 720, "Livekit")).toEqual(["vp8"]);
+        expect(preferredVideoCodecs("video", "recommended", "encode", 1280 * 720, "P2P")).toEqual(["h264"]);
+        expect(negotiableVideoCodecs("video", "recommended")).toEqual(["h264"]);
+    });
+});
+
+describe("selectVideoPreset", () => {
+    // LiveKit bitrate guide for VP9, the tables the camera curve is fitted on: webcam (VMAF 90) for "recommended",
+    // gaming (VMAF 85) for "high"
+    const reference: [number, number, { recommended: number; high: number }][] = [
+        [160, 90, { recommended: 35_000, high: 80_000 }],
+        [320, 180, { recommended: 90_000, high: 210_000 }],
+        [640, 360, { recommended: 270_000, high: 550_000 }],
+        [960, 540, { recommended: 450_000, high: 1_100_000 }],
+        [1280, 720, { recommended: 700_000, high: 1_800_000 }],
+        [1920, 1080, { recommended: 1_200_000, high: 4_000_000 }],
+    ];
+
+    it("stays within 20 % of the LiveKit camera tables", () => {
+        for (const [width, height, bitrates] of reference) {
+            for (const quality of ["recommended", "high"] as const) {
+                const { bitrate } = selectVideoPreset(height, width, false, quality, "vp9");
+                expect(bitrate / bitrates[quality], `${width}x${height} ${quality}`).toBeGreaterThan(0.8);
+                expect(bitrate / bitrates[quality], `${width}x${height} ${quality}`).toBeLessThan(1.2);
+            }
+        }
+    });
+
+    it("gives a 'low' camera the bitrate of 'recommended' at each size, and saves on the frame rate", () => {
+        for (const [width, height] of reference) {
+            for (const codec of ["av1", "vp9", "h264", "vp8"] as const) {
+                const low = selectVideoPreset(height, width, false, "low", codec);
+                const recommended = selectVideoPreset(height, width, false, "recommended", codec);
+                expect(low.bitrate, `${width}x${height} ${codec}`).toBe(recommended.bitrate);
+                expect(low.fps, `${width}x${height} ${codec}`).toBeLessThan(recommended.fps);
+            }
+        }
+    });
+
+    it("budgets a 'low' 360p camera above what libwebrtc wants to send a single layer at that size", () => {
+        // GetDefaultSinglecastBitrateLimits: below it, the encoder sends a smaller picture than the captured one
+        expect(selectVideoPreset(360, 640, false, "low", "vp9").bitrate).toBeGreaterThan(190_000);
+        expect(selectVideoPreset(360, 640, false, "low", "vp8").bitrate).toBeGreaterThan(300_000);
+    });
+
+    it("budgets a three-layer SVC camera above what libwebrtc needs to enable its top layer", () => {
+        // VP9 L3T3_KEY: the bitrate at which SvcRateAllocator enables the top spatial layer, from the layer bitrates of
+        // svc_config.cc. Below 960x540 libwebrtc drops the layers smaller than 240x135, leaving two.
+        const topLayerStart: [number, number, number][] = [
+            [640, 360, 299_000],
+            [640, 480, 367_000],
+            [960, 540, 624_000],
+            [1280, 720, 891_000],
+            [1920, 1080, 1_425_000],
+        ];
+        for (const [width, height, start] of topLayerStart) {
+            // The one-layer budget falls short: the stream would stay one layer down
+            expect(selectVideoPreset(height, width, false, "recommended", "vp9").bitrate).toBeLessThan(start);
+            for (const quality of ["recommended", "high"] as const) {
+                const { bitrate } = selectVideoPreset(height, width, false, quality, "vp9", 3);
+                expect(bitrate, `${width}x${height} ${quality}`).toBeGreaterThan(start);
+            }
+        }
+    });
+
+    it("keeps the screen share budget: sqrt of the pixel ratio to 1080p, capped there", () => {
+        expect(selectVideoPreset(1080, 1920, true, "recommended", "av1").bitrate).toBe(3_000_000);
+        expect(selectVideoPreset(720, 1280, true, "recommended", "av1").bitrate).toBe(2_000_000);
+        expect(selectVideoPreset(1440, 2560, true, "recommended", "av1").bitrate).toBe(3_000_000);
+        expect(selectVideoPreset(1080, 1920, true, "low", "av1").bitrate).toBe(1_000_000);
+        expect(selectVideoPreset(1080, 1920, true, "high", "av1").bitrate).toBe(4_500_000);
+    });
+
+    it("is continuous: a one pixel change does not jump", () => {
+        const a = selectVideoPreset(360, 640, false, "recommended", "vp9").bitrate;
+        const b = selectVideoPreset(361, 641, false, "recommended", "vp9").bitrate;
+        expect(b / a).toBeLessThan(1.01);
+    });
+
+    it("budgets anything above 1080p like 1080p", () => {
+        expect(selectVideoPreset(2160, 3840, false, "high", "vp9")).toEqual(
+            selectVideoPreset(1080, 1920, false, "high", "vp9"),
+        );
+    });
+
+    it("raises the bitrate for a cheaper codec", () => {
+        const av1 = selectVideoPreset(1080, 1920, true, "recommended", "av1");
+        const vp9 = selectVideoPreset(1080, 1920, true, "recommended", "vp9");
+        const vp8 = selectVideoPreset(1080, 1920, true, "recommended", "vp8");
+        expect(vp9.bitrate).toBe(4_200_000);
+        expect(vp8.bitrate).toBe(6_000_000);
+        expect(selectVideoPreset(1080, 1920, true, "recommended", "h264").bitrate).toBe(6_000_000);
+        expect(vp8.fps).toBe(av1.fps);
+        // The camera anchors are VP9 values
+        expect(selectVideoPreset(720, 1280, false, "recommended", "vp9").bitrate).toBe(700_000);
+        expect(selectVideoPreset(720, 1280, false, "recommended", "vp8").bitrate).toBe(1_000_000);
+    });
+
+    it("lowers the camera frame rate on small tiles", () => {
+        expect(selectVideoPreset(360, 640, false, "low", "vp9").fps).toBe(15);
+        expect(selectVideoPreset(720, 1280, false, "low", "vp9").fps).toBe(20);
+        expect(selectVideoPreset(360, 640, false, "recommended", "vp9").fps).toBe(20);
+        expect(selectVideoPreset(720, 1280, false, "recommended", "vp9").fps).toBe(30);
+        expect(selectVideoPreset(90, 160, false, "high", "vp9").fps).toBe(30);
+        expect(selectVideoPreset(360, 640, true, "low", "av1").fps).toBe(30);
+    });
+});
+
+describe("negotiableVideoCodecs", () => {
+    beforeEach(() => {
+        vi.mocked(isAndroid).mockReturnValue(false);
+        vi.mocked(isIOS).mockReturnValue(false);
+        vi.mocked(retryGranted).mockReturnValue(false);
+        demotedCodecStore.video.set(undefined);
+        demotedCodecStore.screenSharing.set(undefined);
+    });
+
+    it("keeps only what can be encoded, in decode preference order: an iPhone gets H.264 both ways", () => {
+        vi.mocked(isIOS).mockReturnValue(true);
+        vi.mocked(codecPerformance).mockImplementation((direction, codec) => {
+            if (codec === "h264") {
+                return { supported: true, smooth: true, powerEfficient: true };
+            }
+            if (codec === "vp9") {
+                // Hardware decoder, software encoder
+                return { supported: true, smooth: direction === "decode", powerEfficient: direction === "decode" };
+            }
+            return { supported: false, smooth: false, powerEfficient: false };
+        });
+        expect(preferredVideoCodecs("video", "high", "decode", 1280 * 720, "P2P")).toEqual(["vp9", "h264"]);
+        expect(negotiableVideoCodecs("video", "high")).toEqual(["h264"]);
+        vi.mocked(isIOS).mockReturnValue(false);
+    });
+
+    it("is the decode list when everything can be encoded", () => {
+        vi.mocked(isIOS).mockReturnValue(false);
+        vi.mocked(codecPerformance).mockReturnValue(undefined);
+        expect(negotiableVideoCodecs("screenSharing", "high")).toEqual(["av1", "vp9", "h264"]);
+    });
+});
+
+describe("videoCodecFromMimeType", () => {
+    it("reads the negotiated codec", () => {
+        expect(videoCodecFromMimeType("video/VP9")).toBe("vp9");
+        expect(videoCodecFromMimeType("video/H264")).toBe("h264");
+        expect(videoCodecFromMimeType("video/rtx")).toBeUndefined();
+        expect(videoCodecFromMimeType(undefined)).toBeUndefined();
+    });
+});

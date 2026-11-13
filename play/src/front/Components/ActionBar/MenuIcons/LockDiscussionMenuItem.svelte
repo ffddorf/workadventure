@@ -1,0 +1,206 @@
+<script lang="ts">
+    import type { LockableAreaPropertyData } from "@workadventure/map-editor";
+    import { onDestroy } from "svelte";
+    import { SvelteSet } from "svelte/reactivity";
+    import { analyticsClient } from "../../../Administration/AnalyticsClient";
+    import LockIcon from "../../Icons/LockIcon.svelte";
+    import ActionBarButton from "../ActionBarButton.svelte";
+    import LockOpenIcon from "../../Icons/LockOpenIcon.svelte";
+    import LL from "../../../../i18n/i18n-svelte";
+    import { openedMenuStore } from "../../../Stores/MenuStore";
+    import { currentPlayerGroupLockStateStore } from "../../../Stores/CurrentPlayerGroupStore";
+    import {
+        currentPlayerLockableAreasStore,
+        type LockableAreaEntry,
+    } from "../../../Stores/CurrentPlayerAreaLockStore";
+    import { gameManager } from "../../../Phaser/Game/GameManager";
+    import { setAreaPropertyLockState } from "../../../Stores/AreaPropertyVariablesStore";
+    import { showFloatingUi } from "../../../Utils/svelte-floatingui-show";
+    import LockableAreaPicker from "../../PopUp/LockableAreaPicker.svelte";
+
+    function lockGroupClick() {
+        gameManager.getCurrentGameScene().connection?.emitLockGroup(!$currentPlayerGroupLockStateStore);
+    }
+
+    function entryKey(entry: LockableAreaEntry): string {
+        return `${entry.areaId}:${entry.propertyId}`;
+    }
+
+    function lockAreaClick(entry: LockableAreaEntry) {
+        const newLockState = !entry.lockState;
+        setAreaPropertyLockState(entry.areaId, entry.propertyId, newLockState);
+        analyticsClient.trackAdminEvent("map_editor.area.lock.toggled", {
+            areaId: entry.areaId,
+            areaName: entry.areaName,
+            locked: newLockState,
+        });
+        if (newLockState) {
+            const areasManager = gameManager.getCurrentGameScene().getGameMapFrontWrapper().areasManager;
+            areasManager?.flashAreaAsLocked(entry.areaId);
+        }
+    }
+
+    function canLockEntry(entry: LockableAreaEntry): boolean {
+        const scene = gameManager.getCurrentGameScene();
+        const gameMapAreas = scene.getGameMapFrontWrapper().getGameMap()?.getWamFile()?.getGameMapAreas();
+        if (!gameMapAreas) {
+            return false;
+        }
+        const area = gameMapAreas.getArea(entry.areaId);
+        if (!area) {
+            return false;
+        }
+        const lockableProperty = area.properties.find(
+            (property): property is LockableAreaPropertyData => property.type === "lockableAreaPropertyData",
+        );
+        if (!lockableProperty) {
+            return false;
+        }
+        if (!lockableProperty.allowedTags || lockableProperty.allowedTags.length === 0) {
+            return true;
+        }
+        const userTags = scene.connection?.getAllTags() ?? [];
+        const userTagsSet = new Set(userTags);
+        return lockableProperty.allowedTags.some((tag) => userTagsSet.has(tag));
+    }
+
+    let lockableAreas = $derived($currentPlayerLockableAreasStore);
+    let showAreaLock = $derived(lockableAreas.length > 0);
+    let showGroupLock = $derived(!showAreaLock && $currentPlayerGroupLockStateStore !== undefined);
+
+    let areasWithPermission = $derived(
+        (() => {
+            const set = new SvelteSet<string>();
+            for (const entry of lockableAreas) {
+                if (canLockEntry(entry)) {
+                    set.add(entryKey(entry));
+                }
+            }
+            return set;
+        })(),
+    );
+
+    let canLockAtLeastOne = $derived(areasWithPermission.size > 0);
+
+    let hasBubbleOption = $derived($currentPlayerGroupLockStateStore !== undefined);
+    let showPicker = $derived(lockableAreas.length > 1 || (lockableAreas.length === 1 && hasBubbleOption));
+    /** True when user can lock at least one area OR can lock the bubble (picker with bubble row). */
+    let canLockSomething = $derived(canLockAtLeastOne || (showPicker && hasBubbleOption));
+
+    let closeFloatingUi: (() => void) | undefined = undefined;
+    let triggerElement: HTMLElement | undefined = $state(undefined);
+
+    function closePicker(): void {
+        closeFloatingUi?.();
+        closeFloatingUi = undefined;
+    }
+
+    function handleClick() {
+        if (showAreaLock && !canLockSomething) {
+            return;
+        }
+
+        if (showAreaLock) {
+            if (!showPicker) {
+                const entry = lockableAreas[0];
+                if (canLockEntry(entry)) {
+                    lockAreaClick(entry);
+                }
+                return;
+            }
+
+            if (showPicker) {
+                if (closeFloatingUi) {
+                    closePicker();
+                    return;
+                }
+                if (!triggerElement) {
+                    return;
+                }
+                closeFloatingUi = showFloatingUi(
+                    triggerElement,
+                    LockableAreaPicker,
+                    {
+                        areas: lockableAreas,
+                        areasWithPermission,
+                        onselect: (entry: LockableAreaEntry) => {
+                            lockAreaClick(entry);
+                        },
+                        onclose: closePicker,
+                        groupLockState:
+                            $currentPlayerGroupLockStateStore !== undefined
+                                ? $currentPlayerGroupLockStateStore
+                                : undefined,
+                        onselectgrouplock:
+                            $currentPlayerGroupLockStateStore !== undefined
+                                ? () => {
+                                      analyticsClient.trackAdminEvent("bubble.lock.toggled");
+                                      lockGroupClick();
+                                  }
+                                : undefined,
+                    },
+                    { placement: "bottom" },
+                    8,
+                    true,
+                );
+                return;
+            }
+        }
+
+        if (showGroupLock) {
+            analyticsClient.trackAdminEvent("bubble.lock.toggled");
+            lockGroupClick();
+        }
+    }
+
+    let lockState = $derived(
+        (() => {
+            if (showAreaLock) {
+                if (lockableAreas.length === 0) {
+                    return undefined;
+                }
+                if (lockableAreas.length === 1) {
+                    return lockableAreas[0].lockState;
+                }
+                return lockableAreas.every((e) => e.lockState) ? true : false;
+            }
+            if (showGroupLock) {
+                return $currentPlayerGroupLockStateStore;
+            }
+            return undefined;
+        })(),
+    );
+
+    type ButtonState = "active" | "normal" | "disabled" | "disabledForbidden" | "forbidden";
+    let buttonState: ButtonState = $derived.by(() => {
+        if (showAreaLock && !canLockSomething) {
+            return lockState ? "disabledForbidden" : "disabled";
+        }
+        return lockState ? "forbidden" : "normal";
+    });
+
+    onDestroy(() => {
+        closePicker();
+    });
+</script>
+
+{#if showAreaLock || showGroupLock}
+    <ActionBarButton
+        onclick={handleClick}
+        classList="group/btn-lock"
+        tooltipTitle={$LL.actionbar.help.lock.title()}
+        tooltipDesc={$LL.actionbar.help.lock.desc()}
+        disabledHelp={$openedMenuStore !== undefined || (showAreaLock && !canLockSomething)}
+        state={buttonState}
+        dataTestId="lock-button"
+        media="./static/Videos/LockBubble.mp4"
+        desc={$LL.actionbar.help.lock.desc()}
+        bind:wrapperDiv={triggerElement}
+    >
+        {#if lockState}
+            <LockIcon />
+        {:else}
+            <LockOpenIcon />
+        {/if}
+    </ActionBarButton>
+{/if}

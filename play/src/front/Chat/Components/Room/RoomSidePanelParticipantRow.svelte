@@ -1,0 +1,104 @@
+<script lang="ts">
+    import type { Snippet } from "svelte";
+    import { defaultColor } from "@workadventure/shared-utils";
+    import LL from "../../../../i18n/i18n-svelte";
+    import { DEBUG_MODE } from "../../../Enum/EnvironmentVariable";
+    import { gameManager } from "../../../Phaser/Game/GameManager";
+    import { isMatrixChatEnabledStore } from "../../../Stores/ChatStore";
+    import {
+        ChatPermissionLevel,
+        hasMatrixChatCapabilities,
+        type ChatRoomMember,
+        type MatrixChatConnectionLike,
+    } from "../../Connection/ChatConnection";
+    import MatrixPeerProfileDebugModal from "../MatrixPeerProfileDebugModal.svelte";
+    import Avatar from "../Avatar.svelte";
+    import { IconSettings } from "@wa-icons";
+    import { modals } from "@wa-modals";
+
+    interface Props {
+        member: ChatRoomMember;
+        /** Replaces the role line, e.g. "Invited" for a pending invitation. */
+        status?: string;
+        /** Row actions, e.g. the member's "..." menu. */
+        actions?: Snippet;
+    }
+
+    let { member, status, actions }: Props = $props();
+
+    let memberNameStore = $derived(member.name);
+    let memberPermissionLevelStore = $derived(member.permissionLevel);
+    let memberAvatarColorStore = $derived(member.avatarFallbackColor);
+
+    function matrixConnectionFromGameManager(): MatrixChatConnectionLike | undefined {
+        try {
+            const c = gameManager.chatConnection;
+            return hasMatrixChatCapabilities(c) ? c : undefined;
+        } catch {
+            return undefined;
+        }
+    }
+
+    let matrixChatConnection = $derived($isMatrixChatEnabledStore ? matrixConnectionFromGameManager() : undefined);
+    let showMatrixPeerProfileDebug = $derived(DEBUG_MODE && matrixChatConnection !== undefined && Boolean(member.id));
+
+    function openMatrixPeerProfileDebug() {
+        if (!matrixChatConnection) {
+            return;
+        }
+        modals.open(MatrixPeerProfileDebugModal, {
+            connection: matrixChatConnection,
+            matrixUserId: member.id,
+            label: $memberNameStore,
+        });
+    }
+</script>
+
+<!-- One Tab stop for the whole list (rovingFocus in the panel): ↑ ↓ move, → or Shift+F10 open the "...". -->
+<div
+    class="flex items-center gap-3 rounded-lg border border-solid border-white/10 bg-white/[0.03] px-3 py-2 focus:outline-none focus-visible:ring-2 focus-visible:ring-white/70"
+    data-testid={`${member.id}-panel-row`}
+    data-member-row
+    data-roving-row
+    tabindex="-1"
+    aria-label={$memberNameStore || "?"}
+>
+    <Avatar
+        compact
+        pictureStore={member.pictureStore}
+        fallbackName={$memberNameStore || "?"}
+        color={$memberAvatarColorStore ?? defaultColor}
+    />
+
+    <div class="min-w-0 flex-1">
+        <div class="truncate text-sm font-semibold text-white">{$memberNameStore || "?"}</div>
+        <div class="truncate text-xs opacity-70" data-testid={`${member.id}-panel-status`}>
+            {#if status}
+                {status}
+            {:else if $memberPermissionLevelStore === ChatPermissionLevel.ADMIN}
+                {$LL.chat.manageRoomUsers.roles.ADMIN()}
+            {:else if $memberPermissionLevelStore === ChatPermissionLevel.MODERATOR}
+                {$LL.chat.manageRoomUsers.roles.MODERATOR()}
+            {:else}
+                {$LL.chat.manageRoomUsers.roles.USER()}
+            {/if}
+        </div>
+    </div>
+
+    {@render actions?.()}
+    {#if showMatrixPeerProfileDebug}
+        <button
+            type="button"
+            class="flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-solid border-white/10 bg-white/[0.04] text-white/80 transition hover:border-white/20 hover:bg-white/10 hover:text-white"
+            title={$LL.chat.matrixPeerProfileDebug.menuItemTitle()}
+            aria-label={$LL.chat.matrixPeerProfileDebug.menuItemTitle()}
+            data-testid="participant-matrix-peer-profile-debug"
+            onclick={(event) => {
+                event.stopPropagation();
+                openMatrixPeerProfileDebug();
+            }}
+        >
+            <IconSettings font-size={16} />
+        </button>
+    {/if}
+</div>

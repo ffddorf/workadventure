@@ -1,0 +1,221 @@
+<script lang="ts">
+    import { LL } from "../../../../i18n/i18n-svelte";
+    import { recordingStore, showRecordingList } from "../../../Stores/RecordingStore";
+    import StopRecordingIcon from "../../Icons/StopRecordingIcon.svelte";
+    import StartRecordingIcon from "../../Icons/StartRecordingIcon.svelte";
+    import AppsIcon from "../../Icons/AppsIcon.svelte";
+    import { analyticsClient } from "../../../Administration/AnalyticsClient";
+    import ToastContainer from "../../Toasts/ToastContainer.svelte";
+    import Button from "../../UI/Button.svelte";
+
+    interface Props {
+        toastUuid: string;
+    }
+
+    let { toastUuid }: Props = $props();
+
+    function openRecordingList() {
+        analyticsClient.trackAdminEvent("recording.list_opened");
+        showRecordingList.set(true);
+        recordingStore.hideCompletedPopup();
+    }
+</script>
+
+<ToastContainer extraClasses="recording-completed-modal" duration={10000} {toastUuid} theme="success">
+    <div class="recording-content" data-testid="recording-completed-modal">
+        <!-- Main content -->
+        <div class="flex flex-col gap-4 px-2 py-4">
+            <!-- Icon and title -->
+            <div class="flex flex-row items-center justify-start gap-4">
+                <div class="recording-icon-wrapper">
+                    <div class="recording-icon-container completed">
+                        <StopRecordingIcon height="h-10" width="w-10" />
+                    </div>
+                </div>
+                <div class="flex flex-col gap-1 flex-1">
+                    <p class="recording-title completed">{$LL.recording.notification.recordingComplete()}</p>
+                    <p class="recording-subtitle">{$LL.recording.notification.recordingSaved()}</p>
+                </div>
+            </div>
+
+            <!-- Instructions -->
+            <div class="instructions-container">
+                <p class="instructions-text">{$LL.recording.notification.howToAccess()}</p>
+                <div class="instructions-steps">
+                    <div class="step-item">
+                        <span class="step-number">1</span>
+                        <div class="step-icon">
+                            <AppsIcon height="h-5" width="w-5" strokeColor="stroke-white" fillColor="fill-white" />
+                        </div>
+                        <span class="step-text text-xxs">{$LL.actionbar.help.apps.title()}</span>
+                    </div>
+                    <div class="step-arrow">→</div>
+                    <div class="step-item">
+                        <span class="step-number">2</span>
+                        <div class="step-icon">
+                            <StartRecordingIcon
+                                height="h-5"
+                                width="w-5"
+                                strokeColor="stroke-white"
+                                fillColor="fill-white"
+                            />
+                        </div>
+                        <span class="step-text text-xxs">{$LL.recording.recordingList()}</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    {#snippet buttons()}
+        <Button appearance="ghost" size="sm" class="w-1/2" onclick={() => recordingStore.hideCompletedPopup()}>
+            {$LL.recording.close()}
+        </Button>
+        <Button
+            variant="secondary"
+            size="sm"
+            class="w-1/2"
+            dataTestId="recording-completed-modal-open-recordings-list-button"
+            onclick={openRecordingList}
+        >
+            {$LL.recording.notification.viewRecordings()}
+        </Button>
+    {/snippet}
+</ToastContainer>
+
+<style>
+    .recording-content {
+        position: relative;
+        width: 100%;
+    }
+
+    .recording-icon-wrapper {
+        position: relative;
+        flex-shrink: 0;
+    }
+
+    .recording-icon-container {
+        position: relative;
+        z-index: 2;
+        background: rgba(34, 197, 94, 0.15);
+        border-radius: 12px;
+        padding: 10px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        border: 2px solid rgba(34, 197, 94, 0.3);
+
+        &.completed {
+            background: rgba(34, 197, 94, 0.2);
+            border-color: rgba(34, 197, 94, 0.4);
+        }
+    }
+
+    .recording-title {
+        font-weight: 600;
+        font-size: 16px;
+        color: white;
+        line-height: 1.4;
+        margin: 0;
+
+        &.completed {
+            color: #22c55e;
+        }
+    }
+
+    .recording-subtitle {
+        font-size: 13px;
+        color: rgba(255, 255, 255, 0.8);
+        line-height: 1.3;
+        margin: 0;
+    }
+
+    .instructions-container {
+        background: rgba(255, 255, 255, 0.05);
+        border-radius: 8px;
+        padding: 12px;
+        border: 1px solid rgba(255, 255, 255, 0.1);
+    }
+
+    .instructions-text {
+        font-size: 13px;
+        color: rgba(255, 255, 255, 0.9);
+        margin: 0 0 12px 0;
+        font-weight: 500;
+    }
+
+    .instructions-steps {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        flex-wrap: wrap;
+    }
+
+    .step-item {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        background: rgba(255, 255, 255, 0.08);
+        padding: 8px 12px;
+        border-radius: 6px;
+        flex: 1;
+        min-width: 120px;
+    }
+
+    .step-number {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 24px;
+        height: 24px;
+        background: rgba(34, 197, 94, 0.2);
+        color: #22c55e;
+        border-radius: 50%;
+        font-weight: 600;
+        font-size: 12px;
+        flex-shrink: 0;
+    }
+
+    .step-icon {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        flex-shrink: 0;
+    }
+
+    .step-text {
+        color: rgba(255, 255, 255, 0.9);
+        font-weight: 500;
+    }
+
+    .step-arrow {
+        color: rgba(255, 255, 255, 0.5);
+        font-size: 18px;
+        font-weight: bold;
+        flex-shrink: 0;
+    }
+
+    @media (max-width: 768px) {
+        .recording-title {
+            font-size: 15px;
+        }
+
+        .recording-subtitle {
+            font-size: 12px;
+        }
+
+        .instructions-steps {
+            flex-direction: column;
+            align-items: stretch;
+        }
+
+        .step-arrow {
+            transform: rotate(90deg);
+            align-self: center;
+        }
+
+        .step-item {
+            min-width: auto;
+        }
+    }
+</style>

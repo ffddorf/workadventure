@@ -1,0 +1,108 @@
+import type { DeepPartial } from "../DeepPartial";
+import type { Translation } from "../i18n-types";
+
+const camera: DeepPartial<Translation["camera"]> = {
+    editCam: "Modifica fotocamera",
+    editSpeaker: "Modifica uscita audio",
+    active: "Attivo",
+    disabled: "Disabilitato",
+    notRecommended: "Non raccomandato",
+    enable: {
+        title: "Accendi la tua fotocamera e il microfono",
+        start: "Benvenuto nella nostra pagina di configurazione dei dispositivi audio e video! Trova qui gli strumenti per migliorare la tua esperienza online. Regola le impostazioni in base alle tue preferenze per risolvere eventuali problemi. Assicurati che il tuo hardware sia correttamente collegato e aggiornato. Esplora e testa diverse configurazioni per trovare quella che funziona meglio per te.",
+    },
+    help: {
+        title: "Accesso a fotocamera / microfono necessario",
+        cameraTitle: "Accesso alla fotocamera necessario",
+        microphoneTitle: "Accesso al microfono necessario",
+        cameraPermissionDenied: "Permesso fotocamera negato",
+        microphonePermissionDenied: "Permesso microfono negato",
+        cameraMicrophonePermissionDenied: "Permessi fotocamera e microfono negati",
+        content: "Devi consentire l'accesso alla fotocamera e al microfono nel tuo browser.",
+        cameraContent: "Devi consentire l'accesso alla fotocamera nel tuo browser.",
+        microphoneContent: "Devi consentire l'accesso al microfono nel tuo browser.",
+        firefoxContent:
+            'Si prega di cliccare sulla casella "Ricorda questa decisione", se non vuoi che Firefox continui a chiederti l\'autorizzazione.',
+        allow: "Consenti webcam",
+        allowMicrophone: "Consenti microfono",
+        allowCameraMicrophone: "Consenti webcam e microfono",
+        continue: "Continua senza webcam",
+        continueWithoutMicrophone: "Continua senza microfono",
+        continueCameraMicrophone: "Continua senza webcam e microfono",
+        screen: {
+            firefox: "/resources/help-setting-camera-permission/en-US-firefox.png",
+            chrome: "/resources/help-setting-camera-permission/en-US-firefox.png",
+        },
+        tooltip: {
+            permissionDeniedTitle: "Accesso alla fotocamera bloccato",
+            permissionDeniedDesc:
+                "Il browser ha negato l’accesso alla fotocamera per questo sito. Consentilo dalla barra degli indirizzi (lucchetto o icona della fotocamera) o dalle impostazioni del sito. L’illustrazione corrisponde al tuo browser.",
+            noDeviceTitle: "Nessuna fotocamera utilizzabile",
+            noDeviceDesc:
+                "Il browser non rileva alcuna fotocamera utilizzabile. Prova un altro browser, verifica che la fotocamera sia collegata, controlla le impostazioni del computer (privacy, dispositivi) o riavvia il computer se il dispositivo dovrebbe funzionare.",
+            permissionMedia: {
+                firefox: "/resources/help-setting-camera-permission/en-US-firefox.png",
+                chrome: "/resources/help-setting-camera-permission/en-US-firefox.png",
+                safari: "/resources/help-setting-camera-permission/en-US-firefox.png",
+                android: "/resources/help-setting-camera-permission/en-US-firefox.png",
+                default: "/resources/help-setting-camera-permission/en-US-firefox.png",
+            },
+        },
+        microphoneTooltip: {
+            permissionDeniedTitle: "Accesso al microfono bloccato",
+            permissionDeniedDesc:
+                "Il browser ha negato l’accesso al microfono per questo sito. Consentilo dalla barra degli indirizzi (lucchetto o icona del microfono) o dalle impostazioni del sito. L’illustrazione corrisponde al tuo browser.",
+            noDeviceTitle: "Nessun microfono utilizzabile",
+            noDeviceDesc:
+                "Il browser non rileva alcun microfono utilizzabile. Prova un altro browser, verifica il microfono, controlla le impostazioni del computer (privacy, dispositivi) o riavvia il computer se il dispositivo dovrebbe funzionare.",
+            permissionMedia: {
+                firefox: "/resources/help-setting-camera-permission/en-US-firefox.png",
+                chrome: "/resources/help-setting-camera-permission/en-US-firefox.png",
+                safari: "/resources/help-setting-camera-permission/en-US-firefox.png",
+                android: "/resources/help-setting-camera-permission/en-US-firefox.png",
+                default: "/resources/help-setting-camera-permission/en-US-firefox.png",
+            },
+        },
+    },
+    webrtc: {
+        title: "Errore di connessione al server di inoltro video",
+        titlePending: "Connessione al server di inoltro video in sospeso",
+        error: "Il server TURN non è raggiungibile",
+        content:
+            "Il server di inoltro video non può essere raggiunto. Potresti non essere in grado di comunicare con altri utenti.",
+        solutionVpn:
+            "Se stai <strong>connettendoti tramite una VPN</strong>, disconnettiti dalla VPN e ricarica la pagina web.",
+        solutionVpnNotAskAgain: "Capito. Non avvisarmi più 🫡",
+        solutionHotspot:
+            "Se sei su una rete limitata (rete aziendale...), prova a cambiare rete. Ad esempio, crea un <strong>hotspot Wifi</strong> con il tuo telefono e connettiti tramite il telefono.",
+        solutionNetworkAdmin: "Se sei un <strong>amministratore di rete</strong>, rivedi la ",
+        preparingYouNetworkGuide: 'guida "Preparare la tua rete"',
+        refresh: "Ricarica",
+        continue: "Continua",
+        newDeviceDetected: "Nuovo dispositivo rilevato {device} 🎉 Cambiare? [SPAZIO] Ignora [ESC]",
+    },
+    my: {
+        silentZone: "Zona silenziosa",
+        silentZoneDesc:
+            "Ti trovi in una zona silenziosa. Qui nessuno può parlarti, e il tuo microfono e la tua fotocamera sono disattivati.",
+        nameTag: "Tu",
+        loading: "Caricamento della tua fotocamera...",
+    },
+    disable: "Spegni la tua fotocamera",
+    menu: {
+        moreAction: "Altre azioni",
+        closeMenu: "Chiudi menu",
+        senPrivateMessage: "Invia un messaggio privato (prossimamente)",
+        giveFloor: "Dare la parola",
+        revokeFloor: "Togliere la parola",
+        muteAudioUser: "Disattiva audio",
+        askToMuteAudioUser: "Chiedi di disattivare l'audio",
+        muteAudioEveryBody: "Disattiva audio per tutti",
+        muteVideoUser: "Disattiva video",
+        askToMuteVideoUser: "Chiedi di disattivare il video",
+        muteVideoEveryBody: "Disattiva video per tutti",
+        blockOrReportUser: "Blocca o segnala utente",
+    },
+};
+
+export default camera;

@@ -1,0 +1,543 @@
+import { expect, request, test } from "@playwright/test";
+import { evaluateScript } from "./utils/scripting";
+import { local_world, publicTestMapUrl } from "./utils/urls";
+import { getPage } from "./utils/auth";
+import Menu from "./utils/menu";
+
+// Spaces are scoped to the world, not to the room: the Kubernetes job runs two shards against a
+// single deployment, so two of these tests running at the same time would share a space and see
+// each other's users (or fail to join it with a different filter). Hence one space name per test.
+test.describe("Scripting space-related functions @nowebkit", () => {
+    test("can join and watch space", async ({ browser, browserName }, { project }) => {
+        await using page = await getPage(
+            browser,
+            "Alice",
+            publicTestMapUrl("tests/E2E/empty.json", "scripting_space_related"),
+        );
+
+        await evaluateScript(page, async () => {
+            await WA.player.teleport(1, 1);
+            window.userCount = 0;
+            window.mySpace = await WA.spaces.joinSpace("some-test-space-join-and-watch", "everyone", []);
+            window.mySpace.userJoinedObservable.subscribe((user) => {
+                window.userCount++;
+                window.lastJoinedUser = user;
+            });
+            window.mySpace.userLeftObservable.subscribe((user) => window.userCount--);
+        });
+
+        await expect
+            .poll(() =>
+                evaluateScript(page, async () => {
+                    return window.userCount;
+                }),
+            )
+            .toBe(1);
+
+        await using bob = await getPage(
+            browser,
+            "Bob",
+            publicTestMapUrl("tests/E2E/empty.json", "scripting_space_related"),
+        );
+
+        // Bob joins the same space
+        await evaluateScript(bob, async () => {
+            window.mySpace = await WA.spaces.joinSpace("some-test-space-join-and-watch", "everyone", []);
+        });
+
+        // User count in the space should now be 2
+        await expect
+            .poll(() =>
+                evaluateScript(page, async () => {
+                    return window.userCount;
+                }),
+            )
+            .toBe(2);
+
+        // Bob leaves the space
+        await evaluateScript(bob, async () => {
+            window.mySpace.leave();
+        });
+
+        // User count in the space should go back to 1
+        await expect
+            .poll(() =>
+                evaluateScript(page, async () => {
+                    return window.userCount;
+                }),
+            )
+            .toBe(1);
+
+        /**
+         * Test part 2: Let's simulate what happens when a user joins the same space twice
+         * We should see it until it leaves the space twice
+         */
+
+        // Bob joins the first time
+        await evaluateScript(bob, async () => {
+            window.mySpace = await WA.spaces.joinSpace("some-test-space-join-and-watch", "everyone", []);
+        });
+
+        // User count in the space should now be 2
+        await expect
+            .poll(() =>
+                evaluateScript(page, async () => {
+                    return window.userCount;
+                }),
+            )
+            .toBe(2);
+
+        // Bob joins the same space again
+        await evaluateScript(bob, async () => {
+            window.mySpace2 = await WA.spaces.joinSpace("some-test-space-join-and-watch", "everyone", []);
+        });
+
+        // User count in the space should still be 2, as Bob is already in the space
+        await expect
+            .poll(() =>
+                evaluateScript(page, async () => {
+                    return window.userCount;
+                }),
+            )
+            .toBe(2);
+
+        // Bob leaves the space once
+        await evaluateScript(bob, async () => {
+            window.mySpace.leave();
+        });
+
+        // User count in the space should still be 2, as Bob is still in the space
+        await expect
+            .poll(() =>
+                evaluateScript(page, async () => {
+                    return window.userCount;
+                }),
+            )
+            .toBe(2);
+
+        // Bob leaves the space again
+        await evaluateScript(bob, async () => {
+            window.mySpace2.leave();
+        });
+
+        // User count in the space should go back to 1
+        await expect
+            .poll(() =>
+                evaluateScript(page, async () => {
+                    return window.userCount;
+                }),
+            )
+            .toBe(1);
+
+        /**
+         * Test part 3: Let's test we can listen to user updates
+         */
+
+        // Bob joins again
+        await evaluateScript(bob, async () => {
+            window.mySpace = await WA.spaces.joinSpace("some-test-space-join-and-watch", "everyone", []);
+        });
+
+        // User count in the space should still be 2, as Bob is already in the space
+        await expect
+            .poll(() =>
+                evaluateScript(page, async () => {
+                    return window.userCount;
+                }),
+            )
+            .toBe(2);
+
+        // We expect Bob's status to be 1 by default
+        await expect
+            .poll(() =>
+                evaluateScript(page, async () => {
+                    window.lastJoinedUser.reactiveUser.availabilityStatus.subscribe((availabilityStatus) => {
+                        window.lastRemoteAvailabilityStatus = availabilityStatus;
+                    });
+
+                    return window.lastJoinedUser.availabilityStatus;
+                }),
+            )
+            .toBe(1);
+
+        // Bob clicks on the "Do not disturb" status
+        await Menu.openMenu(bob);
+        await Menu.clickOnStatus(bob, "Do not disturb");
+
+        // We expect Bob's status to be "Do not disturb"
+        await expect
+            .poll(() =>
+                evaluateScript(page, async () => {
+                    return window.lastJoinedUser.availabilityStatus;
+                }),
+            )
+            .toBe(9);
+
+        // We expect the reactive user property to have been triggered
+        await expect
+            .poll(() =>
+                evaluateScript(page, async () => {
+                    return window.lastRemoteAvailabilityStatus;
+                }),
+            )
+            .toBe(9);
+
+        // Bob leaves the space
+        await evaluateScript(bob, async () => {
+            window.mySpace.leave();
+        });
+
+        // Alice leaves the space
+        await evaluateScript(page, async () => {
+            window.mySpace.leave();
+        });
+
+        // FIXME: remove this timeout when the Livekit branch is merged (the issue is fixed in the Livekit branch)
+        // eslint-disable-next-line playwright/no-wait-for-timeout
+        await page.waitForTimeout(1000);
+
+        /**
+         * Test part 4: Let's do the same test with a livestream space.
+         */
+
+        await evaluateScript(page, async () => {
+            window.userCount = 0;
+            window.mySpace = await WA.spaces.joinSpace("some-test-space-join-and-watch", "streaming", []);
+            window.mySpace.userJoinedObservable.subscribe((user) => {
+                window.userCount++;
+                window.lastJoinedUser = user;
+            });
+            window.mySpace.userLeftObservable.subscribe((user) => window.userCount--);
+        });
+
+        await expect
+            .poll(() =>
+                evaluateScript(page, async () => {
+                    return window.userCount;
+                }),
+            )
+            .toBe(0);
+
+        // Bob joins the same space
+        await evaluateScript(bob, async () => {
+            window.mySpace = await WA.spaces.joinSpace("some-test-space-join-and-watch", "streaming", []);
+        });
+
+        // Bob does not stream, still no one in the space
+        await expect
+            .poll(() =>
+                evaluateScript(page, async () => {
+                    return window.userCount;
+                }),
+            )
+            .toBe(0);
+
+        // Bob starts streaming
+        await evaluateScript(bob, async () => {
+            window.mySpace.startStreaming();
+        });
+
+        // User count in the space should now be 1
+        await expect
+            .poll(() =>
+                evaluateScript(page, async () => {
+                    return window.userCount;
+                }),
+            )
+            .toBe(1);
+    });
+
+    test("cannot join a space with a different filter on the same browser", async ({ browser, context, browserName }, {
+        project,
+    }) => {
+        // Get all open pages in the context
+        const pages = context.pages();
+        await expect.poll(() => pages.length).toBe(0);
+
+        await using page = await getPage(
+            browser,
+            "Alice",
+            publicTestMapUrl("tests/E2E/empty.json", "scripting_space_related"),
+        );
+
+        expect(
+            await evaluateScript(page, async () => {
+                await WA.spaces.joinSpace("some-test-space-filter-mismatch-one-browser", "everyone", []);
+                try {
+                    await WA.spaces.joinSpace("some-test-space-filter-mismatch-one-browser", "streaming", []);
+                } catch (e) {
+                    return e.message;
+                }
+                return null;
+            }),
+        ).toContain("Cannot join space some-test-space-filter-mismatch-one-browser");
+    });
+
+    test("cannot join a space with a different filter in 2 browsers", async ({ browser, context, browserName }, {
+        project,
+    }) => {
+        // Get all open pages in the context
+
+        const pages = context.pages();
+
+        await expect.poll(() => pages.length).toBe(0);
+
+        await using page = await getPage(
+            browser,
+            "Alice",
+            publicTestMapUrl("tests/E2E/empty.json", "scripting_space_related"),
+        );
+
+        await evaluateScript(page, async () => {
+            await WA.player.teleport(1, 1);
+            await WA.spaces.joinSpace("some-test-space-filter-mismatch-two-browsers", "everyone", []);
+        });
+
+        await using bob = await getPage(
+            browser,
+            "Bob",
+            publicTestMapUrl("tests/E2E/empty.json", "scripting_space_related"),
+        );
+
+        expect(
+            await evaluateScript(bob, async () => {
+                try {
+                    await WA.spaces.joinSpace("some-test-space-filter-mismatch-two-browsers", "streaming", []);
+                } catch (e) {
+                    return e.message;
+                }
+                return null;
+            }),
+        ).toMatch(/[Ff]ilter type mismatch/);
+    });
+
+    test("can join a livestream space and see the user when it starts streaming", async ({
+        browser,
+        context,
+        browserName,
+    }, { project }) => {
+        const pages = context.pages();
+
+        await expect.poll(() => pages.length).toBe(0);
+
+        await using page = await getPage(
+            browser,
+            "Alice",
+            publicTestMapUrl("tests/E2E/empty.json", "scripting_space_related"),
+        );
+
+        await evaluateScript(page, async () => {
+            await WA.player.teleport(1, 1);
+            window.userCount = 0;
+            window.mySpace = await WA.spaces.joinSpace("some-test-space-livestream", "streaming", []);
+            window.mySpace.userJoinedObservable.subscribe((user) => {
+                console.log("User joined:", user);
+                window.userCount++;
+                window.lastJoinedUser = user;
+            });
+            window.mySpace.userLeftObservable.subscribe((user) => {
+                console.log("User left:", user);
+                window.userCount--;
+            });
+        });
+
+        // Bob joins the same space
+        await using bob = await getPage(
+            browser,
+            "Bob",
+            publicTestMapUrl("tests/E2E/empty.json", "scripting_space_related"),
+        );
+        await evaluateScript(bob, async () => {
+            window.mySpace = await WA.spaces.joinSpace("some-test-space-livestream", "streaming", []);
+        });
+
+        // User count in the space should now be 0
+        await expect
+            .poll(() =>
+                evaluateScript(page, async () => {
+                    return window.userCount;
+                }),
+            )
+            .toBe(0);
+
+        // Bob starts streaming
+        await evaluateScript(bob, async () => {
+            window.mySpace.startStreaming();
+        });
+
+        // User count in the space should now be 1
+        await expect
+            .poll(() =>
+                evaluateScript(page, async () => {
+                    return window.userCount;
+                }),
+            )
+            .toBe(1);
+
+        // Alice should see Bob's user
+        await expect
+            .poll(() =>
+                evaluateScript(page, async () => {
+                    return window.lastJoinedUser.name;
+                }),
+            )
+            .toBe("Bob");
+
+        // Bob stops streaming
+        await evaluateScript(bob, async () => {
+            window.mySpace.stopStreaming();
+        });
+
+        // User count in the space should go back to 0
+        await expect
+            .poll(() =>
+                evaluateScript(page, async () => {
+                    return window.userCount;
+                }),
+            )
+            .toBe(0);
+    });
+
+    test("should reconnect to a space when backend is restarted @local @selfsigned", async ({
+        browser,
+        context,
+        browserName,
+    }, { project }) => {
+        const pages = context.pages();
+
+        await expect.poll(() => pages.length).toBe(0);
+
+        const apiContext = await request.newContext();
+
+        await using page = await getPage(
+            browser,
+            "Alice",
+            publicTestMapUrl("tests/E2E/empty.json", "scripting_space_related"),
+        );
+
+        // Alice joins a "streaming" space
+        await evaluateScript(page, async () => {
+            await WA.player.teleport(1, 1);
+            window.userCount = 0;
+            window.mySpace = await WA.spaces.joinSpace("some-test-space-backend-restart", "streaming", []);
+            window.mySpace.userJoinedObservable.subscribe((user) => {
+                window.userCount++;
+                window.lastJoinedUser = user;
+            });
+            window.mySpace.userLeftObservable.subscribe((user) => window.userCount--);
+        });
+
+        // Bob joins the same space
+        await using bob = await getPage(
+            browser,
+            "Bob",
+            publicTestMapUrl("tests/E2E/empty.json", "scripting_space_related"),
+        );
+        await evaluateScript(bob, async () => {
+            window.mySpace = await WA.spaces.joinSpace("some-test-space-backend-restart", "streaming", []);
+        });
+
+        // User count in the space should now be 0
+        await expect
+            .poll(() =>
+                evaluateScript(page, async () => {
+                    return window.userCount;
+                }),
+            )
+            .toBe(0);
+
+        // Bob starts streaming
+        await evaluateScript(bob, async () => {
+            window.mySpace.startStreaming();
+        });
+
+        // User count in the space should now be 1
+        await expect
+            .poll(() =>
+                evaluateScript(page, async () => {
+                    return window.userCount;
+                }),
+            )
+            .toBe(1);
+
+        // Delete space connection in the backend
+        // This simulates a backend restart, as the space connection will be closed
+        await apiContext.post(
+            `http://api.workadventure.localhost/debug/close-space-connection?spaceName=${encodeURIComponent(`${local_world}.some-test-space-backend-restart`)}&token=123`,
+        );
+
+        //eslint-disable-next-line playwright/no-wait-for-timeout
+        await page.waitForTimeout(5000);
+
+        // Alice should see Bob's user
+        await expect
+            .poll(() =>
+                evaluateScript(page, async () => {
+                    return window.lastJoinedUser.name;
+                }),
+            )
+            .toBe("Bob");
+
+        // Bob stops streaming
+        await evaluateScript(bob, async () => {
+            window.mySpace.stopStreaming();
+        });
+
+        // User count in the space should go back to 0
+        await expect
+            .poll(() =>
+                evaluateScript(page, async () => {
+                    return window.userCount;
+                }),
+            )
+            .toBe(0);
+    });
+
+    test("should receive metadata when you join a space", async ({ browser, context, browserName }, { project }) => {
+        const pages = context.pages();
+
+        await expect.poll(() => pages.length).toBe(0);
+
+        await using page = await getPage(
+            browser,
+            "Alice",
+            publicTestMapUrl("tests/E2E/empty.json", "scripting_space_related_metadata"),
+        );
+
+        await evaluateScript(page, async () => {
+            await WA.player.teleport(1, 1);
+            window.mySpace = await WA.spaces.joinSpace("some-test-space-metadata", "everyone", []);
+            window.mySpace.setMetadata(new Map([["hello", "world"]]));
+        });
+
+        // Bob joins the same space
+        await using bob = await getPage(
+            browser,
+            "Bob",
+            publicTestMapUrl("tests/E2E/empty.json", "scripting_space_related_metadata"),
+        );
+        await evaluateScript(bob, async () => {
+            window.mySpace = await WA.spaces.joinSpace("some-test-space-metadata", "everyone", []);
+            await new Promise((resolve) => {
+                window.mySpace.metadataObservable.subscribe((metadata) => {
+                    console.log("Bob received metadata:", metadata);
+                    if (metadata.get("hello") === "world") {
+                        window.receivedMetadata = metadata;
+                        resolve(true);
+                    }
+                });
+            });
+        });
+
+        // Bob should have received the metadata
+        await expect
+            .poll(() =>
+                evaluateScript(bob, async () => {
+                    console.log("Checking metadata on Bob's page...");
+                    console.log("Received metadata:", window.receivedMetadata);
+                    return window.receivedMetadata?.get("hello");
+                }),
+            )
+            .toBe("world");
+    });
+});

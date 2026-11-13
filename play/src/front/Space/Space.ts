@@ -1,0 +1,1464 @@
+import { AbortError } from "@workadventure/shared-utils/src/Abort/AbortError";
+import { TimeoutError } from "@workadventure/shared-utils/src/Abort/TimeoutError";
+import { abortAny } from "@workadventure/shared-utils/src/Abort/AbortAny";
+import { abortTimeout } from "@workadventure/shared-utils/src/Abort/AbortTimeout";
+import type { Readable, Writable } from "svelte/store";
+import { derived, get, readable, writable } from "svelte/store";
+import * as Sentry from "@sentry/svelte";
+import { applyFieldMask } from "protobuf-fieldmask";
+import type { Subscription } from "rxjs";
+import { Observable, Subject } from "rxjs";
+import { deepmergeInto } from "deepmerge-ts";
+import { Deferred } from "@workadventure/shared-utils";
+import { MapStore } from "@workadventure/store-utils";
+import type {
+    PublicEvent,
+    SpaceEvent,
+    UpdateSpaceMetadataMessage,
+    SpaceUser,
+    PrivateSpaceEvent,
+    PrivateEventPusherToFront,
+    BackEventFrontToPusherMessage,
+    InitSpaceUsersMessage,
+    SpaceKind,
+    VideoQualityReportMessage,
+} from "@workadventure/messages";
+import { FilterType } from "@workadventure/messages";
+import { raceAbort } from "@workadventure/shared-utils/src/Abort/raceAbort";
+import { CharacterLayerManager } from "../Phaser/Entity/CharacterLayerManager";
+
+import type { BlackListManager } from "../WebRtc/BlackListManager";
+import { blackListManager } from "../WebRtc/BlackListManager";
+import { ConnectionClosedError } from "../Connection/ConnectionClosedError";
+import { highlightedEmbedScreen } from "../Stores/HighlightedEmbedScreenStore";
+import { triggerReorderStore } from "../Stores/OrderedStreamableCollectionStore";
+
+import type {
+    PrivateEventsObservables,
+    PublicEventsObservables,
+    SpaceInterface,
+    SpaceUserUpdate,
+    UpdateSpaceUserEvent,
+    ReactiveSpaceUser,
+    SpaceUserExtended,
+} from "./SpaceInterface";
+import { SpaceNameIsEmptyError } from "./Errors/SpaceError";
+import { SpaceStateManager } from "./SpaceStateManager";
+import type { RoomConnectionForSpacesInterface } from "./SpaceRegistry/SpaceRegistry";
+import type { SimplePeerConnectionInterface } from "./SpacePeerManager/SpacePeerManager";
+import { SpacePeerManager } from "./SpacePeerManager/SpacePeerManager";
+import { lookupUserById } from "./Utils/UserLookup";
+import { VideoBox } from "./VideoBox";
+import { idleVideoBoxPriority, VIDEO_STARTING_PRIORITY } from "./VideoBoxPriorities";
+import { LOCAL_SCREEN_SHARING_STREAM_ID } from "./Streamable";
+import type { Streamable } from "./Streamable";
+
+export class Space implements SpaceInterface {
+    private readonly name: string;
+
+    private readonly publicEventsObservables: PublicEventsObservables = {};
+    private readonly privateEventsObservables: PrivateEventsObservables = {};
+    private readonly metadataObservables: {
+        [key: string]: Subject<unknown>;
+    } = {};
+    private _onLeaveSpace = new Subject<void>();
+    public readonly onLeaveSpace = this._onLeaveSpace.asObservable();
+    private _peerManager: SpacePeerManager;
+    public allVideoStreamStore: MapStore<string, VideoBox> = new MapStore<string, VideoBox>();
+    public allScreenShareStreamStore: MapStore<string, VideoBox> = new MapStore<string, VideoBox>();
+    public readonly videoStreamStore: Readable<Map<string, VideoBox>>;
+    public readonly screenShareStreamStore: Readable<Map<string, VideoBox>>;
+    public readonly state: SpaceStateManager;
+    // private readonly blockedUsersVideoBox: Map<string, VideoBox> = new Map<string, VideoBox>();
+    // private readonly blockedUsersScreenShareVideoBox: Map<string, VideoBox> = new Map<string, VideoBox>();
+    private readonly _blockedUsersStore: Writable<Set<string>> = writable(new Set<string>());
+    private readonly _blockedByUsersStore: Writable<Set<string>> = writable(new Set<string>());
+    private readonly _allBlockedUsersStore: Readable<Set<string>> = derived(
+        [this._blockedUsersStore, this._blockedByUsersStore],
+        ([$blockedUsersStore, $blockedByUsersStore]) => {
+            return new Set([...$blockedUsersStore, ...$blockedByUsersStore]);
+        },
+    );
+
+    private _setUsers: ((value: Map<string, SpaceUserExtended>) => void) | undefined;
+    private _users: Map<string, SpaceUserExtended> = new Map<string, SpaceUserExtended>();
+    private _addUserSubject: Subject<SpaceUserExtended> = new Subject<SpaceUserExtended>();
+    private _leftUserSubject: Subject<SpaceUserExtended> = new Subject<SpaceUserExtended>();
+    private _updateUserSubject: Subject<UpdateSpaceUserEvent> = new Subject<UpdateSpaceUserEvent>();
+    private _metadataSubject: Subject<Map<string, unknown>> = new Subject<Map<string, unknown>>();
+    private _registerRefCount = 0;
+    private isDestroyed = false;
+    public readonly usersStore: Readable<Map<string, Readonly<SpaceUserExtended>>>;
+    private _setHasRemoteSpeaker: ((value: boolean) => void) | undefined;
+    private _hasRemoteSpeaker = false;
+    public readonly hasRemoteSpeakerStore: Readable<boolean>;
+    public readonly observeUserJoined: Observable<SpaceUserExtended>;
+    public readonly observeUserLeft: Observable<SpaceUserExtended>;
+    public readonly observeUserUpdated: Observable<UpdateSpaceUserEvent>;
+    public readonly observeMetadata: Observable<Map<string, unknown>>;
+    private readonly observeSyncUserAdded: Subscription;
+    private readonly observeSyncUserUpdated: Subscription;
+    private readonly observeSyncUserRemoved: Subscription;
+    private observeVideoPeerAdded: Subscription | undefined;
+    private observeVideoPeerRemoved: Subscription | undefined;
+    private observeScreenSharingPeerAdded: Subscription | undefined;
+    private observeScreenSharingPeerRemoved: Subscription | undefined;
+
+    // Stores to track streaming state for speaker (megaphoneState) and listener (attendeesState)
+    private readonly _isSpeakerStreamingStore: Writable<boolean>;
+    private readonly _isListenerStreamingStore: Writable<boolean>;
+    // Derived store that is true if either speaker or listener streaming is active, or if ALL_USERS filter with video properties
+    private readonly _isStreamingVideoStore: Readable<boolean>;
+    private readonly _isStreamingAudioStore: Readable<boolean>;
+    private readonly _canRecordStore: Writable<boolean>;
+    private readonly _isRecordingStore: Readable<boolean>;
+    public readonly shouldPublishScreenShareStore: Readable<boolean>;
+    private readonly observeSyncBlockUser: Subscription;
+    private readonly observeSyncUnblockUser: Subscription;
+    private readonly onBlockSubscribe: Subscription;
+    private readonly onUnBlockSubscribe: Subscription;
+    // spaceUserIds of the users currently speaking, most active first
+    private activeSpeakerIds: SpaceUser["spaceUserId"][] = [];
+
+    public readonly shouldDisplayRecordButton: Readable<boolean>;
+
+    private _isDestroyed = false;
+    private initPromise: Deferred<void> | undefined;
+
+    /**
+     * IMPORTANT: The only valid way to create a space is to use the SpaceRegistry.
+     * Do not call this constructor directly.
+     */
+    private constructor(
+        name: string,
+        private _metadata = new Map<string, unknown>(),
+        private _connection: RoomConnectionForSpacesInterface,
+        public readonly filterType: FilterType,
+        private _propertiesToSync: string[] = [],
+        private _mySpaceUserId: SpaceUser["spaceUserId"],
+        // True if the user has the right to start recording in this space
+        canRecord: boolean,
+        public readonly kind: SpaceKind | undefined,
+        private _blackListManager: BlackListManager = blackListManager,
+        private _highlightedEmbedScreenStore = highlightedEmbedScreen,
+    ) {
+        if (name === "") {
+            throw new SpaceNameIsEmptyError();
+        }
+        this.name = name;
+        this._canRecordStore = writable(canRecord);
+        this.state = new SpaceStateManager(name, _connection, _mySpaceUserId);
+
+        this.usersStore = readable(new Map<string, SpaceUserExtended>(), (set) => {
+            this.registerSpaceFilter();
+            this._setUsers = set;
+            set(this._users);
+
+            return () => {
+                if (!this.isDestroyed) {
+                    this.unregisterSpaceFilter();
+                }
+            };
+        });
+
+        // Same shape as usersStore, and for the same reason: subscribing is what asks the
+        // pusher for this space's users in the first place.
+        this.hasRemoteSpeakerStore = readable(false, (set) => {
+            this.registerSpaceFilter();
+            this._setHasRemoteSpeaker = set;
+            set(this._hasRemoteSpeaker);
+
+            return () => {
+                if (!this.isDestroyed) {
+                    this.unregisterSpaceFilter();
+                }
+            };
+        });
+
+        this.observeUserJoined = new Observable<SpaceUserExtended>((subscriber) => {
+            this.registerSpaceFilter();
+            const sub = this._addUserSubject.subscribe(subscriber);
+
+            return () => {
+                sub.unsubscribe();
+                if (!this.isDestroyed) {
+                    this.unregisterSpaceFilter();
+                }
+            };
+        });
+
+        this.observeUserLeft = new Observable<SpaceUserExtended>((subscriber) => {
+            this.registerSpaceFilter();
+            const sub = this._leftUserSubject.subscribe(subscriber);
+
+            return () => {
+                sub.unsubscribe();
+                if (!this.isDestroyed) {
+                    this.unregisterSpaceFilter();
+                }
+            };
+        });
+
+        this.observeUserUpdated = new Observable<UpdateSpaceUserEvent>((subscriber) => {
+            this.registerSpaceFilter();
+            const sub = this._updateUserSubject.subscribe(subscriber);
+
+            return () => {
+                sub.unsubscribe();
+                if (!this.isDestroyed) {
+                    this.unregisterSpaceFilter();
+                }
+            };
+        });
+
+        this.observeMetadata = new Observable<Map<string, unknown>>((subscriber) => {
+            this.registerSpaceFilter();
+            const sub = this._metadataSubject.subscribe(subscriber);
+
+            return () => {
+                sub.unsubscribe();
+                if (!this.isDestroyed) {
+                    this.unregisterSpaceFilter();
+                }
+            };
+        });
+
+        this.videoStreamStore = derived(
+            [this.allVideoStreamStore, this.usersStore],
+            ([videoStreamStore, usersStore]) => {
+                const newVideoStreamStore = new Map<string, VideoBox>();
+                for (const [key, value] of videoStreamStore.entries()) {
+                    if (usersStore.has(key)) {
+                        newVideoStreamStore.set(key, value);
+                    }
+                }
+                return newVideoStreamStore;
+            },
+        );
+        this.screenShareStreamStore = derived(
+            [this.allScreenShareStreamStore, this.usersStore],
+            ([screenShareStreamStore, usersStore]) => {
+                const newScreenShareStreamStore = new Map<string, VideoBox>();
+                for (const [key, value] of screenShareStreamStore.entries()) {
+                    if (usersStore.has(key)) {
+                        newScreenShareStreamStore.set(key, value);
+                    }
+                }
+                return newScreenShareStreamStore;
+            },
+        );
+
+        this._isRecordingStore = derived(this.state.observe("recording"), ($recording) => $recording.status !== "idle");
+
+        this.onBlockSubscribe = this._blackListManager.onBlockStream.subscribe((userUuid) => {
+            const spaceUser = this.getSpaceUserByUuid(userUuid);
+
+            if (!spaceUser) {
+                console.error("spaceUserId not found for userUuid", userUuid);
+                return;
+            }
+
+            this.emitPrivateMessage(
+                {
+                    $case: "blockUserMessage",
+                    blockUserMessage: {},
+                },
+                spaceUser.spaceUserId,
+            );
+
+            this.blockUser(spaceUser.spaceUserId);
+        });
+
+        this.onUnBlockSubscribe = this._blackListManager.onUnBlockStream.subscribe((userUuid) => {
+            const spaceUser = this.getSpaceUserByUuid(userUuid);
+
+            if (!spaceUser) {
+                console.error("spaceUserId not found for userUuid", userUuid);
+                return;
+            }
+
+            this.emitPrivateMessage(
+                {
+                    $case: "unblockUserMessage",
+                    unblockUserMessage: {},
+                },
+                spaceUser.spaceUserId,
+            );
+
+            this.unblockUser(spaceUser.spaceUserId);
+        });
+
+        this._blockedUsersStore.set(this._blackListManager.getBlackListedUsers());
+
+        // Initialize speaker and listener streaming stores
+        this._isSpeakerStreamingStore = writable(false);
+        this._isListenerStreamingStore = writable(false);
+
+        // Condition for ALL_USERS filter type with video properties
+        const isAllUsersVideoSpace = filterType === FilterType.ALL_USERS && this.isVideoSpace();
+
+        // Derived store: true if speaker OR listener streaming is active, or if ALL_USERS video space
+        this._isStreamingVideoStore = derived(
+            [this._isSpeakerStreamingStore, this._isListenerStreamingStore],
+            ([$isSpeakerStreaming, $isListenerStreaming]) => {
+                return isAllUsersVideoSpace || $isSpeakerStreaming || $isListenerStreaming;
+            },
+        );
+
+        // Derived store: true if speaker is active, or if ALL_USERS video space
+        this._isStreamingAudioStore = derived([this._isSpeakerStreamingStore], ([$isSpeakerStreaming]) => {
+            return isAllUsersVideoSpace || $isSpeakerStreaming;
+        });
+        // In a live streaming space (megaphone, podium), only the speakers share their screen, never the audience
+        this.shouldPublishScreenShareStore = derived([this._isSpeakerStreamingStore], ([$isSpeakerStreaming]) => {
+            return isAllUsersVideoSpace || (this.isVideoSpace() && $isSpeakerStreaming);
+        });
+
+        this._peerManager = new SpacePeerManager(this, this._allBlockedUsersStore);
+        this.registerPeerManagerEventHandlers();
+
+        this.observeSyncUserAdded = this.observePrivateEvent("addSpaceUserMessage").subscribe((message) => {
+            if (!message.addSpaceUserMessage.user) {
+                console.error("addSpaceUserMessage is missing a user");
+                return;
+            }
+            this.addUser(message.addSpaceUserMessage.user);
+        });
+        this.observeSyncUserUpdated = this.observePrivateEvent("updateSpaceUserMessage").subscribe((message) => {
+            if (!message.updateSpaceUserMessage.user || !message.updateSpaceUserMessage.updateMask) {
+                console.error("updateSpaceUserMessage is missing a user or an updateMask");
+                return;
+            }
+            this.updateUserData(message.updateSpaceUserMessage.user, message.updateSpaceUserMessage.updateMask);
+        });
+        this.observeSyncUserRemoved = this.observePrivateEvent("removeSpaceUserMessage").subscribe((message) => {
+            this.removeUser(message.removeSpaceUserMessage.spaceUserId);
+        });
+
+        this.observeSyncBlockUser = this.observePrivateEvent("blockUserMessage").subscribe((message) => {
+            this.blockByUser(message.sender.spaceUserId);
+        });
+        this.observeSyncUnblockUser = this.observePrivateEvent("unblockUserMessage").subscribe((message) => {
+            this.unblockByUser(message.sender.spaceUserId);
+        });
+
+        // One can record if we are streaming or if there is at least one video or screen sharing peer and if we are authorized to record
+        this.shouldDisplayRecordButton = derived(
+            [
+                this.isStreamingVideoStore,
+                this.videoStreamStore,
+                this.screenShareStreamStore,
+                this._canRecordStore,
+                this._isRecordingStore,
+            ],
+            ([$isStreamingStore, $videoPeers, $screenSharingPeers, $canRecord, $isRecording]) => {
+                return (
+                    $isRecording ||
+                    (($isStreamingStore || $videoPeers.size > 0 || $screenSharingPeers.size > 0) && $canRecord)
+                );
+            },
+        );
+    }
+
+    /**,
+     * IMPORTANT: The only valid way to create a space is to use the SpaceRegistry.
+     * Do not call this method directly.
+     */
+    static async create(
+        name: string,
+        filterType: FilterType,
+        connection: RoomConnectionForSpacesInterface,
+        propertiesToSync: string[] = [],
+        signal: AbortSignal,
+        options?: {
+            metadata?: Map<string, unknown>;
+            // True if the user is allowed to start/stop recording in the space
+            canRecord?: boolean;
+            spaceKind?: SpaceKind;
+        },
+    ): Promise<Space> {
+        const spaceUserId = await connection.emitJoinSpace(name, filterType, propertiesToSync, {
+            signal,
+        });
+        return new Space(
+            name,
+            options?.metadata ?? new Map<string, unknown>(),
+            connection,
+            filterType,
+            propertiesToSync,
+            spaceUserId,
+            options?.canRecord ?? false,
+            options?.spaceKind,
+        );
+    }
+
+    getName(): string {
+        return this.name;
+    }
+    getMetadata(): Map<string, unknown> {
+        return this._metadata;
+    }
+    setCanRecord(canRecord: boolean): void {
+        this._canRecordStore.set(canRecord);
+    }
+
+    setMetadata(metadata: Map<string, unknown>): void {
+        metadata.forEach((value, key) => {
+            this._metadata.set(key, value);
+            const observable = this.metadataObservables[key];
+            if (observable) {
+                observable.next(value);
+            }
+        });
+        if (this._metadataSubject) {
+            this._metadataSubject.next(this._metadata);
+        }
+    }
+
+    private async userLeaveSpace() {
+        if (this._connection.closed) {
+            // It is not uncommon to try to leave a space after the connection is closed.
+            // In that case, we just skip sending the leaveSpace message to the server.
+            return;
+        }
+        await this._connection.emitLeaveSpace(this.name);
+    }
+
+    public emitUpdateSpaceMetadata(metadata: Map<string, unknown>) {
+        if (this._isDestroyed) {
+            console.warn("Space is destroyed, skipping emitUpdateSpaceMetadata");
+            return;
+        }
+        this._connection.emitUpdateSpaceMetadata(this.name, Object.fromEntries(metadata.entries()));
+    }
+
+    public observePublicEvent<K extends keyof PublicEventsObservables>(
+        key: K,
+    ): NonNullable<PublicEventsObservables[K]> {
+        const observable = this.publicEventsObservables[key];
+        if (!observable) {
+            return (this.publicEventsObservables[key] = new Subject() as NonNullable<PublicEventsObservables[K]>);
+        }
+        return observable;
+    }
+    public observePrivateEvent<K extends keyof PrivateEventsObservables>(
+        key: K,
+    ): NonNullable<PrivateEventsObservables[K]> {
+        const observable = this.privateEventsObservables[key];
+        if (!observable) {
+            return (this.privateEventsObservables[key] = new Subject() as NonNullable<PrivateEventsObservables[K]>);
+        }
+        return observable;
+    }
+
+    public observeMetadataProperty(key: string): Subject<unknown> {
+        const observable = this.metadataObservables[key];
+        if (!observable) {
+            const newObservable = new Subject<unknown>();
+            this.metadataObservables[key] = newObservable;
+            return newObservable;
+        }
+        return observable;
+    }
+
+    /**
+     * Take a message received by the RoomConnection and dispatch it to the right observable.
+     */
+    public dispatchPublicMessage(message: PublicEvent) {
+        const spaceEvent = message.spaceEvent;
+        if (spaceEvent === undefined) {
+            throw new Error("Received a message without spaceEvent");
+        }
+        const spaceInnerEvent = spaceEvent.event;
+        if (spaceInnerEvent === undefined) {
+            throw new Error("Received a message without event");
+        }
+        const sender = message.senderUserId;
+
+        const subject = this.publicEventsObservables[spaceInnerEvent.$case];
+        if (subject) {
+            subject.next({
+                //@ts-ignore We are hitting a limitation of TypeScript documented here: https://stackoverflow.com/questions/67513032/helper-function-to-un-discriminate-a-discriminated-union
+                spaceName: message.spaceName,
+                //@ts-ignore We are hitting a limitation of TypeScript documented here: https://stackoverflow.com/questions/67513032/helper-function-to-un-discriminate-a-discriminated-union
+                sender,
+                ...spaceInnerEvent,
+            });
+        }
+    }
+
+    /**
+     * Take a message received by the RoomConnection and dispatch it to the right observable.
+     */
+    public dispatchPrivateMessage(message: PrivateEventPusherToFront) {
+        const spaceEvent = message.spaceEvent;
+        if (spaceEvent === undefined) {
+            throw new Error("Received a message without spaceEvent");
+        }
+        const spaceInnerEvent = spaceEvent.event;
+        if (spaceInnerEvent === undefined) {
+            throw new Error("Received a message without event");
+        }
+        const sender = message.sender;
+        if (sender === undefined) {
+            throw new Error("Received a message without senderUserId");
+        }
+        const subject = this.privateEventsObservables[spaceInnerEvent.$case];
+        if (subject) {
+            subject.next({
+                //@ts-ignore We are hitting a limitation of TypeScript documented here: https://stackoverflow.com/questions/67513032/helper-function-to-un-discriminate-a-discriminated-union
+                spaceName: message.spaceName,
+                //@ts-ignore We are hitting a limitation of TypeScript documented here: https://stackoverflow.com/questions/67513032/helper-function-to-un-discriminate-a-discriminated-union
+                sender,
+                ...spaceInnerEvent,
+            });
+        }
+    }
+
+    public emitPublicMessage(message: NonNullable<SpaceEvent["event"]>): void {
+        if (this._isDestroyed) {
+            console.warn("Space is destroyed, skipping emitPublicMessage");
+            return;
+        }
+        this._connection.emitPublicSpaceEvent(this.name, message);
+    }
+
+    public emitPrivateMessage(message: NonNullable<PrivateSpaceEvent["event"]>, receiverUserId: string): void {
+        this._connection.emitPrivateSpaceEvent(this.name, message, receiverUserId);
+    }
+
+    public emitBackEvent(message: NonNullable<BackEventFrontToPusherMessage["backEvent"]>): void {
+        this._connection.emitBackEvent(this.name, message);
+    }
+
+    public emitVideoQualityReport(message: VideoQualityReportMessage): void {
+        if (this._isDestroyed) {
+            return;
+        }
+        this._connection.emitVideoQualityReport(message);
+    }
+
+    /**
+     * Sends a message to the server to update our user in the space.
+     */
+    public emitUpdateUser(spaceUser: SpaceUserUpdate): void {
+        if (this._isDestroyed) {
+            console.warn("Space is destroyed, skipping emitUpdateUser");
+            return;
+        }
+        this._connection.emitUpdateSpaceUserMessage(this.name, spaceUser);
+    }
+
+    /**
+     * IMPORTANT: The only valid way to destroy a space is to use the SpaceRegistry.
+     * Do not call this method directly.
+     */
+    async destroy() {
+        this._isDestroyed = true;
+        this.state.destroy();
+
+        this.retryAbortController?.abort();
+        if (this.retryTimeout) {
+            clearTimeout(this.retryTimeout);
+        }
+
+        try {
+            await this.userLeaveSpace();
+        } catch (e) {
+            if (e instanceof ConnectionClosedError) {
+                // It is not uncommon to try to leave a space after the connection is closed.
+                // In that case, we just skip logging the error.
+            } else {
+                console.error("Error while leaving space", e);
+                Sentry.captureException(e);
+            }
+        }
+
+        for (const subscription of Object.values(this.publicEventsObservables)) {
+            subscription.complete();
+        }
+        for (const subscription of Object.values(this.privateEventsObservables)) {
+            subscription.complete();
+        }
+        this._onLeaveSpace.next();
+        this._onLeaveSpace.complete();
+        this.observeSyncUserAdded.unsubscribe();
+        this.observeSyncUserUpdated.unsubscribe();
+        this.observeSyncUserRemoved.unsubscribe();
+        this.observeVideoPeerAdded?.unsubscribe();
+        this.observeVideoPeerRemoved?.unsubscribe();
+        this.observeScreenSharingPeerAdded?.unsubscribe();
+        this.observeScreenSharingPeerRemoved?.unsubscribe();
+        this.onBlockSubscribe.unsubscribe();
+        this.onUnBlockSubscribe.unsubscribe();
+        this.observeSyncBlockUser.unsubscribe();
+        this.observeSyncUnblockUser.unsubscribe();
+        for (const observable of Object.values(this.metadataObservables)) {
+            observable.complete();
+        }
+
+        this._peerManager.destroy();
+
+        this.allVideoStreamStore.forEach((videoBox) => {
+            videoBox.destroy(true);
+        });
+
+        this.allScreenShareStreamStore.forEach((videoBox) => {
+            videoBox.destroy(true);
+        });
+
+        if (this._registerRefCount > 0) {
+            this.unregisterSpaceFilter();
+        }
+
+        this.isDestroyed = true;
+    }
+
+    get simplePeer(): SimplePeerConnectionInterface | undefined {
+        return this._peerManager.getPeer();
+    }
+
+    get spacePeerManager(): SpacePeerManager {
+        return this._peerManager;
+    }
+
+    /**
+     * Retries all failed connections in this space
+     */
+    retryAllFailedConnections(): void {
+        this._peerManager.retryAllFailedConnections();
+    }
+
+    /**
+     * @returns an observable that emits the new metadata of the space when it changes.
+     */
+    watchSpaceMetadata(): Observable<UpdateSpaceMetadataMessage> {
+        return this._connection.updateSpaceMetadataMessageStream;
+    }
+
+    /**
+     * @returns an observable that emits the new users of the space when it changes.
+     */
+    watchInitSpaceUsersMessage(): Observable<InitSpaceUsersMessage> {
+        return this._connection.initSpaceUsersMessageStream;
+    }
+
+    //FROM SPACE FILTER
+
+    initMetadata(metadata: string): void {
+        if (metadata === "") {
+            return;
+        }
+        const metadataMap = new Map(Object.entries(JSON.parse(metadata)));
+        for (const [key, value] of metadataMap.entries()) {
+            this._metadata.set(key, value);
+
+            const observable = this.metadataObservables[key];
+            if (observable) {
+                observable.next(value);
+            }
+        }
+        if (this._metadataSubject) {
+            this._metadataSubject.next(this._metadata);
+        }
+    }
+    initUsers(users: SpaceUser[]): void {
+        for (const user of users) {
+            const extendSpaceUser = this.extendSpaceUser(user);
+            if (!this._users.has(user.spaceUserId)) {
+                if (this.isVideoSpace() && user.spaceUserId !== this._mySpaceUserId) {
+                    const videoBox = this.getEmptyVideoBox(extendSpaceUser);
+                    const streamable = this.spacePeerManager.getVideoForUser(user.spaceUserId);
+                    if (streamable) {
+                        this.applyMuteAudioToStreamable(streamable, user);
+                        videoBox.setNewStreamable(streamable);
+                    }
+                    this.allVideoStreamStore.set(user.spaceUserId, videoBox);
+
+                    if (this._blackListManager.isBlackListed(user.spaceUserId)) {
+                        this.emitPrivateMessage(
+                            {
+                                $case: "blockUserMessage",
+                                blockUserMessage: {},
+                            },
+                            user.spaceUserId,
+                        );
+                    }
+
+                    if (user.screenSharingState) {
+                        const screenShareVideoBox = this.getEmptyVideoBox(extendSpaceUser, true);
+                        const screenShareStreamable = this.spacePeerManager.getScreenSharingForUser(user.spaceUserId);
+                        if (screenShareStreamable) {
+                            this.applyMuteAudioToStreamable(screenShareStreamable, user);
+                            screenShareVideoBox.setNewStreamable(screenShareStreamable);
+                        }
+                        this.allScreenShareStreamStore.set(user.spaceUserId, screenShareVideoBox);
+                    }
+                }
+
+                this._users.set(user.spaceUserId, extendSpaceUser);
+                if (this._addUserSubject) {
+                    this._addUserSubject.next(extendSpaceUser);
+                }
+            }
+        }
+
+        this._setUsers?.(this._users);
+        this.refreshHasRemoteSpeaker();
+        this.initPromise?.resolve();
+    }
+
+    /**
+     * Recomputed rather than counted incrementally: the three call sites below are the only
+     * ways `_users` changes, and a scan of a handful of users is cheaper than a tally that
+     * can drift. Silent when the answer is unchanged, so subscribers see edges only.
+     */
+    private refreshHasRemoteSpeaker(): void {
+        let hasRemoteSpeaker = false;
+        for (const user of this._users.values()) {
+            if (user.megaphoneState && user.spaceUserId !== this._mySpaceUserId) {
+                hasRemoteSpeaker = true;
+                break;
+            }
+        }
+
+        if (hasRemoteSpeaker === this._hasRemoteSpeaker) {
+            return;
+        }
+
+        this._hasRemoteSpeaker = hasRemoteSpeaker;
+        this._setHasRemoteSpeaker?.(hasRemoteSpeaker);
+    }
+
+    addUser(user: SpaceUser): SpaceUserExtended {
+        const extendSpaceUser = this.extendSpaceUser(user);
+
+        if (!this._users.has(user.spaceUserId)) {
+            if (this.isVideoSpace() && user.spaceUserId !== this._mySpaceUserId) {
+                const streamable = this.spacePeerManager.getVideoForUser(user.spaceUserId);
+                const videoBox = this.getEmptyVideoBox(extendSpaceUser);
+
+                if (streamable) {
+                    this.applyMuteAudioToStreamable(streamable, user);
+                    videoBox.setNewStreamable(streamable);
+                }
+                this.allVideoStreamStore.set(user.spaceUserId, videoBox);
+
+                if (this._blackListManager.isBlackListed(user.spaceUserId)) {
+                    this.emitPrivateMessage(
+                        {
+                            $case: "blockUserMessage",
+                            blockUserMessage: {},
+                        },
+                        user.spaceUserId,
+                    );
+                }
+            }
+            this._users.set(user.spaceUserId, extendSpaceUser);
+            if (this._setUsers) {
+                this._setUsers(this._users);
+            }
+            this.refreshHasRemoteSpeaker();
+
+            if (this._addUserSubject) {
+                this._addUserSubject.next(extendSpaceUser);
+            }
+        }
+
+        return extendSpaceUser;
+    }
+
+    removeUser(spaceUserId: string): void {
+        const user = this._users.get(spaceUserId);
+        if (user) {
+            this._users.delete(spaceUserId);
+            if (this._setUsers) {
+                this._setUsers(this._users);
+            }
+            this.refreshHasRemoteSpeaker();
+            if (this._leftUserSubject) {
+                this._leftUserSubject.next(user);
+            }
+
+            this.allVideoStreamStore.get(spaceUserId)?.destroy();
+            this.allVideoStreamStore.delete(spaceUserId);
+            this.allScreenShareStreamStore.get(spaceUserId)?.destroy();
+            this.allScreenShareStreamStore.delete(spaceUserId);
+        }
+    }
+
+    updateUserData(newData: SpaceUser, updateMask: string[]): void {
+        if (!newData.spaceUserId && newData.spaceUserId !== "") return;
+
+        const userToUpdate = this._users.get(newData.spaceUserId);
+
+        if (!userToUpdate) return;
+
+        // For some reason, the WithFieldMask type seems to apply recursively on array. I think it is a bug in our context.
+        const maskedNewData = applyFieldMask(newData, updateMask) as unknown as Partial<SpaceUser>;
+
+        deepmergeInto(userToUpdate, maskedNewData);
+
+        // Guarded because this one runs on every position and state update of every user,
+        // unlike the add/remove paths.
+        if (maskedNewData.megaphoneState !== undefined) {
+            this.refreshHasRemoteSpeaker();
+        }
+
+        for (const key in maskedNewData) {
+            // We allow ourselves a not 100% exact type cast here.
+            // Technically, newData could contain any key, not only keys part of SpaceUser type (because additional keys
+            // are allowed in Javascript objects)
+            // However, we know for sure that the keys of newData are part of SpaceUser type, so we can safely cast them.
+            const castKey = key as keyof typeof newData;
+            // Out of security, we add a runtime check to ensure that the key is part of SpaceUser type
+            if (castKey in userToUpdate.reactiveUser) {
+                // Finally, we cast the "Readable" to "Writable" to be able to update the value. We know for sure it is
+                // writable because the only place that can create a "ReactiveSpaceUser" is the "extendSpaceUser" method.
+                const store = userToUpdate.reactiveUser[castKey];
+                if (typeof store === "object" && "set" in store) {
+                    (store as Writable<unknown>).set(newData[castKey]);
+                }
+            }
+        }
+
+        if (this._updateUserSubject) {
+            this._updateUserSubject.next({
+                newUser: userToUpdate,
+                changes: maskedNewData,
+                updateMask: updateMask,
+            });
+        }
+
+        // Handle megaphoneState changes for seeAttendees feature
+        // When a user's megaphoneState changes, update the muteAudio on their streamables
+        if (maskedNewData.megaphoneState !== undefined && userToUpdate.spaceUserId !== this._mySpaceUserId) {
+            const videoBox = this.allVideoStreamStore.get(userToUpdate.spaceUserId);
+            if (videoBox) {
+                videoBox.applyToAllStreamables((streamable) => {
+                    this.applyMuteAudioToStreamable(streamable, userToUpdate);
+                });
+            }
+            const screenShareVideoBox = this.allScreenShareStreamStore.get(userToUpdate.spaceUserId);
+            if (screenShareVideoBox) {
+                screenShareVideoBox.applyToAllStreamables((streamable) => {
+                    this.applyMuteAudioToStreamable(streamable, userToUpdate);
+                });
+            }
+        }
+
+        if (maskedNewData.cameraState !== undefined && userToUpdate.spaceUserId !== this._mySpaceUserId) {
+            this.updateVideoBoxPriorities();
+        }
+
+        if (maskedNewData.screenSharingState !== undefined && userToUpdate.spaceUserId !== this._mySpaceUserId) {
+            if (maskedNewData.screenSharingState) {
+                const videoBox = this.getEmptyVideoBox(userToUpdate, true);
+                const streamable = this._peerManager.getScreenSharingForUser(userToUpdate.spaceUserId);
+                if (streamable) {
+                    this.applyMuteAudioToStreamable(streamable, userToUpdate);
+                    videoBox.setNewStreamable(streamable);
+                }
+
+                this.allScreenShareStreamStore.set(userToUpdate.spaceUserId, videoBox);
+                this._highlightedEmbedScreenStore.highlight(videoBox);
+            } else {
+                this.allScreenShareStreamStore.get(userToUpdate.spaceUserId)?.destroy();
+                this.allScreenShareStreamStore.delete(userToUpdate.spaceUserId);
+            }
+        }
+    }
+
+    private extendSpaceUser(user: SpaceUser): SpaceUserExtended {
+        const extendedUser = {
+            ...user,
+            pictureStore: readable<string | undefined>(undefined, (set) => {
+                CharacterLayerManager.wokaBase64(user.characterTextures)
+                    .then((wokaBase64) => {
+                        set(wokaBase64);
+                    })
+                    .catch((e) => {
+                        Sentry.captureException(e);
+                        console.warn("Error while getting woka base64", e);
+                    });
+            }),
+
+            //emitter,
+            emitPrivateEvent: (message: NonNullable<PrivateSpaceEvent["event"]>) => {
+                if (this._isDestroyed) {
+                    console.warn("Space is destroyed, skipping emitPrivateEvent");
+                    return;
+                }
+                this._connection.emitPrivateSpaceEvent(this.getName(), message, user.spaceUserId);
+            },
+            space: this,
+            // reactiveUser will be initialized just after the object creation
+            reactiveUser: undefined as unknown as ReactiveSpaceUser,
+        } as SpaceUserExtended;
+
+        extendedUser.reactiveUser = new Proxy(
+            {
+                spaceUserId: extendedUser.spaceUserId,
+                roomName: extendedUser.roomName,
+                playUri: extendedUser.playUri,
+            },
+            {
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                get(target: any, property: PropertyKey, receiver: unknown) {
+                    if (typeof property !== "string") {
+                        return Reflect.get(target, property, receiver);
+                    }
+
+                    if (target[property as keyof ReactiveSpaceUser]) {
+                        return target[property as keyof ReactiveSpaceUser];
+                    } else {
+                        if (property in extendedUser) {
+                            //@ts-ignore We check just above that the property is in extendedUser
+                            target[property] = writable(extendedUser[property]);
+                            return target[property];
+                        } else {
+                            return Reflect.get(target, property, receiver);
+                        }
+                    }
+                },
+            },
+        );
+
+        return extendedUser;
+    }
+
+    private unregisterSpaceFilter() {
+        if (this._isDestroyed) {
+            console.warn("Space is destroyed, skipping unregisterSpaceFilter");
+            return;
+        }
+        this._registerRefCount--;
+        if (this._registerRefCount === 0) {
+            this._connection.emitRemoveSpaceFilter({
+                spaceFilterMessage: {
+                    spaceName: this.getName(),
+                },
+            });
+            if (this.initPromise) {
+                // Reject the pending init promise to cancel any awaiting getUsers()
+                // Attach a no-op catch to avoid unhandled rejection errors in tests/runtime.
+                this.initPromise.promise.catch(() => {});
+                this.initPromise.reject();
+                this.initPromise = undefined;
+            }
+        }
+    }
+
+    private registerSpaceFilter() {
+        if (this._isDestroyed) {
+            console.warn("Space is destroyed, skipping registerSpaceFilter");
+            return;
+        }
+        if (this._registerRefCount === 0) {
+            this._connection.emitAddSpaceFilter({
+                spaceFilterMessage: {
+                    spaceName: this.getName(),
+                },
+            });
+            if (this.initPromise) {
+                // Cancel previous init promise if a new registration starts
+                this.initPromise.promise.catch(() => {});
+                this.initPromise.reject();
+            }
+            this.initPromise = new Deferred<void>();
+            // Ensure rejections are handled to prevent unhandled rejection warnings/errors
+            this.initPromise.promise.catch(() => {});
+        }
+        this._registerRefCount++;
+    }
+
+    public getSpaceUserBySpaceUserId(id: string): SpaceUserExtended | undefined {
+        return this._users.get(id);
+    }
+
+    public getSpaceUserByUuid(uuid: string): SpaceUserExtended | undefined {
+        return Array.from(this._users.values())
+            .filter((user) => {
+                return this.mySpaceUserId !== user.spaceUserId;
+            })
+            .find((user) => user.uuid === uuid);
+    }
+
+    public getSpaceUserByUserId(id: number): SpaceUserExtended | undefined {
+        return lookupUserById(id, this);
+    }
+
+    public getScreenSharingPeerVideoBox(id: SpaceUser["spaceUserId"]): VideoBox | undefined {
+        return this.allScreenShareStreamStore.get(id);
+    }
+    public getVideoPeerVideoBox(id: SpaceUser["spaceUserId"]): VideoBox | undefined {
+        const videoBox = this.allVideoStreamStore.get(id);
+        if (!videoBox) {
+            console.error(">>>>> getVideoPeerVideoBox => Video box not found for user", id);
+            return undefined;
+        }
+        return videoBox;
+    }
+
+    public setActiveSpeakers(spaceUserIds: SpaceUser["spaceUserId"][]): void {
+        const now = Date.now();
+        const stillSpeaking = new Set(spaceUserIds);
+        for (const previousSpeakerId of this.activeSpeakerIds) {
+            if (!stillSpeaking.has(previousSpeakerId)) {
+                const videoBox = this.allVideoStreamStore.get(previousSpeakerId);
+                if (videoBox) {
+                    videoBox.lastSpeakTimestamp = now;
+                }
+            }
+        }
+        this.activeSpeakerIds = spaceUserIds;
+        this.updateVideoBoxPriorities();
+    }
+
+    /**
+     * Active speakers come first, in speaking order. The other users are ranked by how recently they spoke
+     * and whether their camera is on (see idleVideoBoxPriority). Screen shares keep their fixed priority.
+     */
+    private updateVideoBoxPriorities(): void {
+        const now = Date.now();
+        for (const videoBox of this.allVideoStreamStore.values()) {
+            videoBox.priority = idleVideoBoxPriority(videoBox.spaceUser.cameraState, videoBox.lastSpeakTimestamp, now);
+        }
+
+        let rank = 0;
+        for (const speakerId of this.activeSpeakerIds) {
+            const videoBox = this.allVideoStreamStore.get(speakerId);
+            if (videoBox) {
+                videoBox.priority = VIDEO_STARTING_PRIORITY + rank++;
+            }
+        }
+
+        // The value is meaningless: changing it makes orderedStreamableCollectionStore sort again.
+        triggerReorderStore.update((value) => value + 1);
+    }
+
+    public async dispatchSound(url: URL): Promise<void> {
+        await this.spacePeerManager.dispatchSound(url);
+    }
+
+    public getPropertiesToSync(): string[] {
+        return this._propertiesToSync;
+    }
+
+    public get mySpaceUserId(): SpaceUser["spaceUserId"] {
+        return this._mySpaceUserId;
+    }
+
+    /**
+     * In a live streaming space (megaphone, podium), only the speakers publish their screen share.
+     * Returns true when the local user may publish/send screen share, false when they are in the audience.
+     */
+    public shouldPublishScreenShare(): boolean {
+        return get(this.shouldPublishScreenShareStore);
+    }
+
+    /**
+     * Returns a promise that resolves to the current list of users in the space.
+     * The promise will only resolve once the initial list of users has been received from the server.
+     * After that, the promise will resolve immediately with the current list of users.
+     * Important! This method will register a space watcher on the connection if one is not already registered.
+     * If no other method is called to hold this watcher, it will be unregistered on the next tick of the event loop.
+     * Calling getUsers() multiple times would query the full user list multiple times, which is not efficient.
+     * Use observeUserJoined, observeUserLeft and observeUserUpdated to be notified of user changes or the usersStore.
+     */
+    public async getUsers(options?: { signal: AbortSignal }): Promise<Map<string, Readonly<SpaceUserExtended>>> {
+        this.registerSpaceFilter();
+
+        setTimeout(() => {
+            // Let's unregister, but later, to let potential subscribers register just after getUsers() returned.
+            if (!this.isDestroyed) {
+                this.unregisterSpaceFilter();
+            }
+        }, 0);
+
+        if (!this.initPromise) {
+            throw new Error("initPromise is not defined");
+        }
+
+        await raceAbort(this.initPromise.promise, options?.signal);
+
+        return this._users;
+    }
+
+    public waitForSpaceUser(spaceUserId: SpaceUser["spaceUserId"], timeoutMs: number): Promise<SpaceUserExtended> {
+        const existingUser = this.getSpaceUserBySpaceUserId(spaceUserId);
+        if (existingUser) {
+            return Promise.resolve(existingUser);
+        }
+
+        return new Promise<SpaceUserExtended>((resolve, reject) => {
+            let settled = false;
+            const subscriptions: Subscription[] = [];
+
+            const finalize = (callback: () => void) => {
+                if (settled) {
+                    return;
+                }
+
+                settled = true;
+                if (timeout) {
+                    clearTimeout(timeout);
+                }
+                subscriptions.forEach((subscription) => subscription.unsubscribe());
+                callback();
+            };
+
+            const resolveIfMatches = (user: SpaceUserExtended) => {
+                if (user.spaceUserId !== spaceUserId) {
+                    return;
+                }
+
+                finalize(() => resolve(user));
+            };
+
+            subscriptions.push(this.observeUserJoined.subscribe((user) => resolveIfMatches(user)));
+            subscriptions.push(this.observeUserUpdated.subscribe((event) => resolveIfMatches(event.newUser)));
+
+            const timeout = setTimeout(() => {
+                finalize(() =>
+                    reject(new TimeoutError(`Timed out waiting for user "${spaceUserId}" in space "${this.name}"`)),
+                );
+            }, timeoutMs);
+
+            const currentUser = this.getSpaceUserBySpaceUserId(spaceUserId);
+            if (currentUser) {
+                finalize(() => resolve(currentUser));
+                return;
+            }
+        });
+    }
+
+    public isVideoSpace(): boolean {
+        return this._propertiesToSync.some((prop) =>
+            ["cameraState", "microphoneState", "screenSharingState"].includes(prop),
+        );
+    }
+
+    /**
+     * Determines if audio should be muted for a user based on the space filter type and megaphone state.
+     * For seeAttendees feature: listeners (non-speakers) should be muted in feedback spaces.
+     */
+    private shouldMuteAudioForUser(user: SpaceUser): boolean {
+        return this.filterType === FilterType.LIVE_STREAMING_USERS_WITH_FEEDBACK && !user.megaphoneState;
+    }
+
+    /**
+     * Applies the muteAudio logic to a streamable based on the user's state.
+     */
+    private applyMuteAudioToStreamable(streamable: Streamable, user: SpaceUser): void {
+        streamable.muteAudio.set(this.shouldMuteAudioForUser(user));
+    }
+
+    private getEmptyVideoBox(user: SpaceUserExtended, isScreenSharing: boolean = false): VideoBox {
+        return VideoBox.fromRemoteSpaceUser(user, isScreenSharing, this.kind === "megaphone");
+    }
+
+    /**
+     * Start streaming the local camera and microphone to other users in the space as a speaker.
+     * This will trigger an error if the filter type is ALL_USERS (because everyone is always streaming in a ALL_USERS space).
+     */
+    public startStreaming() {
+        if (this.filterType === FilterType.ALL_USERS) {
+            throw new Error("Cannot start streaming in a ALL_USERS space because everyone is always streaming");
+        }
+
+        this.emitUpdateUser({
+            megaphoneState: true,
+        });
+
+        this._isSpeakerStreamingStore.set(true);
+    }
+
+    /**
+     * Stop streaming the local camera and microphone to other users in the space as a speaker.
+     * This will trigger an error if the filter type is ALL_USERS (because everyone is always streaming in a ALL_USERS space).
+     */
+    public stopStreaming() {
+        if (this.filterType === FilterType.ALL_USERS) {
+            throw new Error("Cannot stop streaming in a ALL_USERS space because everyone is always streaming");
+        }
+        this.emitUpdateUser({
+            megaphoneState: false,
+        });
+        this._isSpeakerStreamingStore.set(false);
+    }
+
+    /**
+     * Start streaming as a listener (for seeAttendees feature).
+     * This enables video streaming WITHOUT setting megaphoneState to true.
+     * The listener's video will only be visible to speakers, not to other listeners.
+     */
+    public startListenerStreaming() {
+        if (this.filterType !== FilterType.LIVE_STREAMING_USERS_WITH_FEEDBACK) {
+            throw new Error(
+                "startListenerStreaming() can only be called in a LIVE_STREAMING_USERS_WITH_FEEDBACK space",
+            );
+        }
+        // Enable streaming without setting megaphoneState
+        this.emitUpdateUser({
+            attendeesState: true,
+        });
+        // This allows the listener to share their camera while remaining invisible to other listeners
+        this._isListenerStreamingStore.set(true);
+    }
+
+    /**
+     * Stop streaming as a listener (for seeAttendees feature).
+     */
+    public stopListenerStreaming() {
+        if (this.filterType !== FilterType.LIVE_STREAMING_USERS_WITH_FEEDBACK) {
+            throw new Error("stopListenerStreaming() can only be called in a LIVE_STREAMING_USERS_WITH_FEEDBACK space");
+        }
+
+        this.emitUpdateUser({
+            attendeesState: false,
+        });
+
+        this._isListenerStreamingStore.set(false);
+    }
+
+    get isStreamingVideoStore(): Readable<boolean> {
+        return this._isStreamingVideoStore;
+    }
+
+    get isStreamingAudioStore(): Readable<boolean> {
+        return this._isStreamingAudioStore;
+    }
+
+    get canAskToMuteAudioOrTurnOffVideo(): Readable<boolean> {
+        return this._isStreamingAudioStore;
+    }
+
+    private blockUser(spaceUserId: string): void {
+        this._blockedUsersStore.update((blockedUsers) => {
+            blockedUsers.add(spaceUserId);
+            return blockedUsers;
+        });
+    }
+
+    private unblockUser(spaceUserId: string): void {
+        this._blockedUsersStore.update((blockedUsers) => {
+            blockedUsers.delete(spaceUserId);
+            return blockedUsers;
+        });
+    }
+
+    private blockByUser(spaceUserId: string): void {
+        this._blockedByUsersStore.update((blockedByUsers) => {
+            blockedByUsers.add(spaceUserId);
+            return blockedByUsers;
+        });
+    }
+
+    private unblockByUser(spaceUserId: string): void {
+        this._blockedByUsersStore.update((blockedByUsers) => {
+            blockedByUsers.delete(spaceUserId);
+            return blockedByUsers;
+        });
+    }
+
+    public get destroyed(): boolean {
+        return this._isDestroyed;
+    }
+
+    /**
+     * Method called when the connection to the space is lost (there was a disconnect between the pusher and the back)
+     * When called: we mimic a full user removal and we clear all the data related to the space.
+     * Then, we retry to join the space.
+     */
+    public onDisconnect() {
+        // Mimic a full user removal
+        const users = Array.from(this._users.values());
+        for (const user of users) {
+            this.removeUser(user.spaceUserId);
+        }
+
+        this._peerManager.destroy();
+        this._peerManager = new SpacePeerManager(this, this._allBlockedUsersStore);
+        this.registerPeerManagerEventHandlers();
+
+        this.reconnect();
+    }
+
+    private retryAbortController: AbortController | undefined = undefined;
+    private retryTimeout: ReturnType<typeof setTimeout> | undefined = undefined;
+
+    private reconnect() {
+        if (this.retryAbortController) {
+            // Let's cancel the previous reconnection before retrying
+            this.retryAbortController.abort(new AbortError());
+        }
+        if (this.retryTimeout) {
+            clearTimeout(this.retryTimeout);
+        }
+
+        this.retryAbortController = new AbortController();
+        // Let's give it max 5 seconds to reconnect before re-retrying
+        const signal = abortAny([
+            this.retryAbortController.signal,
+            abortTimeout(5000, new TimeoutError("Operation timed out")),
+        ]);
+
+        (async () => {
+            const spaceUserId = await this._connection.emitJoinSpace(
+                this.name,
+                this.filterType,
+                this._propertiesToSync,
+                {
+                    signal,
+                },
+            );
+
+            if (spaceUserId !== this._mySpaceUserId) {
+                console.warn(
+                    "Reconnected to space but received different spaceUserId",
+                    spaceUserId,
+                    this._mySpaceUserId,
+                );
+            }
+
+            if (this._registerRefCount !== 0) {
+                // If we were previously listening to the space, let's reregister
+                this._connection.emitAddSpaceFilter({
+                    spaceFilterMessage: {
+                        spaceName: this.getName(),
+                    },
+                });
+            }
+        })().catch((e) => {
+            if (e instanceof AbortError && !(e instanceof TimeoutError)) {
+                // Retry was aborted, do nothing
+                return;
+            }
+            this.retryTimeout = setTimeout(() => {
+                this.reconnect();
+            }, 5000);
+        });
+    }
+
+    private registerPeerManagerEventHandlers() {
+        this.observeVideoPeerAdded?.unsubscribe();
+        this.observeVideoPeerRemoved?.unsubscribe();
+        this.observeVideoPeerAdded = this._peerManager.videoPeerAdded.subscribe((peer) => {
+            const spaceUserId = peer.spaceUserId;
+
+            if (!spaceUserId) {
+                console.error("observeVideoPeerAdded : peer has no spaceUserId");
+                return;
+            }
+
+            const videoBox = this.getVideoPeerVideoBox(spaceUserId);
+
+            if (!videoBox) {
+                // Should not happen , we should have a videoBox for all users
+                console.error("observeVideoPeerAdded : videoBox not found for user", spaceUserId);
+                return;
+            }
+
+            // Apply muteAudio for seeAttendees feature
+            const user = this._users.get(spaceUserId);
+            if (user) {
+                this.applyMuteAudioToStreamable(peer, user);
+            }
+            videoBox.setNewStreamable(peer, {
+                waitForFirstFrame: this.shouldWaitForFirstFrameDuringTransition(user, false),
+            });
+        });
+        this.observeVideoPeerRemoved = this._peerManager.videoPeerRemoved.subscribe((peer) => {
+            const spaceUserId = peer.spaceUserId;
+
+            if (!spaceUserId) {
+                console.error("observeVideoPeerRemoved : peer has no spaceUserId");
+                return;
+            }
+
+            const videoBox = this.getVideoPeerVideoBox(spaceUserId);
+
+            if (!videoBox) {
+                return;
+            }
+
+            if (peer === get(videoBox.streamable)) {
+                videoBox.promotePendingStreamable();
+            }
+        });
+
+        this.observeScreenSharingPeerAdded?.unsubscribe();
+        this.observeScreenSharingPeerRemoved?.unsubscribe();
+        this.observeScreenSharingPeerAdded = this._peerManager.screenSharingPeerAdded.subscribe((peer) => {
+            // Peers sending our own screen carry the recipient's spaceUserId, not ours. Nothing to
+            // attach: they aren't sharing yet; updateUserData attaches this same peer when they do.
+            if (peer.uniqueId === LOCAL_SCREEN_SHARING_STREAM_ID) {
+                return;
+            }
+
+            const spaceUserId = peer.spaceUserId;
+
+            if (spaceUserId === this._mySpaceUserId) {
+                return;
+            }
+
+            if (!spaceUserId) {
+                console.error("observeScreenSharingPeerAdded : peer has no spaceUserId");
+                return;
+            }
+
+            const videoBox = this.getScreenSharingPeerVideoBox(spaceUserId);
+
+            if (!videoBox) {
+                // Should not happen , we should have a videoBox for all users
+                console.error("observeScreenSharingPeerAdded : videoBox not found for user", spaceUserId);
+                return;
+            }
+
+            // Apply muteAudio for seeAttendees feature
+            const user = this._users.get(spaceUserId);
+            if (user) {
+                this.applyMuteAudioToStreamable(peer, user);
+            }
+            videoBox.setNewStreamable(peer, {
+                waitForFirstFrame: this.shouldWaitForFirstFrameDuringTransition(user, true),
+            });
+
+            this._highlightedEmbedScreenStore.highlight(videoBox);
+        });
+        this.observeScreenSharingPeerRemoved = this._peerManager.screenSharingPeerRemoved.subscribe((peer) => {
+            const spaceUserId = peer.spaceUserId;
+
+            if (spaceUserId === this._mySpaceUserId) {
+                return;
+            }
+
+            if (!spaceUserId) {
+                console.error("observeScreenSharingPeerRemoved : peer has no spaceUserId");
+                return;
+            }
+
+            const videoBox = this.getScreenSharingPeerVideoBox(spaceUserId);
+
+            if (!videoBox) {
+                return;
+            }
+
+            if (peer === get(videoBox.streamable)) {
+                videoBox.promotePendingStreamable();
+            }
+        });
+    }
+
+    private shouldWaitForFirstFrameDuringTransition(
+        user: SpaceUserExtended | undefined,
+        isScreenSharing: boolean,
+    ): boolean {
+        if (!user) {
+            return false;
+        }
+
+        return isScreenSharing ? get(user.reactiveUser.screenSharingState) : get(user.reactiveUser.cameraState);
+    }
+}

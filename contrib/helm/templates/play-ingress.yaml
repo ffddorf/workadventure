@@ -1,0 +1,95 @@
+{{- if and (or .Values.ingress.enabled .Values.play.ingress.enabled) (not .Values.singleDomain) -}}
+{{- $fullName := include "workadventure.fullname" . -}}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ $fullName }}-play
+  labels:
+    {{- include "workadventure.labels" . | nindent 4 }}
+  {{- if or .Values.play.ingress.sticky.enabled .Values.ingress.annotationsRoot }}
+  annotations:
+    {{- with .Values.ingress.annotationsRoot }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+    {{- if .Values.play.ingress.sticky.enabled }}
+    # Sticky annotations for Nginx are added at the ingress level, while for Traefik they are added at the service level (see play-service.yaml)
+    nginx.ingress.kubernetes.io/affinity: "cookie"
+    nginx.ingress.kubernetes.io/session-cookie-name: {{ .Values.play.ingress.sticky.cookie.name | quote }}
+    nginx.ingress.kubernetes.io/session-cookie-secure: {{ .Values.play.ingress.sticky.cookie.secure | quote }}
+    nginx.ingress.kubernetes.io/session-cookie-samesite: {{ .Values.play.ingress.sticky.cookie.sameSite | title | quote }}
+    {{- end }}
+  {{- end }}
+spec:
+  {{- $ingressClassName := coalesce .Values.play.ingress.className .Values.ingress.className -}}
+  {{- if $ingressClassName }}
+  ingressClassName: {{ $ingressClassName }}
+  {{- end }}
+  {{- $tls := coalesce .Values.play.ingress.tls .Values.ingress.tls false -}}
+  {{- if $tls }}
+  tls:
+    - hosts:
+        - {{ (include "workadventure.playDomainName" .) | quote }}
+        - {{ (include "workadventure.pusherDomainName" .) | quote }}
+      secretName: {{ .Values.play.ingress.secretName | default .Values.ingress.secretName | default (printf "%s-play-cert" (include "workadventure.fullname" .)) }}
+  {{- end }}
+  rules:
+    - host: {{ (include "workadventure.playDomainName" .) | quote }}
+      http:
+        paths:
+          {{- if .Values.front.enabled }}
+          # Files of the front container that must stay same-origin with the page. The pusher proxies them
+          # too, but routing them here spares it the traffic.
+          {{- range list "/assets" "/static" "/resources" "/collections" }}
+          - path: {{ . }}
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "workadventure.fullname" $ }}-front
+                port:
+                  number: {{ $.Values.front.service.port }}
+          {{- end }}
+          {{- range list "/iframe_api.js" "/iframe_api.js.map" "/service-worker-prod.js" }}
+          - path: {{ . }}
+            pathType: Exact
+            backend:
+              service:
+                name: {{ include "workadventure.fullname" $ }}-front
+                port:
+                  number: {{ $.Values.front.service.port }}
+          {{- end }}
+          {{- end }}
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "workadventure.fullname" . }}-play
+                port:
+                  number: {{ .Values.play.service.port }}
+    - host: {{ (include "workadventure.pusherDomainName" .) | quote }}
+      http:
+        paths:
+          - path: /ws/
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "workadventure.fullname" . }}-play
+                port:
+                  number: {{ .Values.play.service.wsPort }}
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "workadventure.fullname" . }}-play
+                port:
+                  number: {{ .Values.play.service.port }}
+    - host: {{ (include "workadventure.roomApiDomainName" .) | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "workadventure.fullname" . }}-room-api
+                port:
+                  number: {{ .Values.play.roomApiService.port }}
+{{- end }}

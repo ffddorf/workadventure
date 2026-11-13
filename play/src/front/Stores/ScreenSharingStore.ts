@@ -1,0 +1,523 @@
+import type { Readable } from "svelte/store";
+import { get, derived, readable, writable } from "svelte/store";
+import { asError } from "catch-unknown";
+import type { DesktopCapturerSource } from "@workadventure/desktop-api";
+import { localUserStore } from "../Connection/LocalUserStore";
+import type { VideoQualitySetting } from "../Connection/LocalUserStore";
+import { screenShareMaxResolution } from "../WebRtc/VideoPresets";
+import LL from "../../i18n/i18n-svelte";
+import { LOCAL_SCREEN_SHARING_STREAM_ID } from "../Space/Streamable";
+import { analyticsClient } from "../Administration/AnalyticsClient";
+import type { EndTimedAnalyticsEvent } from "../Administration/TimedAnalyticsEvent";
+import type { Streamable, WebRtcStreamable } from "../Space/Streamable";
+import { VideoBox } from "../Space/VideoBox";
+import { localEncoderStatsStore } from "../WebRtc/LocalEncoderStats";
+import { isSpeakerStore, type LocalStreamStoreValue } from "./MediaStore";
+import { isScreenSharingPickerCancelled } from "./ScreenSharingErrors";
+import { inExternalServiceStore, myCameraStore, myMicrophoneStore } from "./MyMediaStore";
+import type {} from "../Api/Desktop";
+import { screenShareStreamElementsStore } from "./PeerStore";
+import { muteMediaStreamStore } from "./MuteMediaStreamStore";
+import { isScreenSharingAvailableStore } from "./IsStreamingStore";
+import { selectScreenSharingCaptureMethod } from "./ScreenSharingCapturePolicy";
+
+declare const navigator: any; // eslint-disable-line @typescript-eslint/no-explicit-any
+
+/**
+ * A store that contains the camera state requested by the user (on or off).
+ */
+function createRequestedScreenSharingState() {
+    const { subscribe, set } = writable(false);
+
+    return {
+        subscribe,
+        enableScreenSharing: () => set(true),
+        disableScreenSharing: () => set(false),
+    };
+}
+
+export const requestedScreenSharingState = createRequestedScreenSharingState();
+
+let currentStream: MediaStream | undefined = undefined;
+let screenSharingRequestId = 0;
+let previousScreenSharingHadStream = false;
+
+/**
+ * The desktopCapturer source currently being shared (Electron). Retained for the whole duration of
+ * the share so the meeting bar can be placed on the RIGHT display. Set when a source
+ * is chosen; cleared only when sharing is turned off (not on every re-acquire).
+ */
+export const activeScreenShareSourceStore = writable<DesktopCapturerSource | undefined>(undefined);
+
+/**
+ * Stops the screen sharing (both video and audio tracks)
+ */
+function stopScreenSharing(): void {
+    if (currentStream) {
+        // Stop all tracks (video and audio)
+        for (const track of currentStream.getTracks()) {
+            track.stop();
+        }
+    }
+    currentStream = undefined;
+}
+
+let previousComputedVideoConstraint: boolean | MediaTrackConstraints = false;
+let previousComputedAudioConstraint: boolean | MediaTrackConstraints = false;
+
+/**
+ * Bumped to capture another source while a share is running (desktop: picking another screen from
+ * the meeting bar or the PiP). The constraints do not change, so without it nothing would re-acquire;
+ * going through "stop sharing" instead would tear down every side effect of the share (meeting bar
+ * closed and reopened).
+ */
+const screenShareSourceSwitchStore = writable(0);
+let lastHandledSourceSwitch = 0;
+
+function createScreenShareQualityStore() {
+    const { subscribe, set } = writable<VideoQualitySetting>(localUserStore.getScreenShareQuality());
+
+    return {
+        subscribe,
+        setQuality: (quality: VideoQualitySetting) => {
+            set(quality);
+            localUserStore.setScreenShareQuality(quality);
+        },
+    };
+}
+
+/**
+ * A store containing the screen share quality setting.
+ */
+export const screenShareQualityStore = createScreenShareQualityStore();
+
+/**
+ * A store containing whether the screen sharing button should be displayed or hidden.
+ */
+export const screenSharingAvailableStore = isScreenSharingAvailableStore;
+
+/**
+ * A store containing the media constraints we want to apply.
+ */
+export const screenSharingConstraintsStore = derived(
+    [
+        requestedScreenSharingState,
+        myCameraStore,
+        myMicrophoneStore,
+        inExternalServiceStore,
+        screenSharingAvailableStore,
+        screenShareStreamElementsStore,
+        isSpeakerStore,
+        screenShareSourceSwitchStore,
+    ],
+    (
+        [
+            $requestedScreenSharingState,
+            $myCameraStore,
+            $myMicrophoneStore,
+            $inExternalServiceStore,
+            $screenSharingAvailableStore,
+            $screenShareStreamElementsStore,
+            $isSpeakerStore,
+            $screenShareSourceSwitch,
+        ],
+        set,
+    ) => {
+        let currentVideoConstraint: boolean | MediaTrackConstraints = true;
+        //TODO : passer a true si on veut que le son soit activé par défaut dans le screen sharing
+        let currentAudioConstraint: boolean | MediaTrackConstraints = true;
+
+        // Disable screen sharing if the user requested so
+        if (!$requestedScreenSharingState) {
+            currentVideoConstraint = false;
+            currentAudioConstraint = false;
+        }
+
+        // Disable screen sharing if is in a external video/audio service.
+        if ($inExternalServiceStore) {
+            currentVideoConstraint = false;
+            currentAudioConstraint = false;
+        }
+
+        // Disable screen sharing if not in a live streaming context and no active screen shares or speaker status
+        if (!$screenSharingAvailableStore && $screenShareStreamElementsStore.length === 0 && !$isSpeakerStore) {
+            currentVideoConstraint = false;
+            currentAudioConstraint = false;
+        }
+
+        const sourceSwitched = $screenShareSourceSwitch !== lastHandledSourceSwitch;
+        lastHandledSourceSwitch = $screenShareSourceSwitch;
+
+        // Let's make the changes only if the new value is different from the old one (or a running
+        // share asked for another source).
+        if (
+            previousComputedVideoConstraint != currentVideoConstraint ||
+            previousComputedAudioConstraint != currentAudioConstraint ||
+            (sourceSwitched && currentVideoConstraint !== false)
+        ) {
+            previousComputedVideoConstraint = currentVideoConstraint;
+            previousComputedAudioConstraint = currentAudioConstraint;
+            // Let's copy the objects.
+            /*if (typeof previousComputedVideoConstraint !== 'boolean') {
+                previousComputedVideoConstraint = {...previousComputedVideoConstraint};
+            }
+            if (typeof previousComputedAudioConstraint !== 'boolean') {
+                previousComputedAudioConstraint = {...previousComputedAudioConstraint};
+            }*/
+
+            set({
+                video: currentVideoConstraint,
+                audio: currentAudioConstraint,
+            });
+        }
+    },
+    {
+        video: false,
+        audio: false,
+    } as MediaStreamConstraints,
+);
+
+export function isScreenSharingSupported(): boolean {
+    return (
+        selectScreenSharingCaptureMethod({
+            hasDesktopCapturer: Boolean(window.WAD?.getDesktopCapturerSources),
+            hasDisplayMedia: Boolean(navigator.mediaDevices?.getDisplayMedia),
+        }) !== "unsupported"
+    );
+}
+
+/**
+ * macOS gives an app without the screen recording permission a black or no capture: the desktop shell
+ * checks it first and explains how to grant it (older shells do not, the share then goes on).
+ */
+async function ensureDesktopScreenPermission(): Promise<boolean> {
+    const allowed = (await window.WAD?.screenPermission?.ensure()) ?? true;
+    if (!allowed) {
+        pipPreselectedScreenSource.set(undefined);
+    }
+    return allowed;
+}
+
+async function getDesktopCapturerSources() {
+    let source: DesktopCapturerSource | null;
+    const preselected = get(pipPreselectedScreenSource);
+    if (preselected) {
+        // The source was already chosen from the desktop PiP utility window — skip the in-app
+        // picker UI entirely. Without this, clicking "share" in PiP would still open the picker
+        // in the main window and force the user to switch focus back to it.
+        pipPreselectedScreenSource.set(undefined);
+        source = preselected;
+    } else {
+        showDesktopCapturerSourcePicker.set(true);
+        source = await new Promise<DesktopCapturerSource | null>((resolve) => {
+            desktopCapturerSourcePromiseResolve = resolve;
+        });
+    }
+    if (source === null) {
+        return;
+    }
+    // Retain the chosen source so the meeting bar can target its display.
+    activeScreenShareSourceStore.set(source);
+    // Note: getUserMedia with chromeMediaSource does not support audio capture.
+    // Audio is only available with getDisplayMedia when sharing a browser tab.
+    return navigator.mediaDevices.getUserMedia({
+        audio: false,
+        video: {
+            mandatory: {
+                chromeMediaSource: "desktop",
+                chromeMediaSourceId: source.id,
+            },
+        },
+    });
+}
+
+/**
+ * When set, the next call to `getDesktopCapturerSources()` skips the in-app picker and uses this
+ * source directly. The PiP utility window populates it via `startScreenShareWithSource()` so the
+ * user can pick a screen WITHOUT having to refocus the main window.
+ */
+export const pipPreselectedScreenSource = writable<DesktopCapturerSource | undefined>(undefined);
+
+/**
+ * Programmatically start screen sharing with a specific desktopCapturer source. Used by the
+ * desktop PiP utility window and the meeting bar to bypass the in-app source picker. A running share
+ * switches to the new source without stopping.
+ */
+export function startScreenShareWithSource(source: DesktopCapturerSource): void {
+    pipPreselectedScreenSource.set(source);
+    if (get(requestedScreenSharingState)) {
+        // Already sharing: capture the new source in place, the share itself goes on.
+        screenShareSourceSwitchStore.update((count) => count + 1);
+        return;
+    }
+    requestedScreenSharingState.enableScreenSharing();
+}
+
+/**
+ * A store containing the MediaStream object for ScreenSharing (or undefined if nothing requested, or Error if an error occurred)
+ */
+export const screenSharingLocalStreamStore = derived<Readable<MediaStreamConstraints>, LocalStreamStoreValue>(
+    screenSharingConstraintsStore,
+    ($screenSharingConstraintsStore, set) => {
+        const constraints = $screenSharingConstraintsStore;
+        const currentRequestId = ++screenSharingRequestId;
+
+        if ($screenSharingConstraintsStore.video === false && $screenSharingConstraintsStore.audio === false) {
+            stopScreenSharing();
+            activeScreenShareSourceStore.set(undefined);
+            requestedScreenSharingState.disableScreenSharing();
+            set({
+                type: "success",
+                stream: undefined,
+            });
+            return;
+        }
+
+        let currentStreamPromise: Promise<MediaStream | undefined>;
+        const captureMethod = selectScreenSharingCaptureMethod({
+            hasDesktopCapturer: Boolean(window.WAD?.getDesktopCapturerSources),
+            hasDisplayMedia: Boolean(navigator.mediaDevices?.getDisplayMedia),
+        });
+
+        if (captureMethod === "desktop") {
+            currentStreamPromise = ensureDesktopScreenPermission().then((allowed) =>
+                allowed ? getDesktopCapturerSources() : undefined,
+            );
+        } else if (captureMethod === "display-media") {
+            // Build constraints according to MDN specification
+            // video can be boolean or MediaTrackConstraints, default is true
+            // audio can be boolean or MediaTrackConstraints, default is false
+            const displayMediaConstraints: {
+                video: boolean | MediaTrackConstraints;
+                audio: boolean | MediaTrackConstraints;
+            } = {
+                video: !!constraints.video,
+                audio: !!constraints.audio,
+            };
+            currentStreamPromise = navigator.mediaDevices.getDisplayMedia(displayMediaConstraints);
+        } else {
+            stopScreenSharing();
+            set({
+                type: "error",
+                error: new Error("Your browser does not support sharing screen"),
+            });
+            return;
+        }
+
+        (async () => {
+            try {
+                stopScreenSharing();
+                const stream = await currentStreamPromise;
+
+                if (!stream) {
+                    if (currentRequestId === screenSharingRequestId) {
+                        requestedScreenSharingState.disableScreenSharing();
+                        set({
+                            type: "success",
+                            stream: undefined,
+                        });
+                    }
+                    return;
+                }
+
+                // Ignore stale async completions from older requests.
+                if (currentRequestId !== screenSharingRequestId) {
+                    for (const track of stream.getTracks()) {
+                        track.stop();
+                    }
+                    return;
+                }
+
+                currentStream = stream;
+
+                // Capped on the track rather than in the getDisplayMedia constraints: those are only
+                // advisory in some browsers, and the Electron capture path does not go through them.
+                const videoTrack = stream.getVideoTracks()[0];
+                if (videoTrack) {
+                    try {
+                        await videoTrack.applyConstraints(screenShareMaxResolution[get(screenShareQualityStore)]);
+                    } catch (e) {
+                        // Not fatal: we simply keep the native resolution.
+                        console.warn("Could not cap the screen sharing resolution", e);
+                    }
+                }
+
+                if (currentRequestId !== screenSharingRequestId) {
+                    for (const track of stream.getTracks()) {
+                        track.stop();
+                    }
+                    return;
+                }
+
+                // If stream ends (for instance if user clicks the stop screen sharing button in the browser), let's close the view
+                for (const track of currentStream.getTracks()) {
+                    track.onended = () => {
+                        stopScreenSharing();
+                        // Reset below means the constraints store sees no change and never re-runs the
+                        // branch that clears the source: drop it here, or the HUD stays on its display.
+                        activeScreenShareSourceStore.set(undefined);
+                        requestedScreenSharingState.disableScreenSharing();
+                        previousComputedVideoConstraint = false;
+                        previousComputedAudioConstraint = false;
+                        set({
+                            type: "success",
+                            stream: undefined,
+                        });
+                    };
+                }
+
+                set({
+                    type: "success",
+                    stream: currentStream,
+                });
+                return;
+            } catch (e) {
+                if (currentRequestId !== screenSharingRequestId) {
+                    return;
+                }
+                currentStream = undefined;
+                requestedScreenSharingState.disableScreenSharing();
+                const error = asError(e);
+                if (isScreenSharingPickerCancelled(error, Boolean(window.WAD?.desktop))) {
+                    // Not an error: nothing is shared, and no "Cannot start screen sharing" message.
+                    set({
+                        type: "success",
+                        stream: undefined,
+                    });
+                    return;
+                }
+                console.info(`Error. Unable to share screen. ${error.message}`, e);
+                set({
+                    type: "error",
+                    error: error,
+                });
+            }
+        })().catch((e) => {
+            const error = asError(e);
+            console.error(`Error when starting screenshare: ${error.message}`, e);
+        });
+    },
+);
+
+export interface ScreenSharingLocalMedia {
+    uniqueId: string;
+    stream: MediaStream | undefined;
+    userId?: undefined;
+}
+
+/**
+ * The representation of the screen sharing stream.
+ */
+const screenSharingLocalMedia = readable<Streamable | undefined>(undefined, function start(set) {
+    const localMediaStreamStore = writable<MediaStream | undefined>(undefined);
+    const mutedLocalMediaStreamStore = muteMediaStreamStore(localMediaStreamStore);
+
+    const hasAudio = derived(
+        localMediaStreamStore,
+        ($localMediaStreamStore) => ($localMediaStreamStore?.getAudioTracks().length ?? 0) > 0,
+    );
+
+    const localMedia = {
+        uniqueId: LOCAL_SCREEN_SHARING_STREAM_ID,
+        media: {
+            type: "webrtc" as const,
+            streamStore: mutedLocalMediaStreamStore,
+            isBlocked: writable(false),
+            setDimensions: () => {
+                // Local screen sharing does not support adaptive video (it's local)
+            },
+        } satisfies WebRtcStreamable,
+        spaceUserId: undefined,
+        hasVideo: writable(true),
+        hasAudio,
+        name: writable(""),
+        showVoiceIndicator: writable(false),
+        statusStore: writable("connected"),
+        volumeStore: writable(undefined),
+        flipX: false,
+        muteAudio: writable(true),
+        displayMode: "fit" as const,
+        usePresentationMode: true,
+        closeStreamable: () => {},
+        canCloseStreamable: () => false,
+        volume: writable(1),
+        videoType: "screenSharing",
+        webrtcStats: undefined,
+        senderStats: localEncoderStatsStore.screenSharing,
+    } satisfies Streamable;
+
+    const unsubscribe = screenSharingLocalStreamStore.subscribe((screenSharingLocalStream) => {
+        localMedia.name = writable(get(LL).camera.my.nameTag());
+        if (screenSharingLocalStream.type === "success") {
+            localMediaStreamStore.set(screenSharingLocalStream.stream);
+            if (screenSharingLocalStream.stream === undefined) {
+                set(undefined);
+            } else {
+                set(localMedia);
+            }
+        } else {
+            localMediaStreamStore.set(undefined);
+            set(undefined);
+        }
+    });
+
+    return function stop() {
+        unsubscribe();
+    };
+});
+
+export const screenSharingLocalVideoBox: Readable<VideoBox | undefined> = derived(
+    [screenSharingLocalMedia],
+    ([$screenSharingLocalMedia], set) => {
+        if (!$screenSharingLocalMedia) {
+            set(undefined);
+            return undefined;
+        }
+
+        const videoBox = VideoBox.fromLocalStreamable($screenSharingLocalMedia, -1);
+
+        set(videoBox);
+
+        return () => {
+            videoBox.destroy();
+        };
+    },
+);
+
+export const showDesktopCapturerSourcePicker = writable(false);
+
+export let desktopCapturerSourcePromiseResolve: ((source: DesktopCapturerSource | null) => void) | undefined;
+
+/** Ends the interval measuring the share currently on air, if any. */
+let endShare: EndTimedAnalyticsEvent | undefined;
+
+// This is a singleton so we can safely not ever unsubscribe from it.
+// eslint-disable-next-line svelte/no-ignored-unsubscribe
+screenSharingLocalStreamStore.subscribe((screenSharingLocalStream) => {
+    const stream = screenSharingLocalStream.type === "success" ? screenSharingLocalStream.stream : undefined;
+    const hasStream = !!stream;
+
+    if (hasStream && !previousScreenSharingHadStream) {
+        // A live handle here means the matching stop never arrived, so this interval's
+        // end is the arrival of the next one rather than a real stop. The client does
+        // not state why an interval closed, so that is not distinguishable downstream.
+        endShare?.();
+        endShare = analyticsClient.openTimedEvent(
+            "meeting.screenshare.ended",
+            { hasAudio: (stream?.getAudioTracks().length ?? 0) > 0 },
+            // Still sharing after a reconnect: nothing fires a second start, so without
+            // this the rest of the share is never measured.
+            { reopenOnReconnect: true },
+        );
+    }
+
+    if (!hasStream && previousScreenSharingHadStream) {
+        // No duration, and no clock read: the pusher measures the interval. This used
+        // to report max(1, round(now - startedAt)) — a floor that turned a share
+        // cancelled in 200ms into a reported second.
+        endShare?.();
+        endShare = undefined;
+    }
+
+    previousScreenSharingHadStream = hasStream;
+});

@@ -1,0 +1,84 @@
+import type { ClientDuplexStream } from "@grpc/grpc-js";
+import type {
+    PusherToBackMessage,
+    ServerToClientMessage,
+    BackToPusherSpaceMessage,
+    PusherToBackSpaceMessage,
+    ApplicationDefinitionInterface,
+    AvailabilityStatus,
+    CharacterTextureMessage,
+    CompanionTextureMessage,
+} from "@workadventure/messages";
+import type { PusherRoom } from "../PusherRoom";
+import type { ViewportInterface } from "./ViewportMessage";
+
+export type BackConnection = ClientDuplexStream<PusherToBackMessage, ServerToClientMessage>;
+export type BackSpaceConnection_ = ClientDuplexStream<PusherToBackSpaceMessage, BackToPusherSpaceMessage>;
+
+export interface BackSpaceConnection extends BackSpaceConnection_ {
+    pingTimeout: NodeJS.Timeout | undefined;
+}
+
+export type SpaceName = string;
+
+/**
+ * The data attached to a socket in "connecting" state (i.e. when the websocket connection is established but the
+ * JoinRoomFrontMessage was not received yet)
+ */
+export type ConnectingSocketData = {
+    rejected: false;
+    token: string;
+    roomId: string;
+    userId?: number; // User Id served by the back
+    userUuid: string; // Admin UUID
+    isLogged: boolean;
+    ipAddress: string;
+    characterTextures: CharacterTextureMessage[];
+    companionTexture?: CompanionTextureMessage;
+    lastCommandId?: string;
+    tags: string[];
+    visitCardUrl: string | null;
+    userRoomToken: string | undefined;
+    activatedInviteUser: boolean | undefined;
+    applications?: Array<ApplicationDefinitionInterface> | null;
+    canEdit: boolean;
+    spaceUserId: string;
+    backConnection?: BackConnection;
+    // True between the client join and leave events, so a socket that never joined (or already left) is not counted.
+    joinedRoom: boolean;
+    listenedZones: Set<string>;
+    pusherRoom: PusherRoom | undefined;
+    spaces: Set<SpaceName>;
+    joinSpacesPromise: Map<SpaceName, Promise<void>>;
+    chatID?: string;
+    world: string;
+    currentChatRoomArea: string[];
+    roomName: string;
+    microphoneState: boolean;
+    cameraState: boolean;
+    // When this socket was last heard from, as a pusher clock instant. Every inbound
+    // message stamps it, so it is the last moment the client is PROVEN to have been
+    // there — unlike the close, which a frozen tab reaches 150 s late (the idle timeout
+    // plus the disconnection retention). Analytics ends an interval here rather than at
+    // the close when nobody closed it.
+    lastActivityAtMs: number;
+    // Unique identifier for the browser tab, captured as early as websocket upgrade.
+    tabId: string;
+    // Unique identifier of the front WorkAdventureWebSocket instance. A transport resume is only accepted onto the
+    // logical connection carrying the same id. Undefined for fronts predating this parameter.
+    connectionId?: string;
+    // Set on a transport opened by a client that is resuming: the last nonce it received. Consumed once in the
+    // open handler and never shared with other transports of the same tab.
+    clientLastReceivedNonce?: number;
+    attendeesState: boolean;
+    analyticsEventsEnabled?: boolean;
+    // The abort controllers for each queries received
+    queryAbortControllers: Map<number, AbortController>;
+    canRecord: boolean;
+};
+
+export type SocketData = ConnectingSocketData & {
+    name: string;
+    viewport: ViewportInterface;
+    availabilityStatus: AvailabilityStatus;
+};

@@ -1,0 +1,397 @@
+<script lang="ts">
+    import type { EntityPrefab } from "@workadventure/map-editor";
+    import { onDestroy } from "svelte";
+    import { get } from "svelte/store";
+    import { LL } from "../../../../i18n/i18n-svelte";
+    import { localUserStore } from "../../../Connection/LocalUserStore";
+    import { gameManager } from "../../../Phaser/Game/GameManager";
+    import type { EntityVariant } from "../../../Phaser/Game/MapEditor/Entities/EntityVariant";
+    import type { CategoryTag, SelectableTag } from "../../../Stores/MapEditorStore";
+    import {
+        mapEditorDeleteCustomEntityEventStore,
+        mapEditorEntityModeStore,
+        mapEditorModifyCustomEntityEventStore,
+        mapEditorSelectedEntityPrefabStore,
+        mapEditorSelectedEntityStore,
+        selectCategoryStore,
+    } from "../../../Stores/MapEditorStore";
+    import Input from "../../Input/Input.svelte";
+    import ButtonClose from "../../Input/ButtonClose.svelte";
+    import Button from "../../UI/Button.svelte";
+    import CustomEntityEditionForm from "./CustomEntityEditionForm/CustomEntityEditionForm.svelte";
+    import EntitiesGrid from "./EntitiesGrid.svelte";
+    import EntityImage from "./EntityItem/EntityImage.svelte";
+    import EntityVariantColorPicker from "./EntityItem/EntityVariantColorPicker.svelte";
+    import EntityVariantPositionPicker from "./EntityItem/EntityVariantPositionPicker.svelte";
+    import EntityUpload from "./EntityUpload/EntityUpload.svelte";
+    import TagListItem from "./TagListItem.svelte";
+    import { IconChevronLeft, IconPencil } from "@wa-icons";
+
+    const entitiesCollectionsManager = gameManager.getCurrentGameScene().getEntitiesCollectionsManager();
+    const entitiesPrefabsVariants = entitiesCollectionsManager.getEntitiesPrefabsVariantStore();
+    const MOST_USED_CATEGORY_LIMIT = 12;
+
+    // Users who only got the map editor through a zone tag or a personal area may upload their own
+    // custom entities, but must not be able to rename or delete somebody else's: the custom entity
+    // collection is shared by every map of the domain. The server enforces this too.
+    const userCanEditMap = gameManager.getCurrentGameScene().connection?.userCanEdit ?? false;
+    const localUserUuid = localUserStore.getLocalUser()?.uuid;
+
+    function canEditCustomEntity(entityPrefab: EntityPrefab): boolean {
+        if (entityPrefab.type !== "Custom") {
+            return false;
+        }
+        if (userCanEditMap) {
+            return true;
+        }
+        return entityPrefab.ownerId !== undefined && entityPrefab.ownerId === localUserUuid;
+    }
+
+    let pickedEntity: EntityPrefab | undefined = $state(undefined);
+    let pickedEntityVariant: EntityVariant | undefined = $state(undefined);
+    let selectedColor = $state("");
+
+    let searchTerm = $state("");
+
+    const mapEditorSelectedEntityPrefabStoreUnsubscriber = mapEditorSelectedEntityPrefabStore.subscribe(
+        (prefab?: EntityPrefab) => {
+            pickedEntity = prefab;
+        },
+    );
+
+    const entitiesPrefabsVariantStoreUnsubscriber = entitiesCollectionsManager
+        .getEntitiesPrefabsVariantStore()
+        .subscribe((entitiesPrefabsVariants) => {
+            if (pickedEntityVariant) {
+                pickedEntityVariant = entitiesPrefabsVariants.find(
+                    (entityPrefabVariant) => pickedEntityVariant?.id === entityPrefabVariant.id,
+                );
+                pickedEntity = pickedEntityVariant?.defaultPrefab;
+            }
+        });
+
+    function removeEntity(id: string) {
+        mapEditorDeleteCustomEntityEventStore.set({ id });
+        clearEntitySelection();
+        setIsEditingCustomEntity(false);
+    }
+
+    function saveCustomEntityModifications(customEntity: EntityPrefab) {
+        mapEditorModifyCustomEntityEventStore.set($state.snapshot(customEntity));
+        setIsEditingCustomEntity(false);
+    }
+
+    function onPickItem(entityPrefab: EntityPrefab) {
+        mapEditorSelectedEntityPrefabStore.set($state.snapshot(entityPrefab));
+    }
+
+    function onPickEntityVariant(entityVariant: EntityVariant) {
+        pickedEntity = entityVariant.defaultPrefab;
+        pickedEntityVariant = entityVariant;
+        onColorChange(pickedEntity.color);
+    }
+
+    function onColorChange(color: string) {
+        selectedColor = color;
+        pickedEntity = pickedEntityVariant?.getEntityPrefabsPositions(color)[0];
+        mapEditorSelectedEntityPrefabStore.set(pickedEntity ? $state.snapshot(pickedEntity) : undefined);
+    }
+
+    function onSelectedTag(tag: CategoryTag) {
+        selectCategoryStore.set(tag);
+    }
+
+    function displayTagListAndClearCurrentSelection() {
+        get(mapEditorSelectedEntityStore)?.delete();
+        mapEditorEntityModeStore.set("ADD");
+        clearEntitySelection();
+        selectCategoryStore.set(undefined);
+        searchTerm = "";
+        setIsEditingCustomEntity(false);
+    }
+
+    function clearEntitySelection() {
+        pickedEntityVariant = undefined;
+        pickedEntity = undefined;
+        mapEditorSelectedEntityStore.set(undefined);
+        mapEditorSelectedEntityPrefabStore.set(undefined);
+    }
+
+    let isEditingCustomEntity = $state(false);
+    function setIsEditingCustomEntity(isEditing: boolean) {
+        isEditingCustomEntity = isEditing;
+    }
+
+    function getForEntitiesPrefabsVariantsWithCategories(
+        entitiesPrefabsVariants: EntityVariant[],
+    ): { category: CategoryTag; entitiesPrefabsVariants: EntityVariant[] }[] {
+        const entitiesPrefabsVariantsGroupedByTag = entitiesPrefabsVariants.reduce(
+            (groupByTag: { [tag: string]: EntityVariant[] }, entityPrefabVariant) => {
+                const { tags } = entityPrefabVariant.defaultPrefab;
+                tags.forEach((tag) => {
+                    groupByTag[tag] = groupByTag[tag] ?? [];
+                    groupByTag[tag].push(entityPrefabVariant);
+                });
+                return groupByTag;
+            },
+            {},
+        );
+        const customEntitiesPrefabsVariants = {
+            Custom: entitiesPrefabsVariants.filter(
+                (entityPrefabVariant) => entityPrefabVariant.defaultPrefab.type === "Custom",
+            ),
+        };
+        const mostUsedEntitiesPrefabsVariants = getMostUsedEntitiesPrefabsVariants(entitiesPrefabsVariants);
+
+        const groupedCategories: { category: CategoryTag; entitiesPrefabsVariants: EntityVariant[] }[] = [];
+
+        if (mostUsedEntitiesPrefabsVariants.length > 0) {
+            groupedCategories.push({
+                category: { kind: "special", tag: "most_used" },
+                entitiesPrefabsVariants: mostUsedEntitiesPrefabsVariants,
+            });
+        }
+
+        groupedCategories.push({
+            category: { kind: "special", tag: "custom" },
+            entitiesPrefabsVariants: customEntitiesPrefabsVariants.Custom,
+        });
+
+        groupedCategories.push(
+            ...Object.entries(entitiesPrefabsVariantsGroupedByTag)
+                .sort()
+                .map(([tag, groupedPrefabsVariants]) => ({
+                    category: { kind: "tag", tag } as const,
+                    entitiesPrefabsVariants: groupedPrefabsVariants,
+                })),
+        );
+
+        return groupedCategories;
+    }
+
+    function getMostUsedEntitiesPrefabsVariants(entitiesPrefabsVariants: EntityVariant[]): EntityVariant[] {
+        const entities = gameManager
+            .getCurrentGameScene()
+            .getGameMap()
+            .getWamFile()
+            ?.getGameMapEntities()
+            .getEntities();
+
+        if (!entities) {
+            return [];
+        }
+
+        const usageCountByPrefabId = Object.values(entities).reduce((usageCount, entity) => {
+            usageCount.set(entity.prefabRef.id, (usageCount.get(entity.prefabRef.id) ?? 0) + 1);
+            return usageCount;
+        }, new Map<string, number>());
+
+        return entitiesPrefabsVariants
+            .map((entityPrefabVariant) => ({
+                entityPrefabVariant,
+                count: entityPrefabVariant.prefabIds.reduce(
+                    (count, prefabId) => count + (usageCountByPrefabId.get(prefabId) ?? 0),
+                    0,
+                ),
+            }))
+            .filter(({ count }) => count > 0)
+            .sort((a, b) => {
+                if (a.count !== b.count) {
+                    return b.count - a.count;
+                }
+                return a.entityPrefabVariant.defaultPrefab.name.localeCompare(b.entityPrefabVariant.defaultPrefab.name);
+            })
+            .slice(0, MOST_USED_CATEGORY_LIMIT)
+            .map(({ entityPrefabVariant }) => entityPrefabVariant);
+    }
+
+    function getCategoryLabel(category: CategoryTag): string {
+        if (category.kind === "special") {
+            switch (category.tag) {
+                case "custom":
+                    return get(LL).mapEditor.entityEditor.specialTags.customLabel();
+                case "most_used":
+                    return get(LL).mapEditor.entityEditor.specialTags.mostUsedLabel();
+            }
+        }
+        return category.tag;
+    }
+
+    function getEntitiesPrefabsVariantsFilteredByTag(
+        entitiesPrefabsVariants: EntityVariant[],
+        tag: SelectableTag,
+        searchTerm: string,
+    ) {
+        if (tag === undefined) {
+            return entitiesPrefabsVariants.filter(
+                (entityPrefabVariant) =>
+                    entityPrefabVariant.defaultPrefab.tags
+                        .join(",")
+                        .toLocaleLowerCase()
+                        .indexOf(searchTerm.toLocaleLowerCase()) != -1 ||
+                    entityPrefabVariant.defaultPrefab.name.toLowerCase().includes(searchTerm.toLowerCase()),
+            );
+        }
+        if (tag.kind === "special" && tag.tag === "custom") {
+            return entitiesPrefabsVariants.filter(
+                (entityPrefabVariant) =>
+                    entityPrefabVariant.defaultPrefab.type === "Custom" &&
+                    entityPrefabVariant.defaultPrefab.name.toLowerCase().includes(searchTerm.toLowerCase()),
+            );
+        }
+        if (tag.kind === "special" && tag.tag === "most_used") {
+            return getMostUsedEntitiesPrefabsVariants(entitiesPrefabsVariants).filter((entityPrefabVariant) =>
+                entityPrefabVariant.defaultPrefab.name.toLowerCase().includes(searchTerm.toLowerCase()),
+            );
+        }
+        return entitiesPrefabsVariants.filter(
+            (entityPrefabVariant) =>
+                entityPrefabVariant.defaultPrefab.tags.includes(tag.tag) &&
+                entityPrefabVariant.defaultPrefab.name.toLowerCase().includes(searchTerm.toLowerCase()),
+        );
+    }
+
+    let entitiesPrefabsVariantsWithCategories = $derived(
+        getForEntitiesPrefabsVariantsWithCategories($entitiesPrefabsVariants),
+    );
+    let filteredEntityPrefabVariants = $derived(
+        getEntitiesPrefabsVariantsFilteredByTag($entitiesPrefabsVariants, $selectCategoryStore, searchTerm),
+    );
+
+    onDestroy(() => {
+        mapEditorSelectedEntityPrefabStoreUnsubscriber();
+        entitiesPrefabsVariantStoreUnsubscriber();
+    });
+</script>
+
+<div class="flex flex-col flex-1 overflow-auto gap-2">
+    <div class="flex flex-col gap-2">
+        <div>
+            {#if $selectCategoryStore === undefined}
+                <p class="text-[22px] m-0">{$LL.mapEditor.entityEditor.header.title()}</p>
+                <p class="m-0 opacity-50">{$LL.mapEditor.entityEditor.header.description()}</p>
+            {:else}
+                <div class="flex flex-row items-center gap-4">
+                    <button
+                        class="p-2 rounded-full flex flex-row items-center hover:bg-white/10"
+                        data-testid="clearCurrentSelection"
+                        onclick={displayTagListAndClearCurrentSelection}
+                    >
+                        <IconChevronLeft />{$LL.mapEditor.entityEditor.buttons.back()}
+                    </button>
+                </div>
+            {/if}
+        </div>
+        <div class="flex *:w-full">
+            <Input
+                rounded
+                bind:value={searchTerm}
+                placeholder={$LL.mapEditor.entityEditor.itemPicker.searchPlaceholder()}
+            />
+            <!--            <input-->
+            <!--                class="flex-1 h-8 !border-solid !rounded-2xl !border-gray-400 !placeholder-gray-400"-->
+            <!--                type="search"-->
+            <!--                bind:value={searchTerm}-->
+            <!--                placeholder={$LL.mapEditor.entityEditor.itemPicker.searchPlaceholder()}-->
+            <!--            />-->
+        </div>
+    </div>
+    <div class="flex-1 overflow-auto">
+        {#if $selectCategoryStore === undefined && searchTerm === ""}
+            <ul class="list-none !p-0 min-w-full">
+                {#each entitiesPrefabsVariantsWithCategories as { category, entitiesPrefabsVariants } (`${category.kind}-${category.tag}`)}
+                    <TagListItem
+                        selectedTag={(category) => {
+                            onSelectedTag(category);
+                        }}
+                        tag={category}
+                        label={getCategoryLabel(category)}
+                        {entitiesPrefabsVariants}
+                    />
+                {/each}
+            </ul>
+        {:else}
+            {#if pickedEntityVariant && pickedEntity}
+                <div
+                    class="fixed left-2 flex flex-row gap-2 items-center justify-center border-b-blue-50 p-4 mb-2 min-h-[200px] bg-white/20 backdrop-blur-xl rounded-2xl w-[calc(100%-16px)]"
+                >
+                    {#if isEditingCustomEntity}
+                        <CustomEntityEditionForm
+                            customEntity={pickedEntity}
+                            closeForm={() => {
+                                setIsEditingCustomEntity(false);
+                            }}
+                            removeEntity={({ entityId }) => {
+                                removeEntity(entityId);
+                            }}
+                            applyEntityModifications={(customModifiedEntity) =>
+                                saveCustomEntityModifications(customModifiedEntity)}
+                        />
+                    {:else}
+                        <EntityImage
+                            classNames="h-16 w-[64px] object-contain rounded"
+                            imageSource={pickedEntity.imagePath}
+                            imageAlt={pickedEntity.name}
+                        />
+                        <div>
+                            <p class="m-0"><b>{pickedEntityVariant.defaultPrefab.name}</b></p>
+                            <EntityVariantColorPicker
+                                colors={pickedEntityVariant.colors}
+                                {selectedColor}
+                                {onColorChange}
+                            />
+                            <EntityVariantPositionPicker
+                                entityPrefabsPositions={pickedEntityVariant.getEntityPrefabsPositions(selectedColor)}
+                                selectedEntity={pickedEntity}
+                                {onPickItem}
+                            />
+                        </div>
+                        {#if canEditCustomEntity(pickedEntity)}
+                            <Button
+                                variant="secondary"
+                                dataTestId="editEntity"
+                                onclick={() => setIsEditingCustomEntity(true)}
+                            >
+                                {#snippet icon()}
+                                    <IconPencil font-size={16} />
+                                {/snippet}
+                                {$LL.mapEditor.entityEditor.buttons.editEntity()}
+                            </Button>
+                        {/if}
+                        <div class="absolute top-1 right-1 p-1">
+                            <ButtonClose
+                                onclick={clearEntitySelection}
+                                dataTestId="clearEntitySelection"
+                                size="sm"
+                                bgColor="bg-white/30"
+                                hoverColor="bg-white/40"
+                            />
+                        </div>
+                        <!-- <button
+                            class="self-start absolute top-1 right-1"
+                            data-testid="clearEntitySelection"
+                            onclick={clearEntitySelection}><IconDeselect font-size={20} /></button
+                        > -->
+                    {/if}
+                </div>
+            {/if}
+            {#if !isEditingCustomEntity}
+                <div class="flex flex-col gap-2" class:mt-52={pickedEntityVariant && pickedEntity}>
+                    {#if $selectCategoryStore}
+                        <span class="font-bold text-lg">
+                            {getCategoryLabel($selectCategoryStore)}
+                        </span>
+                    {/if}
+                    <EntitiesGrid
+                        entityPrefabVariants={filteredEntityPrefabVariants}
+                        onSelectEntity={onPickEntityVariant}
+                        currentSelectedEntityId={pickedEntity?.id}
+                    />
+                </div>
+            {/if}
+        {/if}
+    </div>
+    {#if pickedEntity === undefined}
+        <EntityUpload />
+    {/if}
+</div>

@@ -1,0 +1,399 @@
+<script lang="ts">
+    import { onDestroy, onMount } from "svelte";
+    import type { DesktopCapturerSource } from "@workadventure/desktop-api";
+    import {
+        desktopCapturerSourcePromiseResolve,
+        showDesktopCapturerSourcePicker,
+    } from "../../Stores/ScreenSharingStore";
+    import { LL } from "../../../i18n/i18n-svelte";
+    import { getDesktopCapturerSourceKind, type DesktopCapturerSourceKind } from "./DesktopCapturerSourcePickerPolicy";
+
+    let desktopCapturerSources: DesktopCapturerSource[] = $state([]);
+    let interval: ReturnType<typeof setInterval>;
+    let selectedKind: DesktopCapturerSourceKind = $state("screen");
+    let loading = $state(true);
+    let errorMessage: string | undefined = $state(undefined);
+    let identifying = $state(false);
+
+    // Older desktop shells don't expose identifyScreens; feature-detect so the affordance only
+    // shows where it works.
+    const canIdentify = Boolean(window.WAD?.identifyScreens);
+
+    let visibleSources = $derived(
+        desktopCapturerSources.filter((source) => getDesktopCapturerSourceKind(source) === selectedKind),
+    );
+
+    async function getDesktopCapturerSources() {
+        if (!window.WAD?.getDesktopCapturerSources) {
+            throw new Error("This component can only be used in a desktop app that lists the sources");
+        }
+        try {
+            errorMessage = undefined;
+            const fresh = await window.WAD.getDesktopCapturerSources({
+                thumbnailSize: {
+                    height: 180,
+                    width: 320,
+                },
+                types: ["screen", "window"],
+            });
+            // Don't clobber a non-empty list with an empty one: Electron's desktopCapturer
+            // occasionally returns [] transiently on macOS under load (or when the main process
+            // is busy with a concurrent renegotiation). Retain the last known sources; the next
+            // 1s poll will refresh them for real if the user really has no sources.
+            if (fresh.length > 0 || desktopCapturerSources.length === 0) {
+                desktopCapturerSources = fresh;
+            }
+        } catch (error) {
+            errorMessage = error instanceof Error ? error.message : $LL.desktop.sourcePicker.loadError();
+        } finally {
+            loading = false;
+        }
+    }
+
+    onMount(async () => {
+        await getDesktopCapturerSources();
+        interval = setInterval(() => {
+            getDesktopCapturerSources().catch((e) => console.error("Error while getting desktop capturer sources", e));
+        }, 1000);
+    });
+
+    onDestroy(() => {
+        clearInterval(interval);
+        // If the picker is torn down while the identify overlays are still up (navigate away / world
+        // change), dismiss them — they're always-on-top over every display with no other app-side exit.
+        // Harmless after a completed pick: the module already settled, so cancel is a no-op.
+        if (identifying) {
+            window.WAD?.cancelIdentifyScreens?.();
+        }
+    });
+
+    function selectDesktopCapturerSource(source: DesktopCapturerSource) {
+        if (!desktopCapturerSourcePromiseResolve) {
+            throw new Error("desktopCapturerSourcePromiseResolve is not defined");
+        }
+        desktopCapturerSourcePromiseResolve(source);
+        close();
+    }
+
+    function cancel() {
+        if (!desktopCapturerSourcePromiseResolve) {
+            throw new Error("desktopCapturerSourcePromiseResolve is not defined");
+        }
+        desktopCapturerSourcePromiseResolve(null);
+        close();
+    }
+
+    // "Identify screens": each physical display gets a big-numbered, click-to-share overlay (in the
+    // main process). Clicking one resolves that screen source — reusing the same resolve path as a
+    // thumbnail click, so the display_id flows through to the meeting bar unchanged. Escape
+    // resolves null: leave the picker open.
+    async function identifyScreensByClick() {
+        // Re-entry is prevented by the button's `disabled={identifying}`, so the guard doesn't read
+        // `identifying` (that read/await/write chain trips require-atomic-updates).
+        if (!window.WAD?.identifyScreens || !desktopCapturerSourcePromiseResolve) {
+            return;
+        }
+        identifying = true;
+        try {
+            const source = await window.WAD.identifyScreens();
+            if (source) {
+                desktopCapturerSourcePromiseResolve(source);
+                close();
+            }
+        } catch (error) {
+            errorMessage = error instanceof Error ? error.message : $LL.desktop.sourcePicker.identifyError();
+        } finally {
+            identifying = false;
+        }
+    }
+
+    function close() {
+        $showDesktopCapturerSourcePicker = false;
+    }
+
+    function selectKind(kind: DesktopCapturerSourceKind) {
+        selectedKind = kind;
+    }
+
+    function stopPropagation(event: Event) {
+        event.stopPropagation();
+    }
+</script>
+
+<div class="source-picker-backdrop" role="presentation" onclick={cancel}>
+    <div
+        class="source-picker"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="desktop-source-picker-title"
+        tabindex="-1"
+        onclick={stopPropagation}
+        onkeydown={stopPropagation}
+    >
+        <header class="source-picker-header">
+            <div>
+                <h2 id="desktop-source-picker-title">{$LL.desktop.sourcePicker.title()}</h2>
+                <p>{$LL.desktop.sourcePicker.subtitle()}</p>
+            </div>
+            <button type="button" class="close-button" aria-label={$LL.desktop.sourcePicker.close()} onclick={cancel}
+                >×</button
+            >
+        </header>
+
+        <div class="source-picker-tabs" role="tablist" aria-label={$LL.desktop.sourcePicker.sourceType()}>
+            <button
+                type="button"
+                role="tab"
+                aria-selected={selectedKind === "screen"}
+                class:active={selectedKind === "screen"}
+                onclick={() => selectKind("screen")}
+            >
+                {$LL.desktop.sourcePicker.screens()}
+            </button>
+            <button
+                type="button"
+                role="tab"
+                aria-selected={selectedKind === "window"}
+                class:active={selectedKind === "window"}
+                onclick={() => selectKind("window")}
+            >
+                {$LL.desktop.sourcePicker.windows()}
+            </button>
+        </div>
+
+        <div class="source-picker-body">
+            {#if loading}
+                <div class="source-picker-state">{$LL.desktop.sourcePicker.loading()}</div>
+            {:else if errorMessage}
+                <div class="source-picker-state error">{errorMessage}</div>
+            {:else if visibleSources.length === 0}
+                <div class="source-picker-state">{$LL.desktop.sourcePicker.empty()}</div>
+            {:else}
+                <div class="source-grid">
+                    {#each visibleSources as source (source.id)}
+                        <button type="button" class="source-tile" onclick={() => selectDesktopCapturerSource(source)}>
+                            <span class="source-thumbnail">
+                                <img src={source.thumbnailURL} alt="" draggable="false" />
+                            </span>
+                            <span class="source-name" title={source.name}>{source.name}</span>
+                        </button>
+                    {/each}
+                </div>
+            {/if}
+        </div>
+
+        <footer class="source-picker-footer">
+            {#if selectedKind === "screen" && canIdentify}
+                <button
+                    type="button"
+                    class="secondary-button identify-button"
+                    onclick={identifyScreensByClick}
+                    disabled={identifying}
+                >
+                    {identifying ? $LL.desktop.sourcePicker.identifying() : $LL.desktop.sourcePicker.identify()}
+                </button>
+            {:else}
+                <span></span>
+            {/if}
+            <button type="button" class="secondary-button" onclick={cancel}>{$LL.desktop.sourcePicker.cancel()}</button>
+        </footer>
+    </div>
+</div>
+
+<style>
+    .source-picker-backdrop {
+        position: absolute;
+        inset: 0;
+        z-index: 900;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 24px;
+        pointer-events: auto;
+        background: rgb(0 0 0 / 56%);
+        backdrop-filter: blur(4px);
+    }
+
+    .source-picker {
+        display: flex;
+        flex-direction: column;
+        width: min(1040px, 100%);
+        max-height: min(760px, calc(100vh - 48px));
+        overflow: hidden;
+        color: #f8fafc;
+        background: #111827;
+        border: 1px solid rgb(255 255 255 / 14%);
+        border-radius: 8px;
+        box-shadow: 0 24px 80px rgb(0 0 0 / 45%);
+    }
+
+    .source-picker-header {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 16px;
+        padding: 20px 24px 14px;
+        border-bottom: 1px solid rgb(255 255 255 / 10%);
+
+        h2 {
+            margin: 0 0 6px;
+            font-family: "Roboto", sans-serif;
+            font-size: 22px;
+            font-weight: 700;
+            letter-spacing: 0;
+        }
+
+        p {
+            margin: 0;
+            color: #cbd5e1;
+            font-size: 14px;
+        }
+    }
+
+    .close-button,
+    .secondary-button,
+    .source-picker-tabs button,
+    .source-tile {
+        border: 0;
+        font: inherit;
+        cursor: pointer;
+    }
+
+    .close-button {
+        width: 36px;
+        height: 36px;
+        flex: none;
+        color: #e2e8f0;
+        background: rgb(255 255 255 / 10%);
+        border-radius: 6px;
+        font-size: 24px;
+        line-height: 1;
+    }
+
+    .close-button:hover,
+    .secondary-button:hover,
+    .source-picker-tabs button:hover {
+        background: rgb(255 255 255 / 16%);
+    }
+
+    .source-picker-tabs {
+        display: flex;
+        gap: 8px;
+        padding: 14px 24px 0;
+    }
+
+    .source-picker-tabs button {
+        min-width: 112px;
+        padding: 10px 14px;
+        color: #cbd5e1;
+        background: rgb(255 255 255 / 8%);
+        border-radius: 6px;
+        font-weight: 600;
+    }
+
+    .source-picker-tabs button.active {
+        color: white;
+        background: #4353ff;
+    }
+
+    .source-picker-body {
+        min-height: 280px;
+        overflow: auto;
+        padding: 18px 24px 24px;
+    }
+
+    .source-picker-state {
+        display: grid;
+        min-height: 260px;
+        place-items: center;
+        color: #cbd5e1;
+        font-size: 15px;
+    }
+
+    .source-picker-state.error {
+        color: #fecaca;
+    }
+
+    .source-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+        gap: 14px;
+    }
+
+    .source-tile {
+        display: flex;
+        min-width: 0;
+        flex-direction: column;
+        gap: 10px;
+        padding: 10px;
+        color: #f8fafc;
+        text-align: left;
+        background: rgb(255 255 255 / 7%);
+        border: 1px solid rgb(255 255 255 / 10%);
+        border-radius: 8px;
+    }
+
+    .source-tile:hover,
+    .source-tile:focus-visible {
+        outline: none;
+        background: rgb(67 83 255 / 22%);
+        border-color: rgb(129 140 248 / 80%);
+    }
+
+    .source-thumbnail {
+        display: grid;
+        width: 100%;
+        aspect-ratio: 16 / 9;
+        overflow: hidden;
+        place-items: center;
+        background: #020617;
+        border-radius: 6px;
+    }
+
+    .source-thumbnail img {
+        width: 100%;
+        height: 100%;
+        object-fit: contain;
+    }
+
+    .source-name {
+        min-width: 0;
+        overflow: hidden;
+        color: #e2e8f0;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        font-size: 14px;
+        font-weight: 600;
+    }
+
+    .source-picker-footer {
+        display: flex;
+        gap: 12px;
+        align-items: center;
+        justify-content: space-between;
+        padding: 14px 24px 20px;
+        border-top: 1px solid rgb(255 255 255 / 10%);
+    }
+
+    .secondary-button {
+        padding: 10px 14px;
+        color: #e2e8f0;
+        background: rgb(255 255 255 / 10%);
+        border-radius: 6px;
+        font-weight: 600;
+    }
+
+    .identify-button {
+        color: white;
+        background: #4353ff;
+    }
+
+    .identify-button:hover:not(:disabled) {
+        background: #3646e6;
+    }
+
+    .identify-button:disabled {
+        cursor: default;
+        opacity: 0.7;
+    }
+</style>

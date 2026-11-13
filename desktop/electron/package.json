@@ -1,0 +1,50 @@
+{
+    "name": "workadventure",
+    "productName": "WorkAdventure",
+    "desktopName": "workadventure.desktop",
+    "version": "2.0.0-beta.1",
+    "description": "Desktop application for WorkAdventure",
+    "author": "TheCodingMachine <hello@workadventu.re>",
+    "homepage": "https://workadventu.re",
+    "main": "dist/main.js",
+    "license": "SEE LICENSE IN LICENSE.txt",
+    "scripts": {
+        "build": "electron-vite build",
+        "postbuild": "node deb/build-scripts.mjs",
+        "dev": "electron-vite dev --watch",
+        "bundle": "npm run build && electron-builder",
+        "typecheck": "tsc --noEmit && svelte-check --fail-on-warnings",
+        "test": "vitest run",
+        "lint": "eslint src/ . --ext .ts",
+        "fix": "eslint --fix src/ . --ext .ts",
+        "pretty": "prettier --write 'src/**/*.{ts,tsx}'",
+        "pretty-check": "prettier --check 'src/**/*.{ts,tsx}'"
+    },
+    "dependencies": {
+        "electron-log": "^4.4.6",
+        "electron-settings": "^4.0.2",
+        "electron-updater": "^6.8.10",
+        "electron-window-state": "^5.0.3"
+    },
+    "devDependencies": {
+        "@fontsource/oswald": "^5.3.0",
+        "@fontsource/roboto-condensed": "^5.3.0",
+        "@sveltejs/vite-plugin-svelte": "^7.3.1",
+        "@tailwindcss/vite": "^4.3.4",
+        "@typescript-eslint/eslint-plugin": "^8.72.1",
+        "@typescript-eslint/parser": "^8.72.1",
+        "@workadventure/design-system": "^3.0.4",
+        "@workadventure/desktop-api": "file:../../libs/desktop-api",
+        "electron": "^45.0.0",
+        "electron-builder": "^26.15.3",
+        "electron-vite": "^6.0.0",
+        "eslint": "^8.12.0",
+        "prettier": "^2.6.2",
+        "svelte": "^5.57.3",
+        "svelte-check": "^4.7.8",
+        "tailwindcss": "^4.3.4",
+        "typescript": "^5.9.3",
+        "vite": "^8.3.5",
+        "vitest": "^4.1.7"
+    }
+}

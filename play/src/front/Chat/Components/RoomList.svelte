@@ -1,0 +1,667 @@
+<script lang="ts">
+    import { get } from "svelte/store";
+
+    import { onDestroy, onMount, setContext } from "svelte";
+    import { gameManager } from "../../Phaser/Game/GameManager";
+    import { warningMessageStore } from "../../Stores/ErrorStore";
+    import LL from "../../../i18n/i18n-svelte";
+    import { chatSearchBarValue, joignableRoom, navChat } from "../Stores/ChatStore";
+    import { selectedRoomStore } from "../Stores/SelectRoomStore";
+    import { isThreadPanelEnabledStore, selectedThreadStore } from "../Stores/SelectedThreadStore";
+    import { folderPanelStore, roomSidePanelStore } from "../Stores/RoomSidePanelStore";
+    import {
+        hasChatRoomMembershipManagement,
+        hasChatRoomModeration,
+        hasChatRoomNotificationControl,
+        hasChatRoomSettingsManagement,
+        hasProximityChatSidePanel,
+        type ChatConversation,
+        type ChatRoom,
+        type ChatRoomMembershipManagement,
+        type ChatRoomModeration,
+        type ChatRoomNotificationControl,
+        type ChatRoomSettingsManagement,
+        type ChatThread,
+        type ProximityChatSidePanelRoom,
+        type RoomFolder as ChatRoomFolder,
+    } from "../Connection/ChatConnection";
+    import { INITIAL_SIDEBAR_WIDTH, loginTokenErrorStore } from "../../Stores/ChatStore";
+    import { userIsConnected } from "../../Stores/MenuStore";
+    import ExternalComponents from "../../Components/ExternalModules/ExternalComponents.svelte";
+    import { analyticsClient } from "../../Administration/AnalyticsClient";
+    import { createUnreadConversationsStore, createUnreadSummaryStore } from "../Stores/UnreadMessagesCountStore";
+    import { roomListWidthStore } from "../ChatSidebarWidthStore";
+    import Room from "./Room/Room.svelte";
+    import RoomTimeline from "./Room/RoomTimeline.svelte";
+    import RoomInvitation from "./Room/RoomInvitation.svelte";
+    import RoomSuggested from "./Room/RoomSuggested.svelte";
+    import RoomListSkeleton from "./RoomListSkeleton.svelte";
+    import ChatError from "./ChatError.svelte";
+    import RoomFolder from "./RoomFolder.svelte";
+    import CreateRoomOrFolderOption from "./Room/CreateRoomOrFolderOption.svelte";
+    import ShowMore from "./ShowMore.svelte";
+    import ChatHeader from "./ChatHeader.svelte";
+    import CatchUpList from "./CatchUpList.svelte";
+    import RequireConnection from "./requireConnection.svelte";
+    import RefreshChat from "./RefreshChat.svelte";
+    import RoomSidePanel from "./Room/RoomSidePanel.svelte";
+    import FolderMembersPanel from "./Room/FolderMembersPanel.svelte";
+    import {
+        CHAT_TWO_COLUMN_LAYOUT_LIMIT,
+        canDisplayRoomListAndTimeline,
+        clampRoomListWidth,
+        getRoomSidePanelPlacement,
+        ROOM_LIST_DEFAULT_WIDTH,
+        ROOM_LIST_MAX_WIDTH,
+        ROOM_LIST_MIN_WIDTH,
+        ROOM_ROW_PREVIEW_CONTEXT,
+        shouldShowRoomSidePanelToggle,
+        showsRoomRowPreview,
+        threeColumnLayoutLimit,
+    } from "./RoomListLayout";
+    import ProximityRoomRow from "./Room/ProximityRoomRow.svelte";
+    import UnreadCount from "./UnreadCount.svelte";
+    import { rowUnreadCount } from "./showMoreUnread";
+    import { rovingFocus } from "./roomRowKeyboard";
+    import { sortByLastMessage } from "./sortByLastMessage";
+    import { IconChevronUp, IconCloudLock, IconLoader, IconPlus, IconRefresh } from "@wa-icons";
+
+    interface Props {
+        sideBarWidth?: number;
+    }
+
+    let { sideBarWidth = INITIAL_SIDEBAR_WIDTH }: Props = $props();
+
+    const gameScene = gameManager.getCurrentGameScene();
+    /** Same condition as opening the user list from the chat header. */
+    const showDirectMessageUserListButton =
+        gameScene.room.isChatOnlineListEnabled || gameScene.room.isChatDisconnectedListEnabled;
+
+    const proximityChatRoomManager = gameScene.proximityChatRoomManager;
+    const proximityRooms = proximityChatRoomManager.roomsStore;
+    const parentZoneRooms = proximityChatRoomManager.parentZoneRoomsStore;
+    const chat = gameManager.chatConnection;
+    const shouldRetrySendingEvents = chat.shouldRetrySendingEvents;
+
+    const chatConnectionStatus = chat.connectionStatus;
+    // Once the list has been shown, a reconnection (network blip, laptop waking up) keeps it on screen under a
+    // banner instead of swapping every room for a loading skeleton.
+    let hasBeenOnline = $state(false);
+    $effect(() => {
+        if ($chatConnectionStatus === "ONLINE") hasBeenOnline = true;
+    });
+    let isReconnecting = $derived($chatConnectionStatus === "CONNECTING" && hasBeenOnline);
+
+    let directRooms = chat.directRooms;
+    let rooms = chat.rooms;
+    let roomInvitations = chat.invitations;
+    let roomFolders = chat.folders;
+    const directRoomsUnreadSummary = createUnreadSummaryStore(directRooms);
+    const roomsUnreadSummary = createUnreadSummaryStore(rooms);
+    const unreadConversations = createUnreadConversationsStore(chat, proximityRooms);
+
+    let displayDirectRooms = $state(false);
+    let displayRooms = $state(false);
+    let displayRoomInvitations = $state(false);
+
+    onMount(() => {
+        expandOrCollapseRoomsIfEmpty();
+    });
+
+    const directRoomsUnsubscriber = directRooms.subscribe((directRooms) =>
+        openDirectRoomsIfCollapsedBeforeNewRoom(directRooms),
+    );
+    const roomsUnsubscriber = rooms.subscribe((rooms) => openRoomsIfCollapsedBeforeNewRoom(rooms));
+    const roomInvitationsUnsubscriber = roomInvitations.subscribe((roomInvitations) =>
+        openRoomInvitationsIfCollapsedBeforeNewRoom(roomInvitations),
+    );
+
+    onDestroy(() => {
+        directRoomsUnsubscriber();
+        roomsUnsubscriber();
+        roomInvitationsUnsubscriber();
+        isThreadPanelEnabledStore.set(false);
+    });
+
+    async function initChatConnectionEncryption() {
+        try {
+            await chat.initEndToEndEncryption();
+        } catch (error) {
+            console.error("Failed to initChatConnectionEncryption", error);
+        }
+        analyticsClient.trackAdminEvent("chat.matrix_encryption_configuration.started");
+    }
+
+    const isEncryptionRequiredAndNotSet = chat.isEncryptionRequiredAndNotSet;
+    const isGuest = chat.isGuest;
+
+    function openRoomsIfCollapsedBeforeNewRoom(rooms: ChatRoom[]) {
+        if (rooms.length !== 0 && displayRooms === false) {
+            displayRooms = true;
+        }
+    }
+
+    function openDirectRoomsIfCollapsedBeforeNewRoom(directRooms: ChatRoom[]) {
+        if (directRooms.length !== 0 && displayDirectRooms === false) {
+            displayDirectRooms = true;
+        }
+    }
+
+    function openRoomInvitationsIfCollapsedBeforeNewRoom(roomInvitations: ChatRoom[]) {
+        if (roomInvitations.length !== 0 && displayRoomInvitations === false) {
+            displayRoomInvitations = true;
+        }
+    }
+
+    function expandOrCollapseRoomsIfEmpty() {
+        displayDirectRooms = $directRooms.length > 0;
+        displayRooms = $rooms.length > 0;
+        displayRoomInvitations = $roomInvitations.length > 0;
+    }
+
+    function toggleDisplayDirectRooms() {
+        displayDirectRooms = !displayDirectRooms;
+    }
+
+    function toggleDisplayRooms() {
+        displayRooms = !displayRooms;
+    }
+
+    function clearRoomSearch() {
+        joignableRoom.set([]);
+        chatSearchBarValue.set("");
+    }
+
+    function toggleDisplayRoomInvitations() {
+        displayRoomInvitations = !displayRoomInvitations;
+    }
+
+    function isThreadConversation(conversation: ChatConversation | undefined): conversation is ChatThread {
+        return conversation?.conversationKind === "thread";
+    }
+
+    function getRoomWithSidePanel(
+        conversation: ChatConversation | undefined,
+    ):
+        | (ChatRoom &
+              ChatRoomMembershipManagement &
+              ChatRoomModeration &
+              ChatRoomNotificationControl &
+              ChatRoomSettingsManagement)
+        | ProximityChatSidePanelRoom
+        | undefined {
+        if (hasProximityChatSidePanel(conversation)) {
+            return conversation;
+        }
+
+        if (
+            hasChatRoomMembershipManagement(conversation) &&
+            hasChatRoomModeration(conversation) &&
+            hasChatRoomNotificationControl(conversation) &&
+            hasChatRoomSettingsManagement(conversation)
+        ) {
+            return conversation;
+        }
+
+        return undefined;
+    }
+
+    let directRoomsByLastMessage = $derived(sortByLastMessage($directRooms));
+    let filteredDirectRoom = $derived(
+        $directRoomsByLastMessage.filter(({ name }) =>
+            get(name).toLocaleLowerCase().includes($chatSearchBarValue.toLocaleLowerCase()),
+        ),
+    );
+    let roomsByLastMessage = $derived(sortByLastMessage($rooms));
+    let filteredRooms = $derived(
+        $roomsByLastMessage.filter(({ name }) =>
+            get(name).toLocaleLowerCase().includes($chatSearchBarValue.toLocaleLowerCase()),
+        ),
+    );
+    let filteredRoomInvitations = $derived(
+        $roomInvitations
+            .filter(({ name }) => get(name).toLocaleLowerCase().includes($chatSearchBarValue.toLocaleLowerCase()))
+            .sort((a, b) => (a.lastMessageTimestamp > b.lastMessageTimestamp ? -1 : 1)),
+    );
+
+    // ponytail: get() does not track the folders, so one that loads its rooms mid-search only counts at the next keystroke.
+    function folderHasSearchMatch(folder: ChatRoomFolder, search: string): boolean {
+        return (
+            get(folder.rooms).some(({ name }) => get(name).toLocaleLowerCase().includes(search)) ||
+            get(folder.folders).some((subFolder) => folderHasSearchMatch(subFolder, search))
+        );
+    }
+
+    let isSearching = $derived($chatSearchBarValue.trim() !== "");
+    let hasNoSearchResult = $derived(
+        isSearching &&
+            filteredDirectRoom.length === 0 &&
+            filteredRooms.length === 0 &&
+            filteredRoomInvitations.length === 0 &&
+            $joignableRoom.length === 0 &&
+            !$roomFolders.some((folder) => folderHasSearchMatch(folder, $chatSearchBarValue.toLocaleLowerCase())),
+    );
+
+    let displayTwoColumnLayout = $derived(
+        canDisplayRoomListAndTimeline({
+            minimumTwoColumnWidth: CHAT_TWO_COLUMN_LAYOUT_LIMIT,
+            sideBarWidth,
+        }),
+    );
+    let displayThreeColumnLayout = $derived(sideBarWidth >= threeColumnLayoutLimit($roomListWidthStore));
+    let roomListBesideConversation = $derived(displayTwoColumnLayout && $navChat.key === "chat");
+    let showRoomRowPreview = $derived(
+        showsRoomRowPreview({
+            besideConversation: displayTwoColumnLayout,
+            roomListWidth: $roomListWidthStore,
+            sideBarWidth,
+        }),
+    );
+    setContext(ROOM_ROW_PREVIEW_CONTEXT, {
+        get shown() {
+            return showRoomRowPreview;
+        },
+    });
+
+    const isRTL = document.documentElement.dir === "rtl";
+    const ROOM_LIST_KEYBOARD_STEP = 20;
+
+    function startRoomListResize(event: PointerEvent) {
+        const handle = event.currentTarget as HTMLElement;
+        const startX = event.clientX;
+        const startWidth = $roomListWidthStore;
+        handle.setPointerCapture(event.pointerId);
+        const onMove = (moveEvent: PointerEvent) => {
+            const diff = moveEvent.clientX - startX;
+            roomListWidthStore.set(clampRoomListWidth(isRTL ? startWidth - diff : startWidth + diff));
+        };
+        const onEnd = () => {
+            handle.removeEventListener("pointermove", onMove);
+            handle.removeEventListener("pointerup", onEnd);
+            handle.removeEventListener("pointercancel", onEnd);
+        };
+        handle.addEventListener("pointermove", onMove);
+        handle.addEventListener("pointerup", onEnd);
+        handle.addEventListener("pointercancel", onEnd);
+    }
+
+    function resizeRoomListWithKeyboard(event: KeyboardEvent) {
+        if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") {
+            return;
+        }
+        // The arrow follows the handle on screen: it moves left in RTL, where the list sits on the right.
+        const grows = (event.key === "ArrowRight") !== isRTL;
+        roomListWidthStore.set(
+            clampRoomListWidth($roomListWidthStore + (grows ? ROOM_LIST_KEYBOARD_STEP : -ROOM_LIST_KEYBOARD_STEP)),
+        );
+        event.preventDefault();
+    }
+    let selectedRoomWithSidePanel = $derived(getRoomWithSidePanel($selectedRoomStore));
+    let hasSelectedRoomWithSidePanel = $derived(selectedRoomWithSidePanel !== undefined);
+    let showRoomSidePanelToggle = $derived(shouldShowRoomSidePanelToggle(hasSelectedRoomWithSidePanel));
+    let roomSidePanelPlacement = $derived(
+        getRoomSidePanelPlacement({
+            canDisplayThirdColumn: displayThreeColumnLayout,
+            hasCompatibleRoom: hasSelectedRoomWithSidePanel,
+            isOpen: $roomSidePanelStore.isOpen,
+        }),
+    );
+    let showRoomSidePanelInThirdColumn = $derived(roomSidePanelPlacement === "third-column");
+    let showRoomSidePanelAsOverlay = $derived(roomSidePanelPlacement === "overlay");
+    $effect(() => {
+        isThreadPanelEnabledStore.set(hasSelectedRoomWithSidePanel);
+    });
+    $effect(() => {
+        if (!displayThreeColumnLayout || !isThreadConversation($selectedRoomStore)) {
+            return;
+        }
+        const selectedThread = $selectedRoomStore;
+        selectedRoomStore.set(selectedThread.parentRoom);
+        selectedThreadStore.set(selectedThread);
+    });
+    $effect(() => {
+        if (hasSelectedRoomWithSidePanel || !$selectedThreadStore) {
+            return;
+        }
+        selectedRoomStore.set($selectedThreadStore);
+        selectedThreadStore.clear();
+    });
+    let roomListGridClass = $derived(
+        showRoomSidePanelInThirdColumn
+            ? ""
+            : roomListBesideConversation
+              ? "grid-cols-[auto_minmax(0,1fr)]"
+              : "grid-cols-[1fr]",
+    );
+</script>
+
+<div
+    class="relative overflow-auto h-full grid grid-rows-[1fr_auto] {roomListGridClass}"
+    style={showRoomSidePanelInThirdColumn
+        ? `grid-template-columns: ${$roomListWidthStore}px minmax(0, 1fr) 360px`
+        : undefined}
+>
+    {#if ($selectedRoomStore === undefined && $folderPanelStore === undefined) || displayTwoColumnLayout}
+        <div
+            class="w-full flex flex-col border border-solid border-y-0 border-l-0 border-white/10 relative overflow-y-auto overflow-x-none"
+            use:rovingFocus={{ items: "[data-room-row-button]" }}
+            style={displayTwoColumnLayout ? `width:${$roomListWidthStore}px ;flex : 0 0 auto` : ``}
+        >
+            {#if $shouldRetrySendingEvents}
+                <RefreshChat />
+            {/if}
+            <ChatHeader />
+            <div
+                class="relative pt-2 {$isEncryptionRequiredAndNotSet === true && $isGuest === false
+                    ? ' h-[calc(100%-2rem)]'
+                    : 'h-full'}"
+            >
+                {#if $chatConnectionStatus === "ON_ERROR" && $userIsConnected && !$loginTokenErrorStore}
+                    <ChatError />
+                {/if}
+
+                {#if !$userIsConnected && gameManager.getCurrentGameScene().room.isMatrixChatEnabled}
+                    <RequireConnection />
+                {:else if $loginTokenErrorStore}
+                    <RequireConnection>
+                        {#snippet emoji()}
+                            <IconRefresh font-size="50" />
+                        {/snippet}
+                        {#snippet title()}
+                            {$LL.chat.loginTokenError()}
+                        {/snippet}
+                        {#snippet buttonLabel()}
+                            {$LL.chat.reconnect()}
+                        {/snippet}
+                    </RequireConnection>
+                {/if}
+
+                {#if $proximityRooms.length > 0}
+                    <div
+                        class="px-2 py-3 border border-solid border-x-0 border-t border-y-0 border-b-0 border-white/10"
+                    >
+                        <div class="flex flex-col">
+                            <ShowMore
+                                items={$proximityRooms}
+                                maxNumber={8}
+                                idKey="id"
+                                showNothingToDisplayMessage={false}
+                                getUnreadCount={(room) =>
+                                    rowUnreadCount(room.hasUnreadMessages, room.unreadMessagesCount)}
+                            >
+                                {#snippet children({ item: room })}
+                                    <ProximityRoomRow {room} isParentZone={$parentZoneRooms.includes(room)} />
+                                {/snippet}
+                            </ShowMore>
+                        </div>
+                    </div>
+                {/if}
+                <!-- Where the conversations will be: under the bubble, which does not wait for the chat server. -->
+                {#if $chatConnectionStatus === "CONNECTING" && $userIsConnected && !isReconnecting}
+                    <RoomListSkeleton />
+                {/if}
+                {#if isReconnecting}
+                    <div
+                        class="mx-2 mb-2 flex items-center gap-2 rounded border border-solid border-warning-900/50 bg-warning-900/20 px-3 py-2 text-xs text-white"
+                        role="status"
+                        data-testid="chatReconnecting"
+                    >
+                        <IconLoader class="animate-spin shrink-0" font-size="14" />
+                        {$LL.chat.reconnecting()}
+                    </div>
+                {/if}
+                {#if $chatConnectionStatus === "ONLINE" || isReconnecting}
+                    {#if hasNoSearchResult}
+                        <p class="px-3 py-2 m-0 text-sm text-center text-white/50" data-testid="chatSearchNoResult">
+                            {$LL.chat.searchNoResult({ search: $chatSearchBarValue.trim() })}
+                        </p>
+                    {/if}
+                    {#if $joignableRoom.length > 0 && $chatSearchBarValue.trim() !== ""}
+                        <p
+                            class="px-3 py-1 m-0 text-xs font-bold uppercase text-white/50"
+                            data-testid="chatJoinableRoomsTitle"
+                        >
+                            {$LL.chat.joinableRooms()} · {$joignableRoom.length}
+                        </p>
+                        <div class="flex flex-col">
+                            {#each $joignableRoom as room (room.id)}
+                                <RoomSuggested
+                                    roomInformation={room}
+                                    highlight={$chatSearchBarValue}
+                                    onJoined={clearRoomSearch}
+                                />
+                            {/each}
+                        </div>
+                    {/if}
+                    {#if filteredRoomInvitations.length > 0}
+                        <button
+                            class="group relative m-0 px-3 rounded-none text-white/75 hover:text-white h-11 hover:bg-contrast-200/10 w-full flex space-x-2 items-center border border-solid border-x-0 border-t border-b-0 border-white/10"
+                            data-room-row-button
+                            aria-expanded={displayRoomInvitations}
+                            onclick={toggleDisplayRoomInvitations}
+                        >
+                            <div class="text-white text-sm font-bold tracking-widest uppercase grow text-start">
+                                {$LL.chat.invitations()} · {filteredRoomInvitations.length}
+                            </div>
+                            <div
+                                class="transition-all group-hover:bg-white/10 p-1 rounded aspect-square flex items-center justify-center text-white"
+                            >
+                                <IconChevronUp
+                                    class={`transform transition ${!displayRoomInvitations ? "" : "rotate-180"}`}
+                                />
+                            </div>
+                        </button>
+                        {#if displayRoomInvitations}
+                            <div class="flex flex-col overflow-auto ps-3 pr-4 pb-3">
+                                <ShowMore items={filteredRoomInvitations} maxNumber={8} idKey="id">
+                                    {#snippet children({ item: room })}
+                                        <RoomInvitation {room} />
+                                    {/snippet}
+                                </ShowMore>
+                            </div>
+                        {/if}
+                    {/if}
+
+                    <div
+                        class="group relative px-3 m-0 rounded-none text-white/75 hover:text-white h-11 hover:bg-contrast-200/10 w-full flex items-center gap-1 border border-solid border-x-0 border-t border-b-0 border-white/10"
+                    >
+                        <button
+                            type="button"
+                            class="flex items-center min-w-0 flex-1 text-start m-0 p-0 h-full bg-transparent border-0 cursor-pointer text-inherit rounded-none appearance-none"
+                            data-room-row-button
+                            aria-expanded={displayDirectRooms}
+                            onclick={toggleDisplayDirectRooms}
+                        >
+                            <div class="text-white text-sm font-bold tracking-widest uppercase truncate">
+                                {$LL.chat.people()}
+                            </div>
+                        </button>
+                        {#if !displayDirectRooms && $directRoomsUnreadSummary.count > 0}
+                            <UnreadCount
+                                count={$directRoomsUnreadSummary.count}
+                                variant={$directRoomsUnreadSummary.muted ? "muted" : "default"}
+                                size="sm"
+                            />
+                        {/if}
+                        {#if showDirectMessageUserListButton}
+                            <button
+                                type="button"
+                                data-testid="directMessageOpenUserList"
+                                class="transition-all group-hover:bg-white/10 p-1 rounded aspect-square flex items-center justify-center text-white shrink-0 m-0"
+                                aria-label={$LL.chat.users()}
+                                title={$LL.chat.users()}
+                                onclick={(event) => {
+                                    event.stopPropagation();
+                                    navChat.switchToUserList();
+                                }}
+                            >
+                                <IconPlus />
+                            </button>
+                        {/if}
+                        <button
+                            type="button"
+                            class="transition-all group-hover:bg-white/10 p-1 rounded aspect-square flex items-center justify-center text-white shrink-0 m-0"
+                            aria-expanded={displayDirectRooms}
+                            onclick={(event) => {
+                                event.stopPropagation();
+                                toggleDisplayDirectRooms();
+                            }}
+                        >
+                            <IconChevronUp class={`transform transition ${!displayDirectRooms ? "" : "rotate-180"}`} />
+                        </button>
+                    </div>
+
+                    {#if displayDirectRooms}
+                        <div class="flex flex-col px-2 pb-2">
+                            <ShowMore
+                                items={filteredDirectRoom}
+                                maxNumber={8}
+                                idKey="id"
+                                showNothingToDisplayMessage={!isSearching}
+                                getUnreadCount={(room) =>
+                                    rowUnreadCount(room.hasUnreadMessages, room.unreadNotificationCount)}
+                            >
+                                {#snippet children({ item: room })}
+                                    <Room {room} />
+                                {/snippet}
+                            </ShowMore>
+                        </div>
+                    {/if}
+
+                    <div class="flex items-center space-x-2 grow m-0 p-0">
+                        <!-- TODO : use div instead of button to avoid focus issues try to find a better solution -->
+                        <!-- svelte-ignore a11y_click_events_have_key_events -->
+                        <!-- svelte-ignore a11y_no_static_element_interactions -->
+                        <div
+                            class="group relative px-3 m-0 mb-2 rounded-none text-white/75 hover:text-white h-11 hover:bg-contrast-200/10 w-full flex space-x-2 items-center border border-solid border-x-0 border-t border-b-0 border-white/10"
+                            onclick={toggleDisplayRooms}
+                            data-testid="roomAccordeon"
+                        >
+                            <div class="flex items-center space-x-2 grow m-0 p-0">
+                                <div class="text-white text-sm font-bold tracking-widest uppercase grow text-start">
+                                    {$LL.chat.rooms()}
+                                </div>
+                            </div>
+                            {#if !displayRooms && $roomsUnreadSummary.count > 0}
+                                <UnreadCount
+                                    count={$roomsUnreadSummary.count}
+                                    variant={$roomsUnreadSummary.muted ? "muted" : "default"}
+                                    size="sm"
+                                />
+                            {/if}
+                            <CreateRoomOrFolderOption parentID={undefined} parentName="" folder={undefined} />
+                            <button
+                                class="transition-all group-hover:bg-white/10 p-1 rounded aspect-square flex items-center justify-center text-white"
+                            >
+                                <IconChevronUp class={`transform transition ${!displayRooms ? "" : "rotate-180"}`} />
+                            </button>
+                        </div>
+                    </div>
+                    {#if displayRooms}
+                        <div class="px-2 pb-2">
+                            <ShowMore
+                                items={filteredRooms}
+                                maxNumber={8}
+                                idKey="id"
+                                showNothingToDisplayMessage={!isSearching}
+                                getUnreadCount={(room) =>
+                                    rowUnreadCount(room.hasUnreadMessages, room.unreadNotificationCount)}
+                            >
+                                {#snippet children({ item: room })}
+                                    <Room {room} />
+                                {/snippet}
+                            </ShowMore>
+                        </div>
+                    {/if}
+                    <!--roomBySpace-->
+                    {#each Array.from($roomFolders.values()) as rootRoomFolder (rootRoomFolder.id)}
+                        <RoomFolder folder={rootRoomFolder} rootFolder={true} />
+                    {/each}
+                {/if}
+            </div>
+        </div>
+    {/if}
+    {#if $selectedRoomStore !== undefined}
+        <div class="relative overflow-y-auto min-w-0">
+            {#key $selectedRoomStore.id}
+                <RoomTimeline
+                    room={$selectedRoomStore}
+                    {showRoomSidePanelToggle}
+                    roomListVisible={displayTwoColumnLayout && $navChat.key === "chat"}
+                />
+            {/key}
+            {#if showRoomSidePanelAsOverlay && selectedRoomWithSidePanel}
+                <div
+                    class="absolute inset-y-0 end-0 z-10 w-[360px] max-w-full overflow-y-auto border border-solid border-y-0 border-e-0 border-white/10 bg-contrast/95 backdrop-blur-md shadow-2xl"
+                >
+                    <RoomSidePanel room={selectedRoomWithSidePanel} showCloseButton closeOnTimelineFocus />
+                </div>
+            {/if}
+        </div>
+    {:else if $folderPanelStore !== undefined}
+        <div class="relative overflow-y-auto min-w-0">
+            {#key $folderPanelStore.id}
+                <FolderMembersPanel folder={$folderPanelStore} />
+            {/key}
+        </div>
+    {:else if displayTwoColumnLayout}
+        <CatchUpList conversations={$unreadConversations} />
+    {/if}
+
+    {#if roomListBesideConversation}
+        <!-- A focusable separator is the WAI-ARIA window splitter pattern, which Svelte's a11y rules don't know. -->
+        <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
+        <div
+            class="group absolute top-0 bottom-0 z-20 w-3 -ms-1.5 flex items-center justify-center cursor-col-resize touch-none select-none focus-visible:outline-none"
+            style="inset-inline-start: {$roomListWidthStore}px"
+            role="separator"
+            tabindex="0"
+            aria-orientation="vertical"
+            aria-label={$LL.chat.resizeRoomList()}
+            aria-valuenow={$roomListWidthStore}
+            aria-valuemin={ROOM_LIST_MIN_WIDTH}
+            aria-valuemax={ROOM_LIST_MAX_WIDTH}
+            data-testid="roomListResizeHandle"
+            onpointerdown={startRoomListResize}
+            ondblclick={() => roomListWidthStore.set(ROOM_LIST_DEFAULT_WIDTH)}
+            onkeydown={resizeRoomListWithKeyboard}
+        >
+            <span
+                class="w-1 h-32 rounded bg-white/20 transition-colors group-hover:bg-white group-focus-visible:bg-white"
+            ></span>
+        </div>
+    {/if}
+
+    {#if showRoomSidePanelInThirdColumn && selectedRoomWithSidePanel}
+        <div class="overflow-y-auto min-w-0 border border-solid border-y-0 border-r-0 border-white/10">
+            <RoomSidePanel room={selectedRoomWithSidePanel} />
+        </div>
+    {/if}
+
+    <div class="w-full flex flex-col col-span-full h-fit">
+        <ExternalComponents zone="chatBand" />
+        {#if $isEncryptionRequiredAndNotSet === true && $isGuest === false}
+            <div class="w-full">
+                <button
+                    data-testid="restoreEncryptionButton"
+                    onclick={(event) => {
+                        event.stopPropagation();
+                        initChatConnectionEncryption().catch((error) => {
+                            console.error("Failed to initialize chat encryption", error);
+                            warningMessageStore.addWarningMessage($LL.chat.e2ee.configureFailed(), { closable: true });
+                        });
+                    }}
+                    class="text-white flex gap-2 justify-center w-full bg-neutral hover:bg-neutral-600 hover:brightness-100 m-0 rounded-none py-2 px-3 appearance-none"
+                >
+                    <IconCloudLock font-size="20" />
+                    <div class="text-sm font-bold grow text-start">
+                        {$LL.chat.e2ee.encryptionNotConfigured()}
+                    </div>
+                    <div class="text-xs rounded border border-solid border-white py-0.5 px-1.5 group-hover:bg-white/10">
+                        {$LL.chat.e2ee.configure()}
+                    </div>
+                </button>
+            </div>
+        {/if}
+    </div>
+</div>

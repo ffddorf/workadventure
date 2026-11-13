@@ -1,0 +1,108 @@
+import type { DeepPartial } from "../DeepPartial";
+import type { Translation } from "../i18n-types";
+
+const camera: DeepPartial<Translation["camera"]> = {
+    editCam: "Editar càmera",
+    editSpeaker: "Editar sortida d'àudio",
+    active: "Actiu",
+    disabled: "Desactivat",
+    notRecommended: "No recomanat",
+    enable: {
+        title: "Encendre la càmera i el micròfon",
+        start: "Benvigut a la nostra pàgina de configuració de dispositius d'àudio i vídeo! Trobeu aquí les eines per millorar la vostra experiència en línia. Ajusteu la configuració segons les vostres preferències per resoldre qualsevol problema potencial. Assegureu-vos que el vostre maquinari estigui connectat correctament i actualitzat. Exploreu i proveu diferents configuracions per trobar la que millor us funciona.",
+    },
+    help: {
+        title: "Es necessita accéss a la càmera/micròfon",
+        cameraTitle: "Es necessita accés a la càmera",
+        microphoneTitle: "Es necessita accés al micròfon",
+        cameraPermissionDenied: "Permís de càmera denegat",
+        microphonePermissionDenied: "Permís de micròfon denegat",
+        cameraMicrophonePermissionDenied: "Permisos de càmera i micròfon denegats",
+        content: "Ha de permetre accés a la càmera i el micròfon al navegador.",
+        cameraContent: "Ha de permetre accés a la càmera al navegador.",
+        microphoneContent: "Ha de permetre accés al micròfon al navegador.",
+        firefoxContent:
+            'Si us plau, feu clic a la caixa "Recordar aquesta decisió", si no voleu que Firefox sigui demanant autorització.',
+        allow: "Permetre la webcam",
+        allowMicrophone: "Permetre el micròfon",
+        allowCameraMicrophone: "Permetre la webcam i el micròfon",
+        continue: "Continuar sense càmera",
+        continueWithoutMicrophone: "Continuar sense micròfon",
+        continueCameraMicrophone: "Continuar sense webcam ni micròfon",
+        screen: {
+            firefox: "/resources/help-setting-camera-permission/en-US-firefox.png",
+            chrome: "/resources/help-setting-camera-permission/en-US-firefox.png",
+        },
+        tooltip: {
+            permissionDeniedTitle: "Accés a la càmera bloquejat",
+            permissionDeniedDesc:
+                "El navegador ha denegat l’accés a la càmera per a aquest lloc. Permeteu-lo des de la barra d’adreces (cadenat o icona de càmera) o a la configuració del lloc. La il·lustració correspon al vostre navegador.",
+            noDeviceTitle: "Cap càmera utilitzable",
+            noDeviceDesc:
+                "El navegador no detecta cap càmera utilitzable. Proveu un altre navegador, comproveu que la càmera estigui connectada, reviseu la configuració de l’ordinador (privadesa, dispositius) o reinicieu l’ordinador si el dispositiu hauria de funcionar.",
+            permissionMedia: {
+                firefox: "/resources/help-setting-camera-permission/en-US-firefox.png",
+                chrome: "/resources/help-setting-camera-permission/en-US-firefox.png",
+                safari: "/resources/help-setting-camera-permission/en-US-firefox.png",
+                android: "/resources/help-setting-camera-permission/en-US-firefox.png",
+                default: "/resources/help-setting-camera-permission/en-US-firefox.png",
+            },
+        },
+        microphoneTooltip: {
+            permissionDeniedTitle: "Accés al micròfon bloquejat",
+            permissionDeniedDesc:
+                "El navegador ha denegat l’accés al micròfon per a aquest lloc. Permeteu-lo des de la barra d’adreces (cadenat o icona de micròfon) o a la configuració del lloc. La il·lustració correspon al vostre navegador.",
+            noDeviceTitle: "Cap micròfon utilitzable",
+            noDeviceDesc:
+                "El navegador no detecta cap micròfon utilitzable. Proveu un altre navegador, comproveu el micròfon, reviseu la configuració de l’ordinador (privadesa, dispositius) o reinicieu l’ordinador si el dispositiu hauria de funcionar.",
+            permissionMedia: {
+                firefox: "/resources/help-setting-camera-permission/en-US-firefox.png",
+                chrome: "/resources/help-setting-camera-permission/en-US-firefox.png",
+                safari: "/resources/help-setting-camera-permission/en-US-firefox.png",
+                android: "/resources/help-setting-camera-permission/en-US-firefox.png",
+                default: "/resources/help-setting-camera-permission/en-US-firefox.png",
+            },
+        },
+    },
+    webrtc: {
+        title: "Error de connexió amb el servidor de retransmissió de vídeo",
+        titlePending: "Connexió amb el servidor de retransmissió de vídeo pendent",
+        error: "El servidor TURN no és accessible",
+        content:
+            "El servidor de retransmissió de vídeo no es pot arribar. Pot ser que no pugueu comunicar-vos amb altres usuaris.",
+        solutionVpn:
+            "Si us esteu <strong>connectant mitjançant una VPN</strong>, desconnecteu-vos de la VPN i actualitzeu la pàgina web.",
+        solutionVpnNotAskAgain: "Entès. No em tornis a avisar 🫡",
+        solutionHotspot:
+            "Si esteu en una xarxa restringida (xarxa d'empresa...), proveu de canviar de xarxa. Per exemple, creeu un <strong>punt d'accés Wifi</strong> amb el vostre telèfon i connecteu-vos mitjançant el telèfon.",
+        solutionNetworkAdmin: "Si sou un <strong>administrador de xarxa</strong>, reviseu la ",
+        preparingYouNetworkGuide: 'guia "Preparant la vostra xarxa"',
+        refresh: "Actualitzar",
+        continue: "Continuar",
+        newDeviceDetected: "Nou dispositiu detectat {device} 🎉 Canviar? [ESPAI] Ignorar [ESC]",
+    },
+    my: {
+        silentZone: "Zona silenciosa",
+        silentZoneDesc:
+            "Esteu en una zona silenciosa. Ningú no us pot parlar aquí, i el vostre micròfon i la vostra càmera estan desactivats.",
+        nameTag: "Vós",
+        loading: "Carregant la vostra càmera...",
+    },
+    disable: "Apagueu la càmera",
+    menu: {
+        moreAction: "Més accions",
+        closeMenu: "Tancar el menú",
+        senPrivateMessage: "Enviar un missatge privat (pròximament)",
+        giveFloor: "Donar la paraula",
+        revokeFloor: "Retirar la paraula",
+        muteAudioUser: "Silenciar audio",
+        askToMuteAudioUser: "Demanar de silenciar l'àudio",
+        muteAudioEveryBody: "Silenciar audio per a tothom",
+        muteVideoUser: "Silenciar vídeo",
+        askToMuteVideoUser: "Demanar de silenciar el vídeo",
+        muteVideoEveryBody: "Silenciar vídeo per a tothom",
+        blockOrReportUser: "Bloquejar o informar d'usuari",
+    },
+};
+
+export default camera;

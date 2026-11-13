@@ -1,0 +1,27 @@
+<script lang="ts">
+    interface Props {
+        height?: string;
+        width?: string;
+        stroke: string;
+        strokeWidth?: string;
+    }
+
+    let { height = "h-6", width = "w-6", stroke = "#ffffff", strokeWidth = "1.5" }: Props = $props();
+</script>
+
+<svg
+    xmlns="http://www.w3.org/2000/svg"
+    class="icon icon-tabler icon-tabler-antenna-bars-1 {height} {width}"
+    viewBox="0 0 24 24"
+    stroke-width={strokeWidth}
+    {stroke}
+    fill="none"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+>
+    <path stroke="none" d="M0 0h24v24H0z" fill="none" />
+    <path d="M6 18l0 .01" />
+    <path d="M10 18l0 .01" />
+    <path d="M14 18l0 .01" />
+    <path d="M18 18l0 .01" />
+</svg>

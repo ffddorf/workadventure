@@ -1,0 +1,40 @@
+import type { DeepPartial } from "../DeepPartial";
+import type { Translation } from "../i18n-types";
+
+const notification: DeepPartial<Translation["notification"]> = {
+    discussion: "{name} chce z tobu diskutować",
+    message: "{name} sćele Wam powěsć",
+    mention: "{name} je Was naspomnił",
+    askToMuteMicrophone: "Móžu waš mikrofon němy činić?",
+    askToMuteCamera: "Móžu wašu kameru němy činić?",
+    microphoneMuted: "Waš mikrofon je so wot moderatora němy činił",
+    cameraMuted: "Waša kamera je so wot moderatora němy činiła",
+    givenTheFloor: "Nětko sy ty na rjedźe",
+    givenTheFloorEnableMicrophone: "Nětko sy ty na rjedźe — zaswěć swój mikrofon",
+    floorRevoked: "Nimaš wjace słowo",
+    floorGivenBack: "Sy słowo wróćo dał",
+    handLowered: "Moderator je twoju ruku spušćił",
+    removedFromConversation: "Moderator je će z rozmołwy wotstronił.",
+    actionFailed: "Tuta akcija njeje so poradźiła",
+    announcement: "Připowěźeńka",
+    help: {
+        title: "Přistup k powěźeńkam wotpokazany",
+        permissionDenied: "Přistup wotpokazany",
+        content:
+            "Njepřepušćujće diskusiju. Aktiwěrujće powěźeńki, zo byšće informowany był, hdyž něchtó z wami rěčeć chce, samo hdyž njejsće na rajtarku WorkAdventure.",
+        firefoxContent:
+            'Prošu klikńće na kašćik "Tutu rozsudźenje se spomnić", jeli njechćeće, zo Firefox dale rěka za awtorizaciju.',
+        refresh: "Aktualizować",
+        continue: "Bjez powěźeńkow pokročować",
+        screen: {
+            chrome: "/resources/help-setting-notification-permission/en-US-chrome.png",
+        },
+        screenAlt: "Powěźeńki přez adresowe polo w Chrome dopušćić",
+    },
+    addNewTag: 'nowy tag přidać: "{tag}"',
+    screenSharingError: "Dźělenje wobrazowki njedaje so startować",
+    recordingStarted: "Jedyn wotdźělnik w diskusiji je nagraće započał.",
+    urlCopiedToClipboard: "URL do mjezywótkłada kopěrowana",
+};
+
+export default notification;

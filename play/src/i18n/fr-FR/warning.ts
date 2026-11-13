@@ -1,0 +1,76 @@
+import type { DeepPartial } from "../DeepPartial";
+import type { Translation } from "../i18n-types";
+
+const warning: DeepPartial<Translation["warning"]> = {
+    title: "Attention !",
+    content: `Ce monde est proche de sa limite ! Vous pouvez améliorer sa capacité <a href="{upgradeLink}" target="_blank">ici</a>`,
+    limit: "Ce monde est proche de ses limites !",
+    accessDenied: {
+        camera: "Accès à la caméra refusé. Cliquez ici et vérifiez les autorisations de votre navigateur.",
+        teleport: "Vous n'avez pas le droit de vous téléporter vers cet utilisateur.",
+        room: "Accès à la pièce refusé. Vous n'avez pas les autorisations nécessaires pour entrer dans cette pièce.",
+    },
+    connectionLost: "Connexion perdue. Reconnexion...",
+    connectionLostTitle: "Connexion perdue",
+    connectionLostSubtitle: "Reconnexion",
+    waitingConnectionTitle: "En attente du serveur",
+    waitingConnectionSubtitle: "Connexion",
+    megaphoneNeeds: "Pour utiliser le mégaphone, vous devez activer votre caméra ou votre microphone.",
+    mapEditorShortCut: "Une erreur est survenue lors de l’ouverture de l’éditeur de carte.",
+    mapEditorNotEnabled: "L’éditeur de carte n’est pas activé sur ce monde.",
+    popupBlocked: {
+        title: "Bloqueur de fenêtre pop-up",
+        content: "Veuillez autoriser les fenêtres pop-up pour ce site dans les paramètres de votre navigateur.",
+        done: "Ok",
+    },
+    backgroundProcessing: {
+        failedToApply: "Échec de l'application des effets de fond",
+        notSupportedOnThisBrowser: "Les effets de fond ne sont pas pris en charge par ce navigateur",
+    },
+    duplicateUserConnected: {
+        title: "Déjà connecté",
+        message:
+            "Cet utilisateur est déjà connecté à cette salle depuis un autre onglet ou appareil. Pour éviter les conflits, fermez l'autre onglet ou fenêtre.",
+        confirmContinue: "J'ai compris, continuer",
+        dontRemindAgain: "Ne plus afficher ce message",
+    },
+    browserNotSupported: {
+        title: "😢 Navigateur non supporté",
+        message: "Votre navigateur ({browserName}) n'est plus supporté par WorkAdventure.",
+        description:
+            "Votre navigateur est trop ancien pour exécuter WorkAdventure. Veuillez le mettre à jour vers la dernière version pour continuer.",
+        whatToDo: "Que pouvez-vous faire ?",
+        option1: "Mettre à jour {browserName} vers la dernière version",
+        option2: "Quitter WorkAdventure et utiliser un autre navigateur",
+        updateBrowser: "Mettre à jour le navigateur",
+        leave: "Quitter",
+    },
+    pwaInstall: {
+        title: "Installer WorkAdventure",
+        description:
+            "Installez l'application pour une meilleure expérience : accès rapide, lancement au démarrage et utilisation comme une application.",
+        descriptionIos:
+            "Ajoutez WorkAdventure à votre écran d'accueil pour une meilleure expérience et un accès rapide.",
+        feature1Title: "Accès rapide",
+        feature1Description: "Lancez WorkAdventure depuis votre menu Démarrer, votre Dock ou votre bureau.",
+        feature2Title: "Fenêtre d'application dédiée",
+        feature2Description:
+            "Gardez WorkAdventure séparé de vos onglets de navigateur et retrouvez-le d'un coup d'œil dans votre barre des tâches.",
+        feature3Title: "Lancement au démarrage",
+        feature3Description: "Lancez WorkAdventure lorsque votre appareil démarre.",
+        iosStepsTitle: "Comment installer",
+        iosStep1: "Appuyez sur le bouton Partager (carré avec flèche) en bas de Safari.",
+        iosStep2: "Faites défiler vers le bas et appuyez sur « Ajouter à l'écran d'accueil ».",
+        iosStep3: "Appuyez sur « Ajouter » pour confirmer.",
+        install: "Installer l'App WorkAdventure",
+        installing: "Installation…",
+        skip: "Continuer dans le navigateur",
+        continue: "Continuer dans le navigateur",
+        neverShowPage: "Ne plus me demander",
+    },
+    otherMeetingMuted:
+        "Vous êtes maintenant en réunion ici. Votre microphone, votre caméra et votre partage d'écran ont été désactivés dans {world}.",
+    desktopAppOutdated: "Une nouvelle version de l'appli WorkAdventure est disponible : {url}",
+};
+
+export default warning;

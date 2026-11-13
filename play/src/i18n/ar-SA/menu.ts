@@ -1,0 +1,219 @@
+import type { DeepPartial } from "../DeepPartial";
+import type { Translation } from "../i18n-types";
+
+const menu: DeepPartial<Translation["menu"]> = {
+    title: "قائمة", // Menu
+    icon: {
+        open: {
+            menu: "افتح القائمة", // Open menu
+            invite: "عرض الدعوة", // Show invite
+            register: "تسجيل", // Register
+            chat: "افتح الدردشة", // Open chat
+            userlist: "قائمة المستخدمين", // User list
+            openEmoji: "افتح نافذة الرموز التعبيرية", // Open emoji popup
+            closeEmoji: "أغلق قائمة الرموز التعبيرية", // Close emoji menu
+            mobile: "افتح قائمة الجوال", // Open mobile menu
+            calendar: "افتح التقويم", // Open calendar
+            todoList: "قائمة المهام",
+        },
+    },
+    visitCard: {
+        close: "إغلاق", // Close
+        sendMessage: "إرسال رسالة",
+    },
+    profile: {
+        login: "تسجيل الدخول", // Login
+        logout: "تسجيل الخروج", // Logout
+        helpAndTips: "المساعدة والنصائح", // Help & Tips
+    },
+    settings: {
+        videoBandwidth: {
+            title: "جودة الفيديو", // Video quality
+            low: "منخفض", // Low
+            recommended: "موصى به", // Recommended
+            high: "High", // Unlimited
+        },
+        shareScreenBandwidth: {
+            title: "جودة مشاركة الشاشة", // Screen sharing quality
+            low: "منخفض", // Low
+            recommended: "موصى به", // Recommended
+            high: "High", // Unlimited
+        },
+        bandwidthConstrainedPreference: {
+            title: "إذا كانت سعة نطاق الشبكة محدودة",
+            maintainFramerateTitle: "الحفاظ على سلاسة الرسوم المتحركة",
+            maintainFramerateDescription:
+                "أَعطِ أولوية لمعدل الإطارات على حساب الدقة. استخدمه عندما تكون السلاسة مهمة مثل بث ألعاب الفيديو.",
+            maintainResolutionTitle: "الحفاظ على وضوح النص",
+            maintainResolutionDescription:
+                "أَعطِ أولوية للدقة على حساب معدل الإطارات. استخدمه عندما تكون قابلية قراءة النص مهمة مثل العروض التقديمية أو مشاركة الشيفرة.",
+            balancedTitle: "موازنة معدل الإطارات والدقة",
+            balancedDescription: "حاول الحفاظ على توازن بين معدل الإطارات والدقة.",
+        },
+        microphone: {
+            title: "إعدادات الميكروفون",
+            autoGainControl: "التحكم التلقائي في مستوى الصوت",
+            autoGainControlDescription: "ضبط مستوى صوت الميكروفون تلقائيًا.",
+            echoCancellation: "إلغاء الصدى",
+            enableAdvancedNoiseReduction: "تفعيل تقليل الضوضاء المتقدم",
+            noiseSuppressionMode: "وضع تقليل الضوضاء:",
+            workAdventureNoiseSuppression: "تقليل الضوضاء من WorkAdventure",
+            workAdventureNoiseSuppressionDescription: "معالجة صوت الميكروفون باستخدام تقليل الضوضاء في WorkAdventure.",
+            recommended: "موصى به",
+            browserNoiseSuppression: "تقليل الضوضاء في المتصفح",
+            browserNoiseSuppressionDescription: "استخدام تقليل الضوضاء المدمج في المتصفح.",
+            voiceIsolation: "عزل الصوت",
+            voiceIsolationDescription: "استخدام عزل الصوت في المتصفح ونظام التشغيل عند توفره.",
+            noiseSuppressionEngine: "محرك إلغاء الضوضاء",
+            noiseSuppressionEngineDeepFilterNet: "DeepFilterNet (جديد، صوت كامل النطاق)",
+            noiseSuppressionEngineDtln: "DTLN (المحرك السابق)",
+        },
+        language: {
+            title: "اللغة", // Language
+        },
+        privacySettings: {
+            title: "وضع الغياب", // Absence mode
+            explanation:
+                'عند الانتقال إلى نافذة أو تبويب آخر، ينتقل WorkAdventure إلى "وضع الغياب"، إلا أثناء محادثة أو بث.', // When you switch to another window or tab, WorkAdventure switches to "absence mode", except during a conversation or a broadcast.
+            cameraToggle: 'اترك الكاميرا مفعلة في "وضع الغياب".', // Keep camera active in "absence mode".
+            microphoneToggle: 'اترك الميكروفون مفعلاً في "وضع الغياب".', // Keep microphone active in "absence mode".
+        },
+        save: "حفظ", // Save
+        otherSettings: "إعدادات أخرى", // Other settings
+        fullscreen: "ملء الشاشة", // Fullscreen
+        notifications: "الإشعارات", // Notifications
+        enablePictureInPicture: "تمكين صورة داخل صورة",
+        chatSounds: "أصوات الدردشة", // Chat sounds
+        cowebsiteTrigger: "اسأل في كل مرة قبل فتح مواقع الويب أو غرف Jitsi-Meet", // Ask every time before opening websites or Jitsi-Meet rooms
+        ignoreFollowRequest: "تجاهل طلبات المتابعة من المستخدمين الآخرين", // Ignore follow requests from other users
+        proximityDiscussionVolume: "مستوى صوت النقاش القريب",
+        blockAudio: "تعطيل الموسيقى والأصوات الخلفية", // Disable music and background sounds
+        disableAnimations: "تعطيل الرسوم المتحركة للخرائط", // Disable map animations
+        bubbleSound: "صوت الفقاعة",
+        bubbleSoundOptions: {
+            ding: "دينغ",
+            wobble: "ووبل",
+        },
+        displayVideoQualityStats: "عرض إحصائيات جودة الفيديو",
+    },
+    invite: {
+        description: "شارك الرابط إلى هذه الغرفة!", // Share the link to this room!
+        copy: "نسخ", // Copy
+        copied: "تم النسخ",
+        share: "مشاركة", // Share
+        walkAutomaticallyToPosition: "اذهب تلقائيًا إلى موقعي", // Walk automatically to my position
+        selectEntryPoint: "اختر نقطة الدخول", // Select entry point
+        selectEntryPointSelect: "اختر نقطة الدخول التي سيصل من خلالها المستخدمون",
+    },
+    globalMessage: {
+        enter: "أدخل رسالتك هنا...", // Enter your message here...
+    },
+    contact: {
+        gettingStarted: {
+            title: "البدء", // Getting started
+            description:
+                "مع WorkAdventure يمكنك إنشاء عالم عبر الإنترنت حيث يمكنك الاجتماع والتحدث مع الآخرين بشكل عفوي. ابدأ بإنشاء خريطتك الخاصة. يتوفر لك مجموعة كبيرة من الخرائط الجاهزة من فريقنا.", // With WorkAdventure you can create an online world where you can meet and talk to others spontaneously. Start by creating your own map. A large selection of ready-made maps from our team is available to you.
+        },
+        createMap: {
+            title: "إنشاء خريطة خاصة", // Create your own map
+            description: "يمكنك أيضًا إنشاء خريطتك الخاصة. اتبع دليلنا خطوة بخطوة.", // You can also create your own map. Follow our step-by-step guide.
+        },
+    },
+    chat: {
+        resetKeyStorageUpButtonLabel: "إعادة تعيين مخزن المفاتيح",
+        resetKeyStorageConfirmationModal: {
+            title: "تأكيد إعادة تعيين مخزن المفاتيح",
+            content: "أنت على وشك إعادة تعيين مخزن المفاتيح. هل أنت متأكد؟",
+            warning:
+                "سيؤدي إعادة تعيين مخزن المفاتيح إلى إزالة جلستك الحالية وجميع المستخدمين الموثوق بهم. قد تفقد الوصول إلى بعض الرسائل السابقة، ولن يتم التعرف عليك كمستخدم موثوق به بعد الآن.",
+            cancel: "إلغاء",
+            continue: "متابعة",
+        },
+    },
+    about: {
+        mapInfo: "معلومات عن هذه الخريطة", // Information about this map
+        mapLink: "رابط الخريطة", // Map link
+        copyrights: {
+            map: {
+                title: "حقوق الطبع والنشر للخريطة", // Map copyright
+                empty: "لم يقم منشئ الخريطة بتوفير معلومات حول حقوق الطبع والنشر.", // The map creator has not provided information about the copyright.
+            },
+            tileset: {
+                title: "حقوق الطبع والنشر لمجموعات البلاط", // Tileset copyright
+                empty: "لم يقم منشئ الخريطة بتوفير معلومات حول حقوق الطبع والنشر لمجموعات البلاط. هذا لا يعني أن مجموعات البلاط ليست خاضعة لأي ترخيص.", // The map creator has not provided information about the copyright of the tilesets. This does not mean that the tilesets are not subject to any license.
+            },
+            audio: {
+                title: "حقوق الطبع والنشر للملفات الصوتية", // Audio files copyright
+                empty: "لم يقم منشئ الخريطة بتوفير معلومات حول حقوق الطبع والنشر للملفات الصوتية. هذا لا يعني أن الملفات الصوتية ليست خاضعة لأي ترخيص.", // The map creator has not provided information about the copyright of the audio files. This does not mean that the audio files are not subject to any license.
+            },
+        },
+    },
+    sub: {
+        profile: "الملف الشخصي", // Profile
+        settings: "الإعدادات", // Settings
+        credit: "حول هذه الخريطة", // About this map
+        contact: "اتصال", // Contact
+        report: "الإبلاغ عن خطأ", // Report an error
+        help: "مساعدة وشروحات",
+        contextualActions: "إجراءات سياقية",
+        shortcuts: "اختصارات",
+    },
+    shortcuts: {
+        title: "اختصارات لوحة المفاتيح",
+        speedUp: "الركض",
+        interact: "تفاعل",
+        follow: "اتبع",
+        openChat: "فتح الدردشة",
+        openUserList: "فتح قائمة المستخدمين",
+        toggleMapEditor: "إظهار/إخفاء محرر الخرائط",
+        rotatePlayer: "تدوير اللاعب",
+        openSayPopup: "فتح نافذة قل",
+        openThinkPopup: "فتح نافذة فكر",
+        walkMyDesk: "الذهاب إلى مكتبي",
+        edit: {
+            start: "تعديل",
+            title: "وضع التعديل",
+            help: "انقر على اختصار ثم اضغط على التركيبة الجديدة. Escape للإلغاء. تُحفظ اختياراتك في هذا المتصفح.",
+            resetAll: "إعادة تعيين الكل",
+            done: "تم",
+            pressKey: "اضغط على مفتاح…",
+            none: "لا شيء",
+            change: "تغيير اختصار «{action}»",
+            reset: "استعادة الاختصار الافتراضي لـ «{action}»",
+            locked: "غير قابل للتعديل",
+            modified: "معدّل",
+            usedBy: "{keys} مستخدم بالفعل لـ «{action}». الاستبدال سيترك «{action}» بلا اختصار.",
+            usedByFixed: "{keys} مستخدم بالفعل لـ «{action}» ولا يمكن تغييره.",
+            reserved: "{keys} محجوز للمتصفح. اختر مفتاحًا آخر.",
+            replace: "استبدال",
+            cancel: "إلغاء",
+        },
+        subtitle: "تُعطَّل أثناء الكتابة في حقل نصي.",
+        searchLabel: "البحث عن اختصار",
+        searchPlaceholder: "ابحث عن إجراء أو مفتاح…",
+        noResult: "لا يوجد اختصار يطابق «{query}».",
+        or: "أو",
+        layout: "تخطيط لوحة المفاتيح",
+        walk: "المشي",
+        sendEmote: "إرسال رمز تعبيري",
+        groups: {
+            move: "التنقل",
+            communicate: "التواصل",
+            express: "التعبير",
+            interact: "التفاعل",
+        },
+        hints: {
+            speedUp: "اضغط مع الاستمرار أثناء التنقل",
+            follow: "بالقرب من شخص ما",
+            emotes: "بترتيب شريط الرموز التعبيرية",
+            mapEditor: "إذا كان بإمكانك تعديل الخريطة",
+        },
+        keyNames: {
+            shift: "Shift",
+            enter: "Enter",
+            space: "مسافة",
+        },
+    },
+};
+
+export default menu;

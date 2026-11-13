@@ -1,19 +1,55 @@
-#!/bin/sh
+#!/usr/bin/env bash
 . "$(dirname "$0")/_/husky.sh"
+
+# Check if all strings are translated in all languages
+check_translations() {
+  cd play || exit 1
+  npm run i18n:check
+}
 
 (
 cd messages || exit
-yarn run precommit
+npm run precommit
 )
 (
-cd front || exit
-yarn run precommit
+cd play || exit
+npm run precommit
 )
+#(
+#check_translations
+#)
 (
-cd pusher || exit
-yarn run precommit
+check_translations
 )
 (
 cd back || exit
-yarn run precommit
+npm run precommit
+)
+(
+cd map-storage || exit
+npm run precommit
+)
+(
+cd tests || exit
+npm run precommit
+)
+(
+cd libs/map-editor || exit
+npm run precommit
+)
+(
+cd libs/messages || exit
+npm run export-json-schema
+)
+(
+cd libs/shared-utils || exit
+npm run precommit
+)
+(
+cd libs/store-utils || exit
+npm run precommit
+)
+(
+cd contrib/tools/generate-env-docs || exit
+npm run generate
 )

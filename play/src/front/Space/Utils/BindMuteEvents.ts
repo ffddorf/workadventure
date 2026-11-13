@@ -1,0 +1,195 @@
+import type { Unsubscriber } from "svelte/store";
+import { get } from "svelte/store";
+import * as Sentry from "@sentry/svelte";
+import type { Subscription } from "rxjs";
+import type { PrivateEvents, SpaceInterface } from "../SpaceInterface";
+import { notificationPlayingStore } from "../../Stores/NotificationStore";
+import { isSpeakerStore, requestedCameraState, requestedMicrophoneState } from "../../Stores/MediaStore";
+import { requestedHandRaiseState } from "../../Stores/RaiseHandStore";
+import LL from "../../../i18n/i18n-svelte";
+import { currentLiveStreamingSpaceStore, givenFloorSpaceStore } from "../../Stores/MegaphoneStore";
+import { stopMegaphoneLive } from "../../Components/ActionBar/MenuIcons/megaphoneActions";
+import { chatZoneLiveStore } from "../../Stores/ChatStore";
+import { gameManager } from "../../Phaser/Game/GameManager";
+import { popupStore } from "../../Stores/PopupStore";
+import MuteDialogPopup from "../../Components/PopUp/MuteDialogPopup.svelte";
+
+function displayMuteDialog(event: PrivateEvents["muteAudio"] | PrivateEvents["muteVideo"], space: SpaceInterface) {
+    const message =
+        event.$case === "muteAudio"
+            ? get(LL).notification.askToMuteMicrophone()
+            : get(LL).notification.askToMuteCamera();
+
+    const popupName = event.$case + "-dialog-popup-" + event.sender;
+
+    const senderUser = get(space.usersStore).get(event.sender);
+
+    let subscription: Subscription | undefined;
+
+    const cleanup = () => {
+        popupStore.removePopup(popupName);
+        subscription?.unsubscribe();
+        currentUserLeaveSpaceSubscription.unsubscribe();
+    };
+
+    // In case the sender leaves the space, we remove the popup
+    if (senderUser) {
+        subscription = space.observeUserLeft.subscribe((user) => {
+            if (user.spaceUserId === event.sender) {
+                cleanup();
+            }
+        });
+    }
+
+    const currentUserLeaveSpaceSubscription = space.onLeaveSpace.subscribe(() => {
+        cleanup();
+    });
+
+    popupStore.addPopup(
+        MuteDialogPopup,
+        {
+            message,
+            sender: senderUser,
+            acceptRequest: () => {
+                if (event.$case === "muteAudio") {
+                    requestedMicrophoneState.disableMicrophone();
+                } else {
+                    requestedCameraState.disableWebcam();
+                }
+                cleanup();
+            },
+            refuseRequest: () => {
+                cleanup();
+            },
+        },
+        popupName,
+    );
+}
+
+/**
+ * This function listens to the space events and mutes the user when a mute request is received.
+ */
+export function bindMuteEventsToSpace(space: SpaceInterface): void {
+    // We can safely ignore the subscription because it will be automatically completed when the space is destroyed.
+    // eslint-disable-next-line rxjs/no-ignored-subscription,svelte/no-ignored-unsubscribe
+    space.observePrivateEvent("muteAudio").subscribe((event) => {
+        if (event.muteAudio.force) {
+            notificationPlayingStore.playNotification(get(LL).notification.microphoneMuted(), "microphone-off.png");
+            requestedMicrophoneState.disableMicrophone();
+        } else {
+            notificationPlayingStore.playNotification(get(LL).notification.askToMuteMicrophone(), "microphone-off.png");
+            displayMuteDialog({ ...event, sender: event.sender.spaceUserId }, space);
+        }
+    });
+
+    // We can safely ignore the subscription because it will be automatically completed when the space is destroyed.
+    // eslint-disable-next-line rxjs/no-ignored-subscription,svelte/no-ignored-unsubscribe
+    space.observePrivateEvent("muteVideo").subscribe((event) => {
+        if (event.muteVideo.force) {
+            notificationPlayingStore.playNotification(get(LL).notification.cameraMuted(), "camera-off.png");
+            requestedCameraState.disableWebcam();
+        } else {
+            notificationPlayingStore.playNotification(get(LL).notification.askToMuteCamera(), "camera-off.png");
+            displayMuteDialog({ ...event, sender: event.sender.spaceUserId }, space);
+        }
+    });
+
+    // Observe private event to ckick the user of the space and proximity discussion
+    // We can safely ignore the subscription because it will be automatically completed when the space is destroyed.
+    // eslint-disable-next-line rxjs/no-ignored-subscription,svelte/no-ignored-unsubscribe
+    space.observePrivateEvent("kickOffUser").subscribe((event) => {
+        // See RoomConnection's kickOffMessage: the stop has to go through the same
+        // function the button does, or the broadcast stays "live" as far as the action
+        // bar and the analytics interval are concerned.
+        if (get(currentLiveStreamingSpaceStore)?.getName() === space.getName()) {
+            stopMegaphoneLive();
+        }
+        isSpeakerStore.set(false);
+        currentLiveStreamingSpaceStore.set(undefined);
+
+        const scene = gameManager.getCurrentGameScene();
+        const spaceRegistry = scene.spaceRegistry;
+        spaceRegistry.leaveSpace(space).catch((e) => {
+            console.error("Error while leaving space", e);
+            Sentry.captureException(e);
+        });
+        chatZoneLiveStore.set(false);
+        notificationPlayingStore.playNotification(get(LL).notification.removedFromConversation());
+    });
+
+    // If the local user leaves the space while holding a floor granted through a raised hand, drop the
+    // promotion state so the "give back the floor" control does not linger, pointing at a space we left.
+    // We can safely ignore the subscription because it will be automatically completed when the space is destroyed.
+    // eslint-disable-next-line rxjs/no-ignored-subscription,svelte/no-ignored-unsubscribe
+    space.onLeaveSpace.subscribe(() => {
+        if (get(givenFloorSpaceStore) === space) {
+            isSpeakerStore.set(false);
+            givenFloorSpaceStore.set(undefined);
+        }
+    });
+
+    // We can safely ignore the subscription because it will be automatically completed when the space is destroyed.
+    // eslint-disable-next-line rxjs/no-ignored-subscription,svelte/no-ignored-unsubscribe
+    space.observePublicEvent("muteAudioForEverybody").subscribe((event) => {
+        notificationPlayingStore.playNotification(get(LL).notification.askToMuteMicrophone(), "microphone-off.png");
+        requestedMicrophoneState.disableMicrophone();
+    });
+
+    // We can safely ignore the subscription because it will be automatically completed when the space is destroyed.
+    // eslint-disable-next-line rxjs/no-ignored-subscription,svelte/no-ignored-unsubscribe
+    space.observePublicEvent("muteVideoForEverybody").subscribe((event) => {
+        notificationPlayingStore.playNotification(get(LL).notification.askToMuteCamera(), "camera-off.png");
+        requestedCameraState.disableWebcam();
+    });
+}
+
+/**
+ * Reacts to what others did to the local user's raised hand, as seen in the space state: being given the floor,
+ * having it taken back, or having the hand lowered by a moderator. The state is server-owned, so these are not
+ * requests the local client could ignore: this only brings the local UI and media in line with it.
+ */
+export function watchRaiseHandState(space: SpaceInterface): Unsubscriber {
+    const me = space.mySpaceUserId;
+    let wasRaised = false;
+    let wasFloorHolder = false;
+
+    return space.state.store.subscribe((state) => {
+        const isRaised = state.raisedHands.some((entry) => entry.spaceUserId === me);
+        const isFloorHolder = state.floorHolders.some((entry) => entry.spaceUserId === me);
+        const gotTheFloor = !wasFloorHolder && isFloorHolder;
+        const lostTheFloor = wasFloorHolder && !isFloorHolder;
+        const handLoweredByOthers =
+            wasRaised && !isRaised && !gotTheFloor && get(requestedHandRaiseState).has(space.getName());
+        wasRaised = isRaised;
+        wasFloorHolder = isFloorHolder;
+
+        if (gotTheFloor) {
+            space.startStreaming();
+            // Promote to a full speaker: this guarantees the local return feed (self-view) shows even when the
+            // user's availability status would otherwise hide it, and remembers the space so the raise-hand
+            // button can switch to its "on stage" state and hand the floor back (see RaiseHandMenuItem).
+            isSpeakerStore.set(true);
+            givenFloorSpaceStore.set(space);
+            requestedHandRaiseState.lower(space.getName());
+            // We never force the microphone on; if it is muted we invite the user to enable it.
+            if (get(requestedMicrophoneState)) {
+                notificationPlayingStore.playNotification(get(LL).notification.givenTheFloor());
+            } else {
+                notificationPlayingStore.playNotification(get(LL).notification.givenTheFloorEnableMicrophone());
+            }
+        }
+
+        // Only when the floor was taken back: a user who handed it back already cleared givenFloorSpaceStore.
+        if (lostTheFloor && get(givenFloorSpaceStore) === space) {
+            space.stopStreaming();
+            isSpeakerStore.set(false);
+            givenFloorSpaceStore.set(undefined);
+            notificationPlayingStore.playNotification(get(LL).notification.floorRevoked(), "microphone-off.png");
+        }
+
+        if (handLoweredByOthers) {
+            requestedHandRaiseState.lower(space.getName());
+            notificationPlayingStore.playNotification(get(LL).notification.handLowered());
+        }
+    });
+}

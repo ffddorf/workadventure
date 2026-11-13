@@ -1,0 +1,146 @@
+<script lang="ts">
+    import type { Snippet } from "svelte";
+    import type { Readable, Unsubscriber } from "svelte/store";
+    import { Marked } from "marked";
+    import { onDestroy, onMount } from "svelte";
+    import type { ChatMessageContent } from "../../../Connection/ChatConnection";
+    import { resolveChatLinkClick } from "../../../Links/ChatLinkPolicy";
+    import { openChatLinkAsCoWebsite } from "../../../Utils";
+    import { sanitizeHTML } from "./WA-HTML-Sanitizer";
+
+    interface Props {
+        content: Readable<ChatMessageContent>;
+        hasDepth: false;
+        /** The message's time and tick, floated at the end of the last line. */
+        trailing?: Snippet;
+    }
+
+    let { content, hasDepth, trailing }: Props = $props();
+
+    async function getMarked(body: string): Promise<Marked> {
+        let marked: Marked;
+
+        // Let's lazy load hljs and markedHighlight if the message contains ```.
+        if (body.includes("```")) {
+            const hljsPromise = import("highlight.js");
+            const markedHighlightPromise = import("marked-highlight");
+            const [hljsModule, markedHighlightModule] = await Promise.all([hljsPromise, markedHighlightPromise]);
+
+            marked = new Marked(
+                markedHighlightModule.markedHighlight({
+                    langPrefix: "hljs language-",
+                    highlight(code, lang) {
+                        const language = hljsModule.default.getLanguage(lang) ? lang : "plaintext";
+                        return hljsModule.default.highlight(code, { language }).value;
+                    },
+                }),
+            );
+        } else {
+            marked = new Marked();
+        }
+
+        // Custom renderer for links
+        const renderer = new marked.Renderer();
+        renderer.link = function ({ href, title, tokens }) {
+            const titleAttr = title ? `title="${title}"` : "";
+            const text = this.parser.parseInline(tokens);
+            return `<a href="${href}" target="_blank" rel="noopener noreferrer" ${titleAttr} style="color: white;">${text}</a>`;
+        };
+
+        // Apply the custom renderer and enable line breaks
+        marked.use({
+            renderer,
+            breaks: true,
+        });
+
+        return marked;
+    }
+
+    let html = $state("");
+
+    let unsubscriber: Unsubscriber | undefined;
+    onMount(() => {
+        unsubscriber = content.subscribe((value) => {
+            const source = value.formattedBody ?? value.body;
+            let promiseHtml = getMarked(source).then((marked) => marked.parse(source));
+            promiseHtml
+                .then((result) => {
+                    html = result;
+                })
+                .catch((error) => {
+                    console.error("Failed to parse markdown content", error);
+                    html = source;
+                });
+        });
+    });
+
+    onDestroy(() => {
+        if (unsubscriber) {
+            unsubscriber();
+        }
+    });
+
+    let opening = $state(false);
+
+    // Delegated so it covers both the links marked builds from plain bodies and the ones
+    // already baked into the formatted_body HTML of a reply, which never reach our renderer.
+    function onBubbleClick(event: MouseEvent) {
+        const target = event.target;
+        if (!(target instanceof Element)) {
+            return;
+        }
+        const anchor = target.closest("a");
+        if (!(anchor instanceof HTMLAnchorElement)) {
+            return;
+        }
+        // A mention pill names a user, it is not a page to open.
+        if (anchor.dataset.mention !== undefined || anchor.href.startsWith("https://matrix.to/#/@")) {
+            event.preventDefault();
+            return;
+        }
+
+        const url = resolveChatLinkClick(anchor, event);
+        if (url === undefined) {
+            return;
+        }
+
+        event.preventDefault();
+
+        // Probing embeddability is a round trip; ignore repeat clicks while one is in flight.
+        if (opening) {
+            return;
+        }
+        opening = true;
+
+        (async () => {
+            try {
+                await openChatLinkAsCoWebsite(url);
+            } finally {
+                opening = false;
+            }
+        })().catch((error) => console.error("Failed to open chat link", error));
+    }
+
+    /* eslint-disable svelte/no-at-html-tags */
+</script>
+
+<!-- The click target is always a real anchor, which already handles Enter and focus itself. -->
+<!-- svelte-ignore a11y_click_events_have_key_events -->
+<!-- svelte-ignore a11y_no_static_element_interactions -->
+<div
+    class="message-bubble m-0 {hasDepth ? 'text-xs leading-4' : 'text-sm'} text-white py-1 px-3"
+    class:cursor-wait={opening}
+    aria-busy={opening}
+    lang=""
+    onclick={onBubbleClick}
+>
+    {@html sanitizeHTML(html)}
+    {@render trailing?.()}
+</div>
+
+<style>
+    /* The last paragraph flows inline so the floated stamp shares its last line when there is room. */
+    .message-bubble > :global(p:last-of-type:nth-last-child(2)) {
+        display: inline;
+    }
+</style>

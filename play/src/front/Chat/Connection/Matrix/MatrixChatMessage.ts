@@ -1,0 +1,459 @@
+import type { MatrixEvent, Room } from "matrix-js-sdk";
+import { Direction, EventTimeline, EventType, MatrixEventEvent, RelationType } from "matrix-js-sdk";
+import type { Readable, Writable } from "svelte/store";
+import { derived, get, readable, writable } from "svelte/store";
+import { v4 as uuidv4 } from "uuid";
+import { MapStore } from "@workadventure/store-utils";
+import type {
+    ChatAttachmentStatus,
+    ChatMessage,
+    ChatMessageAttachment,
+    ChatMessageContent,
+    ChatMessageType,
+    ChatThread,
+    ChatThreadSummary,
+    ChatUser,
+} from "../ChatConnection";
+import { canRenderImageOrVideoInline } from "../../../Utils/InlineMimeType";
+import LL from "../../../../i18n/i18n-svelte";
+import {
+    getMatrixMessageContent,
+    MATRIX_HTML_FORMAT,
+    markOwnMentions,
+    pillRoomMention,
+    ROOM_MENTION_ID,
+} from "../../Mentions";
+import { HtmlUtils } from "../../../WebRtc/HtmlUtils";
+import { chatUserFactoryFromEvent } from "./MatrixChatUser";
+import { MatrixChatMessageReaction } from "./MatrixChatMessageReaction";
+import { MatrixChatRelation } from "./MatrixChatRelation";
+import { resolveAttachmentMediaFromEvent, resolveImageMediaFromEvent } from "./MatrixMediaResolver";
+import { shouldRenderQuotedReply } from "./MatrixThreadUtils";
+
+export class MatrixChatMessage implements ChatMessage {
+    id: string;
+    content: Writable<ChatMessageContent>;
+    sender: ChatUser | undefined;
+    isMyMessage: boolean;
+    date: Date | null;
+    isQuotedMessage: boolean | undefined;
+    quotedMessage: ChatMessage | undefined;
+    type: ChatMessageType;
+    isDeleted: Writable<boolean>;
+    isModified: Writable<boolean>;
+    reactions: MapStore<string, MatrixChatMessageReaction>;
+    relations: MatrixChatRelation | undefined;
+    readonly canReact: Readable<boolean>;
+    readonly canEdit: Readable<boolean>;
+    readonly canDelete: Writable<boolean>;
+    threadSummary = writable<ChatThreadSummary | null>(null);
+    openThread: (() => Promise<ChatThread | undefined>) | undefined;
+    readonly attachment: ChatMessageAttachment | undefined;
+    private readonly attachmentStatus = writable<ChatAttachmentStatus>({ state: "ready" });
+    private imageMediaCleanup: () => void = () => undefined;
+    private imageMediaAbortController: AbortController | undefined;
+    private attachmentMediaCleanup: () => void = () => undefined;
+    private attachmentMediaAbortController: AbortController | undefined;
+    private readonly decryptedListener = () => this.updateMessageContentOnDecryptedEvent();
+    // Fired when an m.replace edit is applied to this event; re-render so the edit shows.
+    private readonly replacedListener = () => this.modifyContent();
+    // Fired when the first relation container is created for this event. initReactions() returns early
+    // when the message had no reactions at construction (so it never subscribed to reaction updates); this
+    // re-runs it so reactions that arrive later via aggregation/pagination still appear.
+    private readonly relationsCreatedListener = (relationType: string) => {
+        if (relationType === RelationType.Annotation) {
+            this.initReactions();
+        }
+    };
+
+    constructor(
+        private event: MatrixEvent,
+        private room: Room,
+        isQuotedMessage?: boolean,
+        canReactStore?: Readable<boolean>,
+        canSendMessagesStore?: Readable<boolean>,
+    ) {
+        this.id = event.getId() ?? uuidv4();
+        this.type = this.mapMatrixMessageTypeToChatMessage();
+        const size: unknown = event.getOriginalContent().info?.size;
+        this.attachment =
+            this.type === "text"
+                ? undefined
+                : { status: this.attachmentStatus, size: typeof size === "number" ? size : undefined };
+        this.date = event.getDate();
+        this.sender = this.getSender();
+        this.isMyMessage = this.room.client.getUserId() === event.getSender();
+        this.content = this.initMessageContent();
+        this.isQuotedMessage = isQuotedMessage;
+        this.isDeleted = writable(this.getIsDeleted());
+        this.isModified = writable(this.getIsModified());
+        this.reactions = new MapStore<string, MatrixChatMessageReaction>();
+
+        this.canDelete = writable(this.computeCanDelete());
+        this.canReact =
+            canReactStore ??
+            readable(
+                this.room
+                    .getLiveTimeline()
+                    .getState(Direction.Backward)
+                    ?.maySendEvent(EventType.Reaction, room.client.getSafeUserId()) ?? false,
+            );
+        this.canEdit = derived(
+            canSendMessagesStore ??
+                readable(
+                    this.room
+                        .getLiveTimeline()
+                        .getState(Direction.Backward)
+                        ?.maySendEvent(EventType.RoomMessage, room.client.getSafeUserId()) ?? false,
+                ),
+            (canSendMessages) => this.isMyMessage && this.type === "text" && canSendMessages,
+        );
+
+        event.on(MatrixEventEvent.Decrypted, this.decryptedListener);
+        event.on(MatrixEventEvent.Replaced, this.replacedListener);
+        event.on(MatrixEventEvent.RelationsCreated, this.relationsCreatedListener);
+        this.loadImageMediaIfNeeded();
+        this.loadAttachmentMediaIfNeeded();
+
+        this.initReactions();
+    }
+
+    private getSender() {
+        return chatUserFactoryFromEvent(this.room, this.event);
+    }
+
+    private initMessageContent(): Writable<ChatMessageContent> {
+        return writable(this.getMessageContent());
+    }
+
+    private updateMessageContentOnDecryptedEvent() {
+        this.content.set(this.getMessageContent());
+        this.loadImageMediaIfNeeded();
+        this.loadAttachmentMediaIfNeeded();
+    }
+
+    private getMessageContent(): ChatMessageContent {
+        if (this.event.isDecryptionFailure()) {
+            return { body: `🔐 ${get(LL).chat.e2ee.undecryptable()}`, url: undefined };
+        }
+
+        // getContent() returns the effective content: the latest edit's `m.new_content` when the event has
+        // been replaced, and the decrypted content in E2EE rooms. The previous code read the raw
+        // `m.replace` bundle from unsigned, which in E2EE rooms is the *wire* (encrypted) content, so edited
+        // messages rendered with an empty body and lost msgtype/formatting/media. Live edits now re-render
+        // via the MatrixEventEvent.Replaced listener.
+        const content = this.event.getContent();
+        const quotedMessage = this.getQuotedMessage();
+        const myUserId = this.room.client.getSafeUserId();
+        // Evaluated from the push rules, the way the server counts the unread highlights: this covers m.mentions,
+        // @room and the keywords set up in Element. Recalculated because the cached actions may predate decryption.
+        const mentionsMe =
+            !this.isMyMessage && this.room.client.getPushActionsForEvent(this.event, true)?.tweaks.highlight === true;
+        // An @room counts, and is drawn as a pill, only when its sender may notify the whole room: the server checks
+        // the same power level before notifying anyone.
+        const roomMention = content["m.mentions"]?.room === true && this.senderMayNotifyRoom();
+        const withPills = (html: string) =>
+            markOwnMentions(
+                roomMention ? pillRoomMention(html) : html,
+                mentionsMe ? [myUserId, ROOM_MENTION_ID] : [myUserId],
+            );
+
+        if (quotedMessage !== undefined && content.formatted_body) {
+            this.quotedMessage = quotedMessage;
+            return {
+                body: withPills(content.formatted_body.replace(/^(<mx-reply>).*(<\/mx-reply>)/, "")),
+                url: undefined,
+                mentionsMe,
+            };
+        }
+
+        if (this.type === "image") {
+            return {
+                body: content.body,
+                url: this.room.client.mxcUrlToHttp(content.url ?? content.file?.url) ?? undefined,
+                thumbnailUrl: this.room.client.mxcUrlToHttp(content.info?.thumbnail_url) ?? undefined,
+            };
+        }
+
+        if (this.type === "file" || this.type === "audio" || this.type === "video") {
+            return {
+                body: content.body,
+                url: this.room.client.mxcUrlToHttp(content.url ?? content.file?.url) ?? undefined,
+            };
+        }
+
+        // A message mentioning someone is rendered from its HTML, where the mentions are pills (whether they come
+        // from our composer or from Element). The other ones keep being rendered from their markdown body.
+        const html =
+            content.format === MATRIX_HTML_FORMAT && typeof content.formatted_body === "string"
+                ? content.formatted_body
+                : undefined;
+        const mentionsUsers = (content["m.mentions"]?.user_ids?.length ?? 0) > 0;
+        let formattedBody: string | undefined;
+        if (roomMention) {
+            // Element sends a lone @room without any HTML.
+            formattedBody = withPills(html ?? content.body);
+        } else if (mentionsUsers && html !== undefined) {
+            formattedBody = withPills(html);
+        } else if (html !== undefined) {
+            // The body is plain text (ours since the composer sends it so, Element's always): its markdown is what we
+            // render, so a "<b>" typed in it must stay text. Older messages of ours, without HTML, keep their
+            // already escaped body.
+            formattedBody = HtmlUtils.escapeHtml(content.body);
+        }
+        return { body: content.body, url: undefined, formattedBody, mentionsMe };
+    }
+
+    private senderMayNotifyRoom(): boolean {
+        const sender = this.event.getSender();
+        return (
+            sender !== undefined &&
+            (this.room.getLiveTimeline().getState(EventTimeline.FORWARDS)?.mayTriggerNotifOfType("room", sender) ??
+                false)
+        );
+    }
+
+    private loadImageMediaIfNeeded() {
+        if (this.type !== "image") {
+            return;
+        }
+        this.imageMediaAbortController?.abort();
+        this.imageMediaCleanup();
+
+        const abortController = new AbortController();
+        this.imageMediaAbortController = abortController;
+
+        this.resolveImageMedia(abortController.signal).catch(() => undefined);
+    }
+
+    private async resolveImageMedia(signal: AbortSignal): Promise<void> {
+        this.attachmentStatus.set({ state: "loading" });
+
+        try {
+            const media = await resolveImageMediaFromEvent(this.event, this.room.client, signal);
+            if (signal.aborted) {
+                media.cleanup();
+                return;
+            }
+
+            this.imageMediaCleanup = media.cleanup;
+            this.content.update((content) => ({
+                ...content,
+                url: media.sourceUrl,
+                thumbnailUrl: media.thumbnailUrl ?? media.sourceUrl,
+            }));
+            this.attachmentStatus.set(media.error ? { state: "error", error: media.error } : { state: "ready" });
+        } catch (error) {
+            if (error instanceof DOMException && error.name === "AbortError") {
+                return;
+            }
+            this.attachmentStatus.set({ state: "error", error: "download" });
+        }
+    }
+
+    private loadAttachmentMediaIfNeeded() {
+        if (this.type !== "file" && this.type !== "audio" && this.type !== "video") {
+            return;
+        }
+        const rawContent = this.event.getOriginalContent();
+        if (typeof rawContent !== "object" || rawContent === null || rawContent.file === undefined) {
+            return;
+        }
+        this.attachmentMediaAbortController?.abort();
+        this.attachmentMediaCleanup();
+
+        const abortController = new AbortController();
+        this.attachmentMediaAbortController = abortController;
+
+        this.resolveAttachmentMedia(abortController.signal).catch(() => undefined);
+    }
+
+    private async resolveAttachmentMedia(signal: AbortSignal): Promise<void> {
+        this.attachmentStatus.set({ state: "loading" });
+
+        try {
+            const media = await resolveAttachmentMediaFromEvent(this.event, this.room.client, signal);
+            if (signal.aborted) {
+                media.cleanup();
+                return;
+            }
+
+            this.attachmentMediaCleanup = media.cleanup;
+            this.content.update((content) => ({ ...content, url: media.sourceUrl }));
+            this.attachmentStatus.set(media.error ? { state: "error", error: media.error } : { state: "ready" });
+        } catch (error) {
+            if (error instanceof DOMException && error.name === "AbortError") {
+                return;
+            }
+            this.attachmentStatus.set({ state: "error", error: "download" });
+        }
+    }
+
+    public initReactions() {
+        this.reactions.clear();
+        const reactionByKey = this.room
+            .getUnfilteredTimelineSet()
+            .relations.getChildEventsForEvent(this.id, RelationType.Annotation, EventType.Reaction);
+        if (!reactionByKey) return;
+        if (!this.relations) {
+            this.relations = new MatrixChatRelation(this, reactionByKey);
+        }
+        const sortedReactionByKey = reactionByKey.getSortedAnnotationsByKey() ?? [];
+        sortedReactionByKey.forEach(([reactionKey, events]) => {
+            // One reaction per key, holding every user who reacted with it.
+            let reaction: MatrixChatMessageReaction | undefined;
+            events.forEach((event) => {
+                if (reaction) {
+                    reaction.addUser(event);
+                    return;
+                }
+                reaction = new MatrixChatMessageReaction(this.room, event, this.canReact);
+                this.reactions.set(reactionKey, reaction);
+            });
+        });
+    }
+
+    private getQuotedMessage() {
+        if (!shouldRenderQuotedReply(this.event)) {
+            return;
+        }
+
+        const replyEventId = this.event.replyEventId;
+        if (replyEventId) {
+            const replyToEvent = this.room.findEventById(replyEventId);
+            if (replyToEvent) {
+                return new MatrixChatMessage(replyToEvent, this.room, true);
+            }
+        }
+        return;
+    }
+
+    private getIsDeleted() {
+        return this.event.isRedacted();
+    }
+
+    private getIsModified() {
+        return this.event.replacingEventId() !== undefined;
+    }
+
+    private computeCanDelete(): boolean {
+        const currentUserId = this.room.client.getSafeUserId();
+        const senderUserId = this.event.getSender();
+        if (!currentUserId || !senderUserId || this.event.status || this.event.isRedacted()) {
+            return false;
+        }
+
+        const roomState = this.room.getLiveTimeline().getState(Direction.Backward);
+        const canSendRedactionEvent = roomState?.maySendEvent(EventType.RoomRedaction, currentUserId) ?? false;
+        if (!canSendRedactionEvent) {
+            return false;
+        }
+
+        if (currentUserId === senderUserId) {
+            return true;
+        }
+
+        const myRoomMember = this.room.getMember(currentUserId);
+        const senderRoomMember = this.room.getMember(senderUserId);
+        const myPowerLevel = myRoomMember?.powerLevel ?? 0;
+        const senderPowerLevel = senderRoomMember?.powerLevel ?? 0;
+        const hasSufficientPowerLevel = roomState?.hasSufficientPowerLevelFor("redact", myPowerLevel) ?? false;
+
+        return hasSufficientPowerLevel && myPowerLevel > senderPowerLevel;
+    }
+
+    public refreshCanDelete() {
+        this.canDelete.set(this.computeCanDelete());
+    }
+
+    public getFormattedBody(): string {
+        const content = this.event.getOriginalContent();
+        return content.formatted_body;
+    }
+
+    public mxcUrlToHttp(url: string) {
+        return this.room.client.mxcUrlToHttp(url);
+    }
+    private mapMatrixMessageTypeToChatMessage() {
+        const content = this.event.getOriginalContent();
+        switch (content.msgtype) {
+            case "m.text":
+                return "text";
+            // An attachment whose filename and mimetype disagree is shown as a plain file instead
+            // of being rendered, the way Element does it.
+            case "m.image":
+                return canRenderImageOrVideoInline(content) ? "image" : "file";
+            case "m.video":
+                return canRenderImageOrVideoInline(content) ? "video" : "file";
+            case "m.file":
+                return "file";
+            case "m.audio":
+                return "audio";
+        }
+        return "text";
+    }
+
+    async remove(): Promise<void> {
+        await this.room.client.redactEvent(this.room.roomId, this.id);
+    }
+
+    async edit(newContent: string): Promise<void> {
+        if (!get(this.canEdit)) {
+            throw new Error("Missing permission to edit this message");
+        }
+        try {
+            const edited = getMatrixMessageContent(newContent);
+            await this.room.client.sendEvent(this.room.roomId, EventType.RoomMessage, {
+                ...edited,
+                // Whoever the message already mentioned was notified then: an edit must not notify them again.
+                "m.mentions": {},
+                "m.relates_to": { rel_type: RelationType.Replace, event_id: this.id },
+                "m.new_content": edited,
+            });
+        } catch (error) {
+            console.error(error);
+            throw error;
+        }
+    }
+
+    // Re-render from the (now SDK-replaced) event rather than a caller-supplied body string: getContent()
+    // resolves the edit's m.new_content and preserves msgtype/formatting/media instead of the old
+    // body-only update that dropped the URL of edited image/file messages.
+    public modifyContent() {
+        this.content.set(this.getMessageContent());
+        this.isModified.set(true);
+        this.loadImageMediaIfNeeded();
+        this.loadAttachmentMediaIfNeeded();
+    }
+
+    public markAsRemoved() {
+        this.isDeleted.set(true);
+    }
+
+    async addReaction(reaction: string) {
+        if (!get(this.canReact)) {
+            throw new Error("Missing permission to send reactions in this room");
+        }
+        try {
+            await this.room.client.sendEvent(this.room.roomId, EventType.Reaction, {
+                "m.relates_to": { key: reaction, rel_type: RelationType.Annotation, event_id: this.id },
+            });
+        } catch (error) {
+            console.error(error);
+        }
+    }
+
+    destroy() {
+        this.event.off(MatrixEventEvent.Decrypted, this.decryptedListener);
+        this.event.off(MatrixEventEvent.Replaced, this.replacedListener);
+        this.event.off(MatrixEventEvent.RelationsCreated, this.relationsCreatedListener);
+        this.imageMediaAbortController?.abort();
+        this.imageMediaCleanup();
+        this.attachmentMediaAbortController?.abort();
+        this.attachmentMediaCleanup();
+    }
+
+    public getMatrixEvent(): MatrixEvent {
+        return this.event;
+    }
+}

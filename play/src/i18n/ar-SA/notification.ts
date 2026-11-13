@@ -1,0 +1,39 @@
+import type { DeepPartial } from "../DeepPartial";
+import type { Translation } from "../i18n-types";
+
+const notification: DeepPartial<Translation["notification"]> = {
+    discussion: "{name} يريد مناقشتك", // {name} wants to discuss with you
+    message: "{name} يرسل رسالة", // {name} sends a message
+    mention: "أشار إليك {name}",
+    askToMuteMicrophone: "يرجى كتم الميكروفون 🙏", // please mute your microphone
+    askToMuteCamera: "يرجى كتم الكاميرا 🙏", // please mute your camera
+    microphoneMuted: "تم كتم ميكروفونك بواسطة مشرف",
+    cameraMuted: "تم كتم كاميرتك بواسطة مشرف",
+    givenTheFloor: "حان دورك للتحدث",
+    givenTheFloorEnableMicrophone: "حان دورك للتحدث — فعّل الميكروفون",
+    floorRevoked: "لم يعد لديك الكلمة",
+    announcement: "إعلان",
+    help: {
+        title: "تم رفض الوصول إلى الإشعارات", // access to notifications denied
+        permissionDenied: "تم الرفض", // access denied
+        content:
+            "لا تفوت أي مناقشة. قم بتمكين الإشعارات لتكون على علم عندما يريد شخص ما التحدث معك، حتى لو لم تكن في علامة تبويب WorkAdventure.", // don't miss any discussion. Enable notifications to be informed when someone wants to talk to you, even if you are not in the WorkAdventure tab.
+        firefoxContent: 'يرجى النقر على مربع "تذكر هذا القرار" إذا كنت لا تريد أن يستمر Firefox في طلب الإذن.', // please click on the "Remember this decision" box if you don't want Firefox to keep asking for permission.
+        refresh: "تحديث", // refresh
+        continue: "المتابعة بدون إشعار", // continue without notification
+        screen: {
+            chrome: "/resources/help-setting-notification-permission/en-US-chrome.png", // chrome
+        },
+        screenAlt: "السماح بالإشعارات من شريط العناوين في Chrome", // allow notifications from the address bar in Chrome
+    },
+    addNewTag: "إضافة علامة جديدة: '{tag}'", // add new tag: '{tag}'
+    screenSharingError: "تعذر بدء مشاركة الشاشة",
+    floorGivenBack: "لقد أعدت الكلمة",
+    handLowered: "قام أحد المشرفين بخفض يدك",
+    removedFromConversation: "أزالك مشرف من المحادثة.",
+    actionFailed: "تعذر إكمال هذا الإجراء",
+    recordingStarted: "بدأ شخص واحد في المناقشة تسجيلاً.",
+    urlCopiedToClipboard: "تم نسخ الرابط إلى الحافظة",
+};
+
+export default notification;

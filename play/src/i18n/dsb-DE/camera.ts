@@ -1,0 +1,106 @@
+import type { DeepPartial } from "../DeepPartial";
+import type { Translation } from "../i18n-types";
+
+const camera: DeepPartial<Translation["camera"]> = {
+    editCam: "Kameru wobźěłaś",
+    editSpeaker: "Audiowyjadowanje wobźěłaś",
+    active: "Aktiwny",
+    disabled: "Deaktiwěrowany",
+    notRecommended: "Nje dopórucony",
+    enable: {
+        title: "Zašaltuj kameru a mikrofon.",
+        start: "Witajśo na našej boku za konfiguraciju awdio- a widejogratow! Namakajśo how rědy, aby pólěpšyli swóju online-dožywjenje. Pśiměŕśo nastajenja swójim pśednosam, aby rozwězali eventuelne problemy. Zawěsććo, až waša hardware korektnje zwězana a aktualizěrowana jo. Wuslěźćo a testujśo wšake konfiguracije, aby namakali, což nejlěpje za was funkcioněrujo.",
+    },
+    help: {
+        title: "Pśistup ku kamerje a mikrofonoju jo trjebny",
+        cameraTitle: "Pśistup ku kamerje jo trjebny",
+        microphoneTitle: "Pśistup ku mikrofonoju jo trjebny",
+        cameraPermissionDenied: "Zwólenje kamery jo wótpokazane",
+        microphonePermissionDenied: "Zwólenje mikrofona jo wótpokazane",
+        cameraMicrophonePermissionDenied: "Zwólenje kamery a mikrofona jo wótpokazane",
+        content: "Pśistup ku kamerje a mikrofonoju musy se zwóliś we browseru.",
+        cameraContent: "Pśistup ku kamerje musy se zwóliś we browseru.",
+        microphoneContent: "Pśistup ku mikrofonoju musy se zwóliś we browseru.",
+        firefoxContent:
+            'Klikni na bublin "Te nastajenja zachowaś", aby njemusali kuždy raz wótnowotki to zwólenje we Firefoxu aktiwěrowaś',
+        allow: "Webcam zwóliś",
+        allowMicrophone: "Mikrofon zwóliś",
+        allowCameraMicrophone: "Webcam a mikrofon zwóliś",
+        continue: "Dalej mimo kamery",
+        continueWithoutMicrophone: "Dalej mimo mikrofona",
+        continueCameraMicrophone: "Dalej mimo webcamy a mikrofona",
+        screen: {
+            firefox: "/resources/help-setting-camera-permission/en-US-firefox.png",
+            chrome: "/resources/help-setting-camera-permission/de-DE-chrome.png",
+        },
+        tooltip: {
+            permissionDeniedTitle: "Kamerowy pśistup jo se blokěrował",
+            permissionDeniedDesc:
+                "Waš browser jo pśistup kamerje za toś ten bok wótpokazał. Zwóliśo jen pśez adresowe pólo (šlosk abo symbol kamery) abo w nastajenjach sedła. Wobraz wótpowědujo wašomu browseroju.",
+            noDeviceTitle: "Žedna wužywajobna kamera",
+            noDeviceDesc:
+                "Browser namakujo žednu kameru, kótaruž móžośo wužywaś. Wopytajśo drugi browser, pśekontrolěrujśo zwisk kamery, pśekontrolěrujśo konfiguraciju kompjutra (datowy škit, graty) abo startujśo kompjuter znowego, jolic hardware by měł funkcioněrowaś.",
+            permissionMedia: {
+                firefox: "/resources/help-setting-camera-permission/en-US-firefox.png",
+                chrome: "/resources/help-setting-camera-permission/de-DE-chrome.png",
+                safari: "/resources/help-setting-camera-permission/en-US-firefox.png",
+                android: "/resources/help-setting-camera-permission/de-DE-chrome.png",
+                default: "/resources/help-setting-camera-permission/en-US-firefox.png",
+            },
+        },
+        microphoneTooltip: {
+            permissionDeniedTitle: "Mikrofonowy pśistup jo se blokěrował",
+            permissionDeniedDesc:
+                "Waš browser jo pśistup mikrofonoju za toś ten bok wótpokazał. Zwóliśo jen pśez adresowe pólo (šlosk abo symbol mikrofona) abo w nastajenjach sedła. Wobraz wótpowědujo wašomu browseroju.",
+            noDeviceTitle: "Žeden wužywajobny mikrofon",
+            noDeviceDesc:
+                "Browser namakujo žeden mikrofon, kótaryž móžośo wužywaś. Wopytajśo drugi browser, pśekontrolěrujśo mikrofon, pśekontrolěrujśo konfiguraciju kompjutra (datowy škit, graty) abo startujśo kompjuter znowego, jolic hardware by měł funkcioněrowaś.",
+            permissionMedia: {
+                firefox: "/resources/help-setting-camera-permission/en-US-firefox.png",
+                chrome: "/resources/help-setting-camera-permission/de-DE-chrome.png",
+                safari: "/resources/help-setting-camera-permission/en-US-firefox.png",
+                android: "/resources/help-setting-camera-permission/de-DE-chrome.png",
+                default: "/resources/help-setting-camera-permission/en-US-firefox.png",
+            },
+        },
+    },
+    webrtc: {
+        title: "Zmylk pśi zwězanju ze serwerom widejo-relej",
+        titlePending: "Zwězanje ze serwerom widejo-relej w běgu",
+        error: "Serwer TURN njedocpěju",
+        content: "Serwer widejo-relej njedocpěju. Móžośo se z drugimi wužiwarjami njekomunikěrowaś.",
+        solutionVpn: "Jolic se pśez VPN zwězujośo, pśetorhniśo pšosym zwisk ze swójim VPN a aktualizěrujśo web-boku.",
+        solutionVpnNotAskAgain: "Rozměł. Mě zasej njewarnowaś 🫡",
+        solutionHotspot:
+            "Jolic sćo w wobmjezowanej syći (pśedewześowa syć...), spytajśo syć změniś. Napśikład, wutwóriśo z wašym telefonom WLAN-hotspot a zwězajśo se pśez telefon.",
+        solutionNetworkAdmin: "Jolic sćo administrator syće, pśeglědajśo ",
+        preparingYouNetworkGuide: 'nawod "Preparing your network"',
+        refresh: "Aktualizěrowaś",
+        continue: "Dalej",
+        newDeviceDetected: "Nowy grat namakany {device} 🎉 Změniś? [SPACE] ignorować [ESC]",
+    },
+    my: {
+        silentZone: "Śichy wobceŕk",
+        silentZoneDesc:
+            "Sćo w śichym wobcerku. How njamóžo nichten z wami powědaś, a waš mikrofon a waša kamera stej deaktiwěrowanej.",
+        nameTag: "Wy",
+        loading: "Waša kamera se zacytujo...",
+    },
+    disable: "Kameru deaktiwěrowaś",
+    menu: {
+        moreAction: "Dalše akcije",
+        closeMenu: "Meny zacyniś",
+        senPrivateMessage: "Pśewatne powěsće posłaś (Pśichadźe)",
+        giveFloor: "Słowo daś",
+        revokeFloor: "Słowo wótewześ",
+        muteAudioUser: "Audio stummschalten",
+        askToMuteAudioUser: "Pšosyś, aby audio stummschalten",
+        muteAudioEveryBody: "Audio za wšěch stummschalten",
+        muteVideoUser: "Video stummschalten",
+        askToMuteVideoUser: "Pšosyś, aby video stummschalten",
+        muteVideoEveryBody: "Video za wšěch stummschalten",
+        blockOrReportUser: "Wužiwarja blokěrowaś abo pśihłasowaś",
+    },
+};
+
+export default camera;

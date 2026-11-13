@@ -1,0 +1,15 @@
+dependencies:
+- name: redis
+  repository: https://charts.bitnami.com/bitnami
+  version: 17.11.7
+- name: common
+  repository: oci://registry-1.docker.io/bitnamicharts
+  version: 2.36.0
+- name: livekit-server
+  repository: https://helm.livekit.io
+  version: 1.9.0
+- name: egress
+  repository: https://helm.livekit.io
+  version: 1.8.4
+digest: sha256:43a054c8f6a10bb51d67c722337b718235ca7b88c86897d718b17246370e8c65
+generated: "2026-02-19T15:14:21.493890709+01:00"

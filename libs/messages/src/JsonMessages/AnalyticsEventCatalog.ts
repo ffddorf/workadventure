@@ -1,0 +1,2435 @@
+import { z } from "zod";
+
+export const isAnalyticsEventSource = z.enum(["front", "pusher", "media"]);
+export type AnalyticsEventSourceSchema = z.infer<typeof isAnalyticsEventSource>;
+
+/**
+ * Sources a socket may legitimately claim. "pusher" is backend-only: it marks
+ * events the pusher synthesized itself, and the admin trusts it to decide what
+ * may be projected into connection sessions.
+ */
+export const isClientAnalyticsEventSource = isAnalyticsEventSource.extract([
+  "front",
+  "media",
+]);
+
+/**
+ * What a space is, declared by the client that joins it as the `kind` of the space
+ * state: a proximity bubble, a meeting area, the world megaphone, a speaker zone. A space
+ * that declares nothing — the world space, a chat space, a space a script opened — is
+ * nobody's meeting and nobody's broadcast.
+ *
+ * It is the client's own claim, not a fact the server established: the back checks the
+ * value is in the enum and stops there. Good enough to file a row under, and good enough
+ * for a label the front shows itself; never an input to a decision the server enforces.
+ *
+ * One key with a closed set of values rather than one boolean per kind; a meeting row
+ * names one of them under `meetingKind`.
+ */
+export const spaceKindSchema = z.enum([
+  "bubble",
+  "area",
+  "megaphone",
+  "speaker_zone",
+]);
+
+export type SpaceKind = z.infer<typeof spaceKindSchema>;
+
+/**
+ * What a meeting row can name: every kind of space. A broadcast — the world megaphone,
+ * a speaker zone — is a meeting whose predicate is one speaker on air rather than two
+ * people present. Same row, same lifecycle, same two events; this is what tells them
+ * apart, and anything that reads meeting time as conversation time filters on it.
+ */
+export const meetingKindSchema = spaceKindSchema;
+
+/**
+ * What a meeting row may name, including what is not a space. The space kinds are
+ * filled by the back because it owns the space. `external` is not a space at all: an
+ * area that opens the meeting in Teams or Google Meet, which the back never sees — so
+ * the client reports it, and what it measures is time spent in the AREA and not in
+ * the call.
+ */
+export /**
+ * Seconds of a back-measured interval each media transport carried. A meeting that
+ * outgrows WebRTC switches to LiveKit mid-way, so one field naming "the" provider would
+ * be wrong for exactly the meetings that cost server capacity.
+ */
+/** What every media.livekit.* connection event says about where the client was connected. */
+const livekitConnectionProperties = {
+  livekitServerUrl: z
+    .string()
+    .max(2048)
+    .describe("LiveKit server of the room."),
+  livekitRegion: z
+    .string()
+    .max(255)
+    .nullable()
+    .describe(
+      "Region of the LiveKit server the client was connected to (serverInfo.region): set by LiveKit Cloud, usually null on a self-hosted server.",
+    ),
+};
+
+const transportSecondsProperties = {
+  webrtcSeconds: z
+    .number()
+    .nonnegative()
+    .optional()
+    .describe(
+      "Seconds carried peer-to-peer over WebRTC. With livekitSeconds, adds up to durationSeconds unless the space had no media at all. Filled by the back only.",
+    ),
+  livekitSeconds: z
+    .number()
+    .nonnegative()
+    .optional()
+    .describe(
+      "Seconds carried by the LiveKit SFU, which the space switches to past the WebRTC size limit or to record. Filled by the back only.",
+    ),
+};
+
+const reportedMeetingKindSchema = z.enum([
+  ...meetingKindSchema.options,
+  "external",
+]);
+
+/** Mirrors the admin's `max:255` on eventName / eventId. */
+export const MAX_EVENT_NAME_LENGTH = 255;
+export const MAX_EVENT_ID_LENGTH = 255;
+
+/**
+ * Largest value `new Date(ms)` can represent. `z.number()` alone would accept
+ * 1e300, which yields an Invalid Date downstream — and clientEventTimeMs is a
+ * uint64 on the wire, so a client really can send one.
+ */
+export const MAX_TIMESTAMP_MS = 8.64e15;
+
+/**
+ * Why a timed event ends. Enum-constrained on purpose, and named `endReason`
+ * rather than `reason`: the admin's anonymization allowlist is keyed on the
+ * property key alone, not on (eventName, key), and `reason` is already **free
+ * text** on the experience-issue events below. Allow-listing `reason` to let this
+ * one through would un-strip free-form text on those unrelated families for every
+ * world that opted out of user-level activity. Mirrors `disconnectReason`.
+ */
+export const TIMED_EVENT_END_REASONS = [
+  /**
+   * The client asked for the interval to be closed. It is the *default* rather
+   * than something a client states: the front cannot send a reason at all any
+   * more, because every value it used to send restated something the event
+   * already carried — the name said `area.dwell`, so `left_area` added nothing.
+   *
+   * The one value that did carry information, `type_changed`, was a symptom: a
+   * conversation was split whenever a derived store changed its mind about what
+   * kind of conversation it was. Meetings are now opened where they start, so
+   * there is no derivation to change its mind and nothing to report.
+   */
+  "closed_by_client",
+  // ---- Forced by the pusher, when the client never got to say anything ----
+  // These are not client-side reasons and do not collapse: they are the pusher
+  // recording that nobody closed the interval, which is a different fact from a
+  // clean close and the only way to tell a crash from a departure.
+  "socket_closed",
+  "join_failed",
+  "pusher_shutdown",
+  "pusher_crashed",
+] as const;
+export type TimedEventEndReason = (typeof TIMED_EVENT_END_REASONS)[number];
+
+/**
+ * Reasons that existed before the set was trimmed, mapped to their replacement.
+ *
+ * `left_conversation`, `left_area`, `status_changed` and `cleanup` only ever
+ * appeared on the one event whose name already said the same thing, so they
+ * carried no information and collapse into `closed_by_client`. `other` was
+ * documented as pusher-forced but was in fact emitted by the front on the
+ * stale-handle path, which is what `superseded` now names.
+ *
+ * Here for the deploy window: a tab loaded before this change still sends the old
+ * strings, and mapping them beats losing the interval. Historical rows keep the
+ * old values forever, so anything querying them has to accept both.
+ */
+export const LEGACY_TIMED_EVENT_END_REASONS: Record<
+  string,
+  TimedEventEndReason
+> = {
+  left_conversation: "closed_by_client",
+  left_area: "closed_by_client",
+  status_changed: "closed_by_client",
+  cleanup: "closed_by_client",
+  other: "closed_by_client",
+  // Both were briefly client-statable before the client stopped stating reasons.
+  // A tab from that window still sends them.
+  type_changed: "closed_by_client",
+  superseded: "closed_by_client",
+};
+
+/**
+ * One schema per analytics event, with every field `.describe()`d so the catalog
+ * can be turned into documentation.
+ *
+ * What it is for:
+ * - documentation: every event and field carries a description, ready for a
+ *   generator to walk (see `contrib/tools/generate-env-docs`, which already does
+ *   this for the env vars by reading `_def.description` off a Zod schema);
+ * - types: `AnalyticsEventProperties<"some.event">` is that event's precise
+ *   payload, which is what gives the front compile-time checking of both the name
+ *   it emits and the properties it attaches.
+ *
+ * ## Adding an event
+ *
+ * Add one entry to `ANALYTICS_EVENTS`. The key is the name that travels on the
+ * wire — there is no second registry to update, and a duplicate key is a compile
+ * error. `event({...})` for one that carries properties, `signal("…")` for a bare
+ * one. Anything that emits it then type-checks against this entry.
+ *
+ * Nothing here mentions PostHog, deliberately: the front reports to it as well, and
+ * the name each event carries there lives in `AnalyticsPostHogKeys.ts`, which
+ * imports nothing from this file but a type. Putting it back on the entry would put
+ * these ~166 Zod schemas in the browser bundle to look up a string. A new event
+ * belongs in that map only if PostHog already knew it under some other name.
+ *
+ * ## Reading the shapes
+ *
+ * `properties` here is only what the *call site* passes. The pusher enriches every
+ * event with `userUuid`, `userId`, `spaceUserId`, `clientIp`, `world`, `roomId`,
+ * `tabId`, `clientEventTime` and `pusherReceivedAt` in `normalizeEvent`; those are
+ * envelope columns, not per-event properties, and are absent below on purpose.
+ *
+ * Anonymization is worth knowing when adding a field, but it is not applied here:
+ * the admin owns it end to end and applies it at ingestion.
+ */
+
+/* -------------------------------------------------------------------------- */
+/*                              Envelope fields                               */
+/* -------------------------------------------------------------------------- */
+
+const eventIdField = z
+  .string()
+  .min(1)
+  .max(MAX_EVENT_ID_LENGTH)
+  .describe(
+    "Idempotency key. The backend stores events in a ReplacingMergeTree keyed partly on it, so a retried batch collapses instead of double-counting. Deterministic for backend-synthesized events; uuid-suffixed for repeating client events.",
+  );
+
+const clientEventTimeMsField = z
+  .number()
+  .int()
+  .nonnegative()
+  .max(MAX_TIMESTAMP_MS)
+  .describe(
+    "When the client believes the event happened, in milliseconds since the epoch. Untrusted: it comes from the browser clock, and the admin clamps it to the pusher's receive time when the two are implausibly far apart.",
+  );
+
+/* -------------------------------------------------------------------------- */
+/*                             Property building blocks                       */
+/* -------------------------------------------------------------------------- */
+
+/** Most events are a bare signal: the fact that they happened is the whole datum. */
+const noProperties = z
+  .object({})
+  .describe("This event carries no properties of its own.");
+
+/**
+ * An event that reports a finished interval on a single point-in-time event,
+ * rather than a start row and an end row that have to be paired up later.
+ *
+ * This is the shape the pipeline settled on for durations: it leaves no orphan
+ * "start" to reconcile when a tab dies or a pusher restarts, and a consumer reads
+ * the duration straight off the event. `user.disconnected` and `meeting.ended`
+ * both use it.
+ */
+export const timedEventProperties = z.object({
+  startedAt: z
+    .string()
+    .datetime()
+    .describe("ISO-8601 instant the interval began."),
+  endedAt: z
+    .string()
+    .datetime()
+    .describe("ISO-8601 instant the interval ended."),
+  durationSeconds: z
+    .number()
+    .nonnegative()
+    .describe(
+      "Length of the interval in seconds — endedAt minus startedAt, reported so nothing has to pair rows.",
+    ),
+});
+
+/**
+ * The interval of a session the back closed — a meeting or a broadcast — and why.
+ * The back is the only party that can close one, so the reasons are its own.
+ */
+const sessionIntervalProperties = timedEventProperties.extend({
+  endReason: z
+    .enum(["closed", "back_shutdown"])
+    .describe(
+      "`back_shutdown` means the server closed it, not the people in it.",
+    ),
+});
+
+const joinRankProperty = z
+  .number()
+  .describe(
+    "Where this participant came in the arrival order, counted from when the session opened.",
+  );
+
+/**
+ * Which meeting an in-meeting action happened in.
+ *
+ * An action on one participant — muting them, kicking them, pinning them — names that
+ * participant's meeting. An action on this tab as a whole — its own camera, its
+ * layout, its screen share — is attached centrally by AnalyticsClient, once per
+ * meeting the tab is in, rather than passed at each of the dozen call sites: a field
+ * that has to be remembered eleven times is a field that will be forgotten once.
+ * Without it these rows say a camera was turned off somewhere, by someone, and cannot
+ * be placed on the meeting they belong to.
+ */
+const meetingActionProperties = z.object({
+  meetingId: z
+    .string()
+    .optional()
+    .describe(
+      "Meeting the action happened in. Absent when the action somehow fired outside one; one row per meeting when the tab was in several.",
+    ),
+});
+
+/**
+ * What carried the meeting.
+ *
+ * `external` rather than one entry per vendor: a Teams or a Google Meet area belongs
+ * to an extension, and enumerating them here would make this catalog — which every
+ * deployment ships — change every time someone writes a new one. The extension names
+ * itself in `externalMeetingProviderName` instead.
+ */
+const MEETING_PROVIDERS = ["livekit", "jitsi", "webrtc", "external"] as const;
+
+/** Which extension held the meeting. Only meaningful when the provider is `external`. */
+const externalMeetingProviderName = z
+  .string()
+  .optional()
+  .describe(
+    "Name the extension declares itself under, when meetingProvider is `external`. Absent for the providers WorkAdventure carries itself.",
+  );
+
+/** Shared by the meeting lifecycle events emitted from AnalyticsClient. */
+const meetingContextProperties = z.object({
+  meetingId: z
+    .string()
+    .optional()
+    .describe("Identifier of the meeting, when the provider exposes one."),
+  roomId: z.string().optional().describe("Room the meeting belongs to."),
+  meetingProvider: z
+    .enum(MEETING_PROVIDERS)
+    .optional()
+    .describe("Which media backend carried the meeting."),
+  externalMeetingProviderName,
+});
+
+/**
+ * The meeting a dwell period happened in; roomId is already an envelope column.
+ *
+ * One row per meeting that heard the period: a tab in two meetings at once — two
+ * areas drawn over each other, a Jitsi zone over a LiveKit area — sends its
+ * microphone to both, so each meeting gets the period whole and a total across
+ * meetings counts the overlap twice. A period is cut at every meeting boundary.
+ */
+const dwellMeetingProperties = z.object({
+  meetingId: z
+    .string()
+    .optional()
+    .describe(
+      "Meeting this period happened in, absent when it happened outside one. A period heard by several meetings is one row per meeting.",
+    ),
+});
+
+const cowebsiteOpenedProperties = z.object({
+  url: z
+    .string()
+    .describe(
+      "Origin only. The query and hash carry auth tokens, and the path carries the document name — which is reported separately as fileName so it can be gated on its own.",
+    ),
+  targetUrl: z
+    .string()
+    .describe("Origin of the opened target, reduced the same way as url."),
+  mediaKind: z
+    .enum([
+      "pdf",
+      "image",
+      "video",
+      "audio",
+      "document",
+      "presentation",
+      "spreadsheet",
+      "website",
+      "other",
+    ])
+    .describe(
+      "What kind of thing was opened, inferred in the browser from the full URL.",
+    ),
+  triggerProperty: z
+    .enum(["openLink", "openWebsite", "other"])
+    .describe("What caused the cowebsite to open."),
+  fileName: z
+    .string()
+    .nullable()
+    .optional()
+    .describe(
+      "The document's name. Deliberately absent from the admin's anonymization allowlist, so a world that opts out of user-level activity has it stripped at ingestion — and the internal Kiosk does not project it, so only the world's own back-office sees it.",
+    ),
+  fileExtension: z
+    .string()
+    .nullable()
+    .optional()
+    .describe(
+      "Extension derived in the browser from the full URL, so only the extension leaves it.",
+    ),
+  areaId: z.string().optional().describe("Area the cowebsite was opened from."),
+  areaName: z.string().optional().describe("Human-readable area name."),
+  schemaVersion: z
+    .number()
+    .describe("Payload version for the cowebsite family."),
+});
+
+/** The eight `settings.*.changed` events that report a single new value. */
+const settingValueProperties = z.object({
+  value: z.string().describe("The setting's new value, as the UI reports it."),
+});
+
+/** Shared by the `area.*` events. */
+const areaProperties = z.object({
+  areaId: z.string().describe("Identifier of the area."),
+  areaName: z
+    .string()
+    .describe("Human-readable area name, as authored on the map."),
+});
+
+/** Shared by the `map_editor.property.*` events. */
+const mapEditorPropertyProperties = z.object({
+  name: z.string().describe("The property's name."),
+  type: z.string().describe("The property's type."),
+});
+
+/** Shared by the `map_editor.entity.*` events. */
+const mapEditorEntityProperties = z.object({
+  entityType: z.string().optional().describe("Kind of entity involved."),
+});
+
+/** Shared by the `map_editor.area.*` events. */
+const mapEditorAreaProperties = z.object({
+  areaType: z.string().optional().describe("Kind of area involved."),
+});
+
+const mediaDeviceKind = z
+  .enum(["camera", "microphone", "camera_microphone"])
+  .describe("Which device the user was asked for.");
+
+const noiseSuppressionProviderField = z
+  .enum(["workadventure", "voiceIsolation"])
+  .describe(
+    "workadventure: our own AudioWorklet model. voiceIsolation: the browser and OS voice isolation.",
+  );
+
+const noiseSuppressionEngineField = z
+  .enum(["deepfilternet", "dtln"])
+  .describe(
+    "The model behind the workadventure mode: DeepFilterNet3 at 48 kHz, or the legacy DTLN at 16 kHz.",
+  );
+
+const feedbackSourceField = z
+  .enum(["sentry", "external_report_url"])
+  .describe("Which feedback channel was used.");
+
+/** One codec in one direction, as media.codec.probed reports it. */
+const codecSupportField = (what: string) =>
+  z
+    .enum(["hardware", "software", "unsupported", "unknown"])
+    .describe(
+      `${what} in WebRTC: hardware when MediaCapabilities calls it powerEfficient, unknown when the browser gives no verdict (Firefox, or no MediaCapabilities).`,
+    );
+
+/* -------------------------------------------------------------------------- */
+/*                                  Helper                                    */
+/* -------------------------------------------------------------------------- */
+
+export type AnalyticsEventSource = z.infer<typeof isAnalyticsEventSource>;
+
+/**
+ * What one entry of the catalog declares. The event *name* is not in here: it is
+ * the key it is filed under, so the two cannot disagree.
+ */
+export type AnalyticsEventDefinition<
+  P extends z.AnyZodObject = z.AnyZodObject,
+> = {
+  readonly description: string;
+  readonly source: AnalyticsEventSource;
+  readonly properties: P;
+};
+
+/** An event that carries properties. Defaults to `front`, the common case. */
+function event<P extends z.AnyZodObject>(def: {
+  properties: P;
+  description: string;
+  source?: AnalyticsEventSource;
+}): AnalyticsEventDefinition<P> {
+  return {
+    description: def.description,
+    source: def.source ?? "front",
+    properties: def.properties,
+  };
+}
+
+/** A bare signal: the fact that it happened is the whole datum. */
+function signal(
+  description: string,
+): AnalyticsEventDefinition<typeof noProperties> {
+  return { description, source: "front", properties: noProperties };
+}
+
+/**
+ * An interval the client opens and asks to have closed, which the pusher then
+ * measures and emits as one row.
+ *
+ * These have two shapes, and conflating them is how the front ended up passing
+ * something the pusher would reject: `openProperties` is what the client sends
+ * with `timed_event.open`, while `properties` is what is finally stored — the
+ * same fields plus the interval bounds and the reason, all of which the pusher
+ * adds on its own clock. Declaring the first and deriving the second keeps them
+ * from drifting.
+ *
+ * `source` is always "pusher" here, which is exactly why the set of names a
+ * client may open has to stay narrow: opening one is asking the pusher to sign a
+ * row. TIMED_ANALYTICS_EVENT_NAMES is derived from these entries.
+ */
+/** How an interval's three synthesized fields are named on the wire. */
+export type TimedEventIntervalFields = {
+  readonly start: string;
+  readonly end: string;
+  readonly reason: string;
+};
+
+const DEFAULT_INTERVAL_FIELDS: TimedEventIntervalFields = {
+  start: "startedAt",
+  end: "endedAt",
+  reason: "endReason",
+};
+
+/**
+ * Intervals shorter than this are dropped as transition churn.
+ *
+ * Switching media backend can open and close a meeting within a millisecond,
+ * producing a 0-second phantom that carried no duration but still counted as a
+ * meeting. Per-event because it is a judgement about *that* event's noise floor,
+ * not a law:
+ * a sub-second connection session is a real connection (a tab that died on load),
+ * so dropping it would undercount rather than denoise.
+ */
+export const MIN_TIMED_EVENT_DURATION_MS = 1000;
+
+export type TimedEventOptions<P extends z.AnyZodObject> = {
+  /**
+   * Who may open it. `client` events are what `timed_event.open` accepts — and
+   * opening one asks the pusher to sign a row `source: "pusher"`, which the admin
+   * trusts, so that set stays deliberately small. `pusher` events are opened by
+   * the server against a lifecycle it observes itself; a socket may never ask.
+   */
+  openableBy: "client" | "pusher";
+  openProperties: P;
+  description: string;
+  endReasonDescription: string;
+  /**
+   * Renames the three fields the pusher fills in. Sessions predate the generic
+   * vocabulary and the admin reads `connectedAt` / `disconnectedAt` verbatim off
+   * them, so they keep their own names rather than the storage being migrated to
+   * suit an internal refactor.
+   */
+  intervalFields?: TimedEventIntervalFields;
+  minDurationMs?: number;
+  /**
+   * An event emitted when the interval OPENS, in addition to the row emitted when
+   * it closes. Only sessions need this: presence at connect time is itself a
+   * datum, whereas an interval that never closes never happened.
+   */
+  opensWith?: string;
+};
+
+export type TimedAnalyticsEventDefinition<
+  P extends z.AnyZodObject = z.AnyZodObject,
+  O extends "client" | "pusher" = "client" | "pusher",
+> = AnalyticsEventDefinition & {
+  readonly openProperties: P;
+  // Generic over the literal, not widened to the union: `TimedAnalyticsEventName`
+  // filters on it, and a widened `"client" | "pusher"` matches neither branch —
+  // which silently yields `never` and lets the front open anything, or nothing.
+  readonly openableBy: O;
+  readonly intervalFields: TimedEventIntervalFields;
+  readonly minDurationMs: number;
+  readonly opensWith?: string;
+};
+
+/**
+ * An interval someone opens and asks to have closed, which the pusher measures on
+ * its own clock and emits as one row.
+ *
+ * Two shapes, and conflating them is how a payload can be accepted at open and
+ * rejected at store: `openProperties` is what the opener sends, `properties` is
+ * what is finally written — the same fields plus the interval, which only the
+ * pusher can fill in. Declaring the first and deriving the second keeps them in
+ * step.
+ */
+function timedEvent<P extends z.AnyZodObject, O extends "client" | "pusher">(
+  def: TimedEventOptions<P> & { openableBy: O },
+): TimedAnalyticsEventDefinition<P, O> {
+  const fields = def.intervalFields ?? DEFAULT_INTERVAL_FIELDS;
+
+  return {
+    description: def.description,
+    source: "pusher",
+    openableBy: def.openableBy,
+    openProperties: def.openProperties,
+    intervalFields: fields,
+    minDurationMs: def.minDurationMs ?? MIN_TIMED_EVENT_DURATION_MS,
+    opensWith: def.opensWith,
+    properties: def.openProperties.extend({
+      [fields.start]: z
+        .string()
+        .datetime()
+        .describe("ISO-8601 instant the interval began."),
+      [fields.end]: z
+        .string()
+        .datetime()
+        .describe("ISO-8601 instant the interval ended."),
+      durationSeconds: z
+        .number()
+        .nonnegative()
+        .describe(
+          "Length of the interval in seconds, reported so nothing has to pair rows.",
+        ),
+      [fields.reason]: z
+        .enum(TIMED_EVENT_END_REASONS)
+        .describe(def.endReasonDescription),
+    }),
+  };
+}
+
+/* -------------------------------------------------------------------------- */
+/*                        Presence — pusher-synthesized                       */
+/* -------------------------------------------------------------------------- */
+
+/* -------------------------------------------------------------------------- */
+/*                                 The catalog                                */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Every analytics event, keyed by the name that travels on the wire.
+ *
+ * One literal per event, so the key IS the event name: there is no second
+ * registry to keep in sync, and a duplicate key is a compile error (ts1117)
+ * rather than a module-load throw. `as const satisfies` keeps the keys literal,
+ * which is what lets the front derive per-event property types from this object.
+ */
+export const ANALYTICS_EVENTS = {
+  "user.connected": event({
+    properties: z.object({
+      connectionId: z
+        .string()
+        .describe(
+          "Identifies one socket. The tab id when there is one, otherwise user+room — which collapses two tabs of the same user onto one session.",
+        ),
+      connectedAt: z
+        .string()
+        .datetime()
+        .describe("ISO-8601 instant the socket joined."),
+    }),
+    description:
+      "A user's socket joined a room. Emitted by the pusher, which owns the socket lifecycle — the front cannot report this reliably because a tab close or crash never runs its code.",
+    source: "pusher",
+  }),
+
+  // A session IS an interval, and is declared as one. What makes it look special
+  // is only what it declares: it keeps its own field names because the admin reads
+  // them verbatim, it emits a row at both ends rather than only at the close, and
+  // it has no minimum duration because a sub-second connection is a real
+  // connection. None of those are properties of sessions as such — they are
+  // options any interval could take.
+  "user.disconnected": timedEvent({
+    // Never "client": opening one asks the pusher to sign a connection session,
+    // which the admin projects into analytics_connection_sessions straight from
+    // these properties. A socket asking for one would be inventing its own
+    // connection time.
+    openableBy: "pusher",
+    opensWith: "user.connected",
+    intervalFields: {
+      start: "connectedAt",
+      end: "disconnectedAt",
+      reason: "disconnectReason",
+    },
+    // A tab that dies during load is a connection that happened. Dropping it would
+    // undercount connections rather than remove noise.
+    minDurationMs: 0,
+    openProperties: z.object({
+      connectionId: z
+        .string()
+        .describe("Matches the connectionId of the paired user.connected."),
+    }),
+    endReasonDescription:
+      "`pusher_shutdown` means the pusher closed it during a graceful restart, not the user leaving. `socket_closed` is the ordinary case: the socket went away.",
+    description:
+      "A user's socket left a room, carrying the finished session. This is what the admin projects into analytics_connection_sessions, so it is the source of truth for connection time. A disconnect whose connect was never seen is dropped rather than reported with a guessed duration.",
+  }),
+
+  "media.video_quality.sample": event({
+    properties: z.object({
+      streamId: z.string().describe("The WebRTC stream this sample measures."),
+      connectionId: z
+        .string()
+        .nullable()
+        .describe("Peer connection the stream rode on."),
+      sessionId: z
+        .string()
+        .nullable()
+        .describe("Media session grouping the streams."),
+      remoteUserUuid: z
+        .string()
+        .nullable()
+        .describe(
+          "The other party. Pseudonymized admin-side for worlds that opted out of user-level activity.",
+        ),
+      remoteSpaceUserId: z
+        .string()
+        .nullable()
+        .describe(
+          "The other party's space-scoped id. Null on an outbound sample: a stream published to a LiveKit server has no single remote user.",
+        ),
+      spaceName: z
+        .string()
+        .describe(
+          "Space the stream belongs to. The pusher rejects a sample for a space the socket has not joined.",
+        ),
+      streamCategory: z
+        .enum(["video", "screenSharing"])
+        .describe("Whether the stream is a camera or a screen share."),
+      transportType: z
+        .enum(["P2P", "SFU"])
+        .describe("Direct peer connection, or relayed through an SFU."),
+      direction: z
+        .enum(["inbound", "outbound"])
+        .describe(
+          "Whether the sample measures a stream we receive or one we send. An outbound sample describes our own encoder, so it carries no jitter and no remote user.",
+        ),
+      relay: z
+        .boolean()
+        .nullable()
+        .describe("Whether the connection went through a TURN relay."),
+      relayProtocol: z
+        .enum(["udp", "tcp", "tls"])
+        .nullable()
+        .describe("Transport the relay used."),
+      livekitServerUrl: z
+        .string()
+        .nullable()
+        .describe("LiveKit server that carried the stream, when applicable."),
+      livekitRegion: z
+        .string()
+        .max(255)
+        .nullable()
+        .describe(
+          "Region of the LiveKit server the client was connected to: set by LiveKit Cloud, null on P2P streams and usually on a self-hosted server.",
+        ),
+      fps: z
+        .number()
+        .describe("Frames per second observed over the sample window."),
+      fpsStdDev: z
+        .number()
+        .nullable()
+        .describe(
+          "Jitter in the frame rate; a high value reads as stutter even when the mean fps looks fine.",
+        ),
+      jitter: z.number().describe("Packet jitter in seconds."),
+      bandwidthBytesPerSecond: z
+        .number()
+        .describe("Throughput observed over the sample window."),
+      frameWidth: z.number().int().describe("Rounded frame width in pixels."),
+      frameHeight: z.number().int().describe("Rounded frame height in pixels."),
+      mimeType: z
+        .string()
+        .nullable()
+        .describe("Negotiated codec, e.g. video/VP8."),
+      qualityLimitationReason: z
+        .enum(["none", "cpu", "bandwidth", "other"])
+        .nullable()
+        .describe(
+          "Outbound only: why the browser is degrading what it encodes. `cpu` is a machine that cannot keep up, which otherwise reads to everyone else as a bad network.",
+        ),
+      encoderImplementation: z
+        .string()
+        .nullable()
+        .describe(
+          'Outbound only: encoder the browser picked, e.g. "libaom", "libvpx", "ExternalEncoder".',
+        ),
+      windowSeconds: z
+        .number()
+        .nullable()
+        .describe(
+          "Inbound only: time covered by the playback counters below, i.e. since this stream's previous sample. Null when the window is not measurable (first sample, counters restarted, right after a deliberate pause), which nulls every counter below. Divide summed counters by summed windows, never average per-sample ratios.",
+        ),
+      framesDecoded: z
+        .number()
+        .int()
+        .nullable()
+        .describe(
+          "Inbound only: frames decoded during the window. 0 while video was expected means the stream stalled; a stall that never resumes shows only here, since the browser counts freezes and pauses when the next frame arrives.",
+        ),
+      framesDropped: z
+        .number()
+        .int()
+        .nullable()
+        .describe(
+          "Inbound only: frames the receiver dropped during the window (before decoding, or too late to display).",
+        ),
+      freezeCount: z
+        .number()
+        .int()
+        .nullable()
+        .describe(
+          "Inbound only: freezes during the window, as the browser defines them: a gap between two rendered frames of max(3 × the average frame duration, average + 150 ms), up to 5 s. Counted when the next frame is rendered. Null when the browser does not report it.",
+        ),
+      freezeSeconds: z
+        .number()
+        .nullable()
+        .describe("Inbound only: total duration of those freezes, in seconds."),
+      pauseCount: z
+        .number()
+        .int()
+        .nullable()
+        .describe(
+          "Inbound only: gaps longer than 5 s between two rendered frames (never counted as freezes). Pauses we caused are excluded: no sample is sent while we pause a stream on purpose, nor right after.",
+        ),
+      pauseSeconds: z
+        .number()
+        .nullable()
+        .describe(
+          "Inbound only: total duration of those pauses. Counted when the video resumes, so it can exceed windowSeconds.",
+        ),
+      interFrameDelaySumSeconds: z
+        .number()
+        .nullable()
+        .describe(
+          "Inbound only: sum of the delays between consecutive rendered frames during the window. With the squared sum and framesDecoded, gives the per-frame delay variance: Σd²/n − (Σd/n)².",
+        ),
+      interFrameDelaySquaredSumSeconds: z
+        .number()
+        .nullable()
+        .describe(
+          "Inbound only: sum of the squared delays between consecutive rendered frames during the window.",
+        ),
+      decodeSeconds: z
+        .number()
+        .nullable()
+        .describe(
+          "Inbound only: time spent decoding during the window. Divided by framesDecoded: the receiver's decode cost per frame, which depends on codec and resolution.",
+        ),
+      captureFps: z
+        .number()
+        .nullable()
+        .describe(
+          "Outbound only, over the last second like fps: frames per second the camera or screen capture delivered to the encoder (RTCVideoSourceStats). Against captureTargetFps, tells a camera that starves the encoder (dim light, overloaded machine) from an encoder dropping frames. A screen capture only delivers frames when the content changes.",
+        ),
+      captureTargetFps: z
+        .number()
+        .nullable()
+        .describe(
+          "Outbound only: frame rate the capture is configured at (MediaTrackSettings.frameRate).",
+        ),
+      captureWidth: z
+        .number()
+        .int()
+        .nullable()
+        .describe(
+          "Outbound only: width the camera or screen capture delivers (MediaTrackSettings.width), where frameWidth is the largest layer the encoder sends. A capture larger than what is sent was scaled down by the encoder or by its layer setup.",
+        ),
+      captureHeight: z
+        .number()
+        .int()
+        .nullable()
+        .describe(
+          "Outbound only: height the camera or screen capture delivers (MediaTrackSettings.height).",
+        ),
+      qualitySetting: z
+        .enum(["low", "recommended", "high"])
+        .nullable()
+        .describe(
+          "Outbound only: the sender's quality setting when the sample was taken: the camera's for a camera, the screen share's for a screen share.",
+        ),
+      encodeMsPerFrame: z
+        .number()
+        .nullable()
+        .describe(
+          "Outbound only, over the last second: encoding time per encoded frame, all simulcast/SVC layers together, in milliseconds.",
+        ),
+      cpuLimitedRatio: z
+        .number()
+        .nullable()
+        .describe(
+          "Outbound only, over the last second: share of the time (0 to 1) the browser degraded the stream for lack of CPU (qualityLimitationDurations), where qualityLimitationReason is only a snapshot.",
+        ),
+      bandwidthLimitedRatio: z
+        .number()
+        .nullable()
+        .describe(
+          "Outbound only, over the last second: share of the time (0 to 1) the browser degraded the stream for lack of bandwidth.",
+        ),
+      packetsReceived: z
+        .number()
+        .int()
+        .nullable()
+        .describe(
+          "Inbound only, over windowSeconds like the playback counters: RTP packets of the video received.",
+        ),
+      packetsLost: z
+        .number()
+        .int()
+        .nullable()
+        .describe(
+          "Inbound only, over windowSeconds: RTP packets of the video lost on the way to us. Loss share = Σ packetsLost / Σ (packetsLost + packetsReceived). A packet counted as lost then received late is taken back, never below 0.",
+        ),
+      roundTripTimeMs: z
+        .number()
+        .nullable()
+        .describe(
+          "Inbound only: round-trip time of the connection the stream arrives on (selected ICE candidate pair) when the sample was taken: to the peer or its TURN relay in P2P, to the SFU otherwise.",
+        ),
+      uploadRoundTripTimeMs: z
+        .number()
+        .nullable()
+        .describe(
+          "Outbound only: round-trip time to the other end (peer or SFU), from its latest receiver report about the largest layer.",
+        ),
+      uploadLossRatio: z
+        .number()
+        .nullable()
+        .describe(
+          "Outbound only: share of the packets (0 to 1) the other end reported lost in its latest receiver report about the largest layer.",
+        ),
+      availableOutgoingBitrate: z
+        .number()
+        .nullable()
+        .describe(
+          "Outbound only: the browser's estimate of the bandwidth it can send on this connection, in bits per second.",
+        ),
+      sampleSeq: z
+        .number()
+        .nullable()
+        .describe(
+          "Monotonic counter per stream, used to order and de-duplicate samples.",
+        ),
+    }),
+    description:
+      "One periodic WebRTC quality measurement. Synthesized by the pusher from a videoQualityReportMessage rather than reported directly, so a client cannot forge it.",
+    source: "pusher",
+  }),
+
+  "auth.user_identified": event({
+    properties: z.object({
+      roomId: z
+        .string()
+        .nullable()
+        .describe("Room the user was identified in, when known."),
+    }),
+    description:
+      "The user was identified, i.e. attached to an account rather than anonymous.",
+  }),
+
+  "room.visited": event({
+    properties: z.object({
+      roomId: z.string().describe("The room entered."),
+      roomGroup: z
+        .string()
+        .nullable()
+        .describe("Group the room belongs to, when it has one."),
+    }),
+    description: "The user entered a room.",
+  }),
+
+  "room.changed": event({
+    properties: z.object({
+      fromRoomId: z.string().describe("Room left."),
+      toRoomId: z.string().describe("Room entered."),
+    }),
+    description:
+      "The user moved from one room to another without disconnecting.",
+  }),
+
+  "room_list.room_clicked": event({
+    properties: z.object({
+      roomId: z.string().optional().describe("Room picked from the list."),
+    }),
+    description: "The user picked a room from the room list.",
+  }),
+
+  "session.started": event({
+    properties: z.object({
+      roomId: z.string().optional().describe("Room the session started in."),
+      schemaVersion: z
+        .literal(1)
+        .describe("Payload version for the session family."),
+    }),
+    description:
+      "A front-side session began. Note the pusher's user.connected is the reliable presence signal; this one is best-effort.",
+  }),
+
+  "session.ended": event({
+    properties: z.object({
+      roomId: z.string().optional().describe("Room the session ended in."),
+      schemaVersion: z
+        .literal(1)
+        .describe("Payload version for the session family."),
+    }),
+    description:
+      "A front-side session ended. Only reaches the pusher on paths where the front still runs — a tab close does not. Carries no duration; use the pusher's user.disconnected for that.",
+  }),
+
+  "meeting.area_entered": event({
+    properties: z.object({
+      roomId: z.string().describe("Room containing the meeting area."),
+      meetingProvider: z
+        .enum(MEETING_PROVIDERS)
+        .optional()
+        .describe("Media backend of the area."),
+      externalMeetingProviderName,
+    }),
+    description: "The user walked into a meeting area.",
+  }),
+
+  "meeting.started": event({
+    properties: meetingContextProperties,
+    description:
+      "A meeting began. Emitted by the pusher when a client opens the interval, so it pairs one-to-one with the meeting.ended that closes it.",
+    source: "pusher",
+  }),
+
+  // A conversation IS a meeting: a spontaneous bubble is a WebRTC meeting, a
+  // meeting area is a LiveKit or Jitsi one. Reporting them as two families meant
+  // deriving "am I in a conversation" from three global stores in
+  // ConnectionManager, then deriving the provider from two more, then splitting
+  // one uninterrupted conversation into several rows whenever that derivation
+  // changed its mind. The interval is now opened where the meeting is actually
+  // started — the Jitsi property listeners, and SpacePeerManager's strategy
+  // switch — which is also where its provider is known for certain, so there is
+  // nothing left to detect a change of.
+  "meeting.ended": timedEvent({
+    openableBy: "client",
+    opensWith: "meeting.started",
+    // Mandatory alongside opensWith, not a judgement about meetings: the tracker
+    // enqueues the opening row the moment the interval opens, and only the CLOSING
+    // row is subject to this threshold. A non-zero value would therefore emit a
+    // `meeting.started` with no `meeting.ended` for every sub-threshold meeting —
+    // manufacturing the orphan the whole timed-event design exists to remove, and
+    // silently drifting the two counters the admin reads apart. A meeting that
+    // lasted 300ms is a meeting that happened; `durationSeconds` is there for
+    // anything that wants to filter it out.
+    minDurationMs: 0,
+    // meetingProvider spelled out rather than `.required()` on the shared shape:
+    // required() rebuilds the field and drops its .describe().
+    openProperties: meetingContextProperties.extend({
+      // Optional: the row the back emits says what a meeting IS (`meetingKind`) rather
+      // than which transport carried it, and the transport can change mid-meeting.
+      // Filled by the one path the back cannot see — Jitsi, whose areas join no space
+      // server-side.
+      meetingProvider: z
+        .enum(MEETING_PROVIDERS)
+        .optional()
+        .describe(
+          "Which media backend carried the meeting. It does NOT say what kind of meeting it was — a meeting area of four or fewer never leaves webrtc — which is what meetingKind is for.",
+        ),
+      externalMeetingProviderName,
+      meetingKind: reportedMeetingKindSchema
+        .optional()
+        .describe(
+          "What the meeting was: a spontaneous proximity bubble, an area people went to in order to meet, the world megaphone, a speaker zone, or `external`. Megaphone and speaker zone are broadcasts — a meeting whose predicate is one speaker on air rather than two people present — so anything reading meeting time as conversation time filters them out. `external` is an area that opens a meeting somewhere else entirely (Teams, Google Meet), where what is measured is time spent in the AREA and not in the call, which happens in another tab or another app. Filled by the back from what the space's client declared; by the client for the ones the back cannot see (Jitsi, Teams, Google Meet).",
+        ),
+      participantCount: z
+        .number()
+        .optional()
+        .describe("How many distinct people passed through the meeting."),
+      peakParticipantCount: z
+        .number()
+        .optional()
+        .describe("The most people in it at any one moment."),
+      speakerCount: z
+        .number()
+        .optional()
+        .describe(
+          "How many distinct people were on air at any point. In a bubble or an area everyone is, so it equals participantCount there; it only says something under a broadcast kind. Absent on the rows a client opens.",
+        ),
+      ...transportSecondsProperties,
+    }),
+    endReasonDescription:
+      "`socket_closed` and the `pusher_*` values mean the client never got to close it — a tab closed mid-meeting, or the pusher restarted.",
+    description:
+      "A meeting, measured. One row per meeting — by the back, which owns the meeting's lifecycle and counts its participants; the row is attributed to nobody, because a meeting belongs to no one participant. Rows without `meetingKind` were opened by a client, once per participant, and carry participant-seconds: Jitsi meetings, and every row older than the back-emitted ones. A broadcast is the same row under a `megaphone` or `speaker_zone` kind: from the first speaker going on air to the last going off, and an empty megaphone space accrues nothing.",
+  }),
+
+  "meeting.screenshare.ended": timedEvent({
+    openableBy: "client",
+    openProperties: meetingActionProperties.extend({
+      hasAudio: z
+        .boolean()
+        .describe("Whether the shared screen carried audio."),
+    }),
+    endReasonDescription: "Why the share stopped, or what stopped it.",
+    description:
+      "A screen share, measured. One row per share, emitted by the pusher when the interval closes and timestamped at its end. There is no matching `.started`: the interval carries its own start. Only one share can be live at a time, so the interval needs no id of its own — the connection it rides identifies it.",
+  }),
+
+  "meeting.layout_changed": event({
+    properties: z.object({
+      layout: z
+        .string()
+        .describe("The layout switched to, e.g. `presentation`."),
+    }),
+    description: "The user changed the meeting layout.",
+  }),
+
+  "meeting.picture_in_picture.toggled": event({
+    properties: z.object({
+      open: z
+        .boolean()
+        .describe(
+          "True when picture-in-picture was opened, false when closed.",
+        ),
+    }),
+    description: "The user toggled picture-in-picture.",
+  }),
+
+  "chat.message_sent": event({
+    properties: z.object({
+      chatContext: z
+        .enum(["proximity", "room"])
+        .optional()
+        .describe(
+          "Whether the message went to a nearby group or to the whole room.",
+        ),
+    }),
+    description: "The user sent a chat message. Content is never collected.",
+  }),
+
+  "chat.proximity_file.sent": event({
+    properties: z.object({
+      sizeBytes: z.number().int().nonnegative().describe("Size of the file."),
+      recipientCount: z
+        .number()
+        .int()
+        .nonnegative()
+        .describe(
+          "How many people in the proximity chat were offered the file. Each one who accepts gets a full copy from the sender's browser.",
+        ),
+    }),
+    description:
+      "The user sent a file in the proximity chat, peer to peer. One event per file, so a send of several files reports several. The file name and content are never collected.",
+  }),
+
+  "chat.proximity_file.received": event({
+    properties: z.object({
+      sizeBytes: z.number().int().nonnegative().describe("Size of the file."),
+      durationMs: z
+        .number()
+        .int()
+        .nonnegative()
+        .describe(
+          "From the first byte received to the last. Leaves out the time the recipient took to accept and the connection setup, so sizeBytes / durationMs is the transfer speed.",
+        ),
+      relay: z
+        .boolean()
+        .optional()
+        .describe(
+          "Whether the transfer went through a TURN relay. Absent when the browser did not report the connection path.",
+        ),
+      relayProtocol: z
+        .enum(["udp", "tcp", "tls"])
+        .optional()
+        .describe(
+          "Transport to the TURN relay, only when relayed. TCP and TLS relays are much slower than UDP.",
+        ),
+    }),
+    description:
+      "The user accepted a file sent in the proximity chat and received all of it. Declined or interrupted transfers are not reported.",
+  }),
+
+  "invite.sent": event({
+    properties: z.object({
+      inviteType: z
+        .string()
+        .optional()
+        .describe("How the invite was sent, e.g. a copied link."),
+    }),
+    description: "The user sent an invite.",
+  }),
+
+  "invite.accepted": event({
+    properties: z.object({
+      inviteType: z
+        .string()
+        .optional()
+        .describe("How the invite was received."),
+    }),
+    description:
+      "An invite was accepted. One of the signals the admin treats as a world's first useful moment.",
+  }),
+
+  "invite.walk_link_option_changed": event({
+    properties: z.object({
+      value: z
+        .boolean()
+        .describe("Whether the walk-to-me link option was turned on."),
+    }),
+    description: "The user toggled the walk-to-me option on an invite link.",
+  }),
+
+  "area.dwell": timedEvent({
+    openableBy: "client",
+    openProperties: areaProperties,
+    endReasonDescription: "Why the dwell ended, or what ended it.",
+    description:
+      "Time the user spent inside an area. One row per visit, emitted by the pusher when the interval closes and timestamped at its end. This replaced an area.entered/area.left pair that the admin re-paired with a window function over every event in the room.",
+  }),
+
+  "status.dwell": timedEvent({
+    openableBy: "client",
+    openProperties: z.object({
+      status: z
+        .string()
+        .describe(
+          "Availability status held during this period (ONLINE, BUSY, DO_NOT_DISTURB, BACK_IN_A_MOMENT, …).",
+        ),
+    }),
+    endReasonDescription: "Why the status period ended, or what ended it.",
+    description:
+      "Time the user held one availability status, measured by the pusher between status changes and closed at disconnect. Gated per world by the user_level_activity policy the admin applies at ingestion: without opt-in it is pseudonymized there, so no named per-member timeline is stored.",
+  }),
+
+  "map_editor.area.lock.toggled": event({
+    properties: z.object({
+      areaId: z.string().describe("Area whose lock changed."),
+      areaName: z.string().optional().describe("Human-readable area name."),
+      locked: z.boolean().describe("True when the area was locked."),
+    }),
+    description: "The user locked or unlocked an area.",
+  }),
+
+  "map_editor.property.added": event({
+    properties: mapEditorPropertyProperties,
+    description: "A property was added to a map object.",
+  }),
+
+  "map_editor.property.removed": event({
+    properties: mapEditorPropertyProperties,
+    description: "A property was removed from a map object.",
+  }),
+
+  "map_editor.property.clicked": event({
+    properties: z.object({
+      name: z.string().describe("The property that was clicked."),
+      style: z
+        .string()
+        .optional()
+        .describe("Which rendering of the property was clicked."),
+    }),
+    description: "A map property was clicked in-world.",
+  }),
+
+  "map_editor.tool.opened": event({
+    properties: z.object({ name: z.string().describe("The tool opened.") }),
+    description: "The user opened a map editor tool.",
+  }),
+
+  "map_editor.application_picker.opened": event({
+    properties: z.object({
+      applicationName: z
+        .string()
+        .describe("The application whose picker was opened."),
+    }),
+    description: "The user opened an application picker in the map editor.",
+  }),
+
+  "map_editor.application.opened": event({
+    properties: z.object({
+      applicationName: z.string().describe("The application opened."),
+    }),
+    description: "The user opened an application from the map editor.",
+  }),
+
+  "map_editor.save.failed": event({
+    properties: z.object({
+      reason: z.string().optional().describe("Why the save failed."),
+    }),
+    description:
+      "The map-storage refused an edit. There is no matching `.started`/`.succeeded`: a map editor command is sent fire-and-forget, so the front only ever learns about the failures — count these against the `map_editor.area.*` / `map_editor.entity.*` events to get an edit failure rate.",
+  }),
+
+  "map_editor.entity.added": event({
+    properties: mapEditorEntityProperties,
+    description: "An entity was added to the map.",
+  }),
+
+  "map_editor.entity.removed": event({
+    properties: mapEditorEntityProperties,
+    description: "An entity was removed from the map.",
+  }),
+
+  "map_editor.entity.updated": event({
+    properties: mapEditorEntityProperties,
+    description: "An entity on the map was updated.",
+  }),
+
+  "map_editor.area.created": event({
+    properties: mapEditorAreaProperties,
+    description: "An area was created on the map.",
+  }),
+
+  "map_editor.area.updated": event({
+    properties: mapEditorAreaProperties,
+    description: "An area on the map was updated.",
+  }),
+
+  "map_editor.area.removed": event({
+    properties: mapEditorAreaProperties,
+    description: "An area was removed from the map.",
+  }),
+
+  "map_loading.started": event({
+    properties: z.object({
+      mapUrl: z
+        .string()
+        .optional()
+        .describe(
+          "The map being loaded, with query string and hash stripped — those carry auth tokens. The path is kept on purpose: for a map it *is* the signal, naming which map loaded.",
+        ),
+    }),
+    description: "A map started loading.",
+  }),
+
+  "map_loading.succeeded": event({
+    properties: z.object({
+      durationMs: z
+        .number()
+        .optional()
+        .describe("How long the map took to load."),
+    }),
+    description: "A map finished loading.",
+  }),
+
+  "map_loading.failed": event({
+    properties: z.object({
+      reason: z.string().optional().describe("Why the load failed."),
+      durationMs: z
+        .number()
+        .optional()
+        .describe("How long the attempt took before failing."),
+    }),
+    description:
+      "A map failed to load. One of the events the admin counts as an experience issue.",
+  }),
+
+  "media.connection_retry": event({
+    properties: z.object({
+      meetingProvider: z
+        .enum(["webrtc", "livekit"])
+        .describe("Which backend was retried."),
+    }),
+    description: "A media connection was retried.",
+  }),
+
+  "media.turn_test.succeeded": event({
+    properties: z.object({
+      protocol: z
+        .string()
+        .nullable()
+        .describe("Transport the TURN server accepted."),
+    }),
+    description: "The TURN connectivity test passed.",
+  }),
+
+  "media.codec.degraded": event({
+    properties: z.object({
+      streamCategory: z
+        .enum(["video", "screenSharing"])
+        .describe("Whether the camera or the screen share was demoted."),
+      codec: z
+        .enum(["av1", "vp9", "h264", "vp8"])
+        .describe(
+          "The codec being left. It and everything above it are dropped from what this client offers for the rest of the session, so the next one down is what gets negotiated.",
+        ),
+      transportType: z
+        .enum(["P2P", "SFU"])
+        .describe("Direct peer connection, or relayed through an SFU."),
+    }),
+    description:
+      "This client's encoder could not keep up with its codec and left it for a cheaper one. Read against media.video_quality.sample, whose qualityLimitationReason is what this decision is made on: the sample says the machine is struggling, this says what was given up about it. Once per codec per session — nothing goes back up before a reload.",
+  }),
+
+  "media.codec.probed": event({
+    properties: z.object({
+      browser: z
+        .enum(["chrome", "edge", "firefox", "safari", "other"])
+        .describe(
+          "Browser family, from the user agent. chrome covers every Chromium browser but Edge; every iOS browser is safari, since all of them run WebKit.",
+        ),
+      os: z
+        .enum([
+          "windows",
+          "mac",
+          "linux",
+          "chromeos",
+          "android",
+          "ios",
+          "other",
+        ])
+        .describe("Operating system family, from the user agent."),
+      av1Encode: codecSupportField("Encoding AV1"),
+      av1Decode: codecSupportField("Decoding AV1"),
+      vp9Encode: codecSupportField("Encoding VP9"),
+      vp9Decode: codecSupportField("Decoding VP9"),
+      h264Encode: codecSupportField("Encoding H.264"),
+      h264Decode: codecSupportField("Decoding H.264"),
+      h265Encode: codecSupportField("Encoding H.265"),
+      h265Decode: codecSupportField("Decoding H.265"),
+    }),
+    description:
+      "What this browser can do with each video codec in a WebRTC call, as MediaCapabilities answers at 720p: the verdict the codec preference lists are filtered on. Once per page load. H.265 is probed but never negotiated: it is here to measure how many users could use it.",
+  }),
+
+  "media.livekit.connected": event({
+    properties: z.object({
+      ...livekitConnectionProperties,
+      connectMs: z
+        .number()
+        .nonnegative()
+        .describe(
+          "From the start of room.connect() to the room being connected, signalling and media.",
+        ),
+    }),
+    description:
+      "This client joined a LiveKit room: the denominator of media.livekit.disconnected, and where LiveKit routed it.",
+  }),
+
+  "media.livekit.reconnected": event({
+    properties: z.object({
+      ...livekitConnectionProperties,
+      previousLivekitRegion: z
+        .string()
+        .max(255)
+        .nullable()
+        .describe(
+          "Region before the reconnection. A different one means LiveKit moved the client to another region.",
+        ),
+      reconnectKind: z
+        .enum(["resume", "full"])
+        .describe(
+          "resume: only the signalling connection came back. full: the media connections were rebuilt too, possibly on another server.",
+        ),
+      durationMs: z
+        .number()
+        .nonnegative()
+        .describe("How long the room was reconnecting."),
+    }),
+    description:
+      "livekit-client lost its connection to the LiveKit server and recovered it by itself: the user saw the media stall, not a disconnection.",
+  }),
+
+  "media.livekit.disconnected": event({
+    properties: z.object({
+      ...livekitConnectionProperties,
+      disconnectReason: z
+        .string()
+        .max(64)
+        .describe(
+          "livekit-client DisconnectReason name: SIGNAL_CLOSE, CONNECTION_TIMEOUT, STATE_MISMATCH, JOIN_FAILURE, DUPLICATE_IDENTITY, PARTICIPANT_REMOVED, MEDIA_FAILURE... UNKNOWN when it gave none (it gave up reconnecting).",
+        ),
+      connectedSeconds: z
+        .number()
+        .nonnegative()
+        .nullable()
+        .describe(
+          "How long the room had been connected. Null when it never connected: the LiveKit server could not be reached or refused the join.",
+        ),
+      whileReconnecting: z
+        .boolean()
+        .describe("livekit-client was trying to reconnect when it gave up."),
+      restart: z
+        .boolean()
+        .describe(
+          "Whether WorkAdventure asks the back for a new invitation. It does not when another connection took this one's place or the back removed it.",
+        ),
+    }),
+    description:
+      "This client lost its LiveKit room for a reason it did not choose: not its own leave, nor the back closing the room. The media stop until a new invitation arrives.",
+  }),
+
+  "media.livekit_switch.requested": event({
+    properties: z.object({
+      streamCategory: z
+        .enum(["video", "screenSharing"])
+        .describe("Which encoders could not keep up."),
+    }),
+    description:
+      "This client told the space it cannot keep up encoding for several P2P peers, asking for the bubble to be moved to LiveKit, where it encodes once. A request, not an outcome: the back refuses it when it has no LiveKit or when the world turned the switch off, and the next window then falls through to media.codec.degraded. Once per session — the flag is never lowered, or the bubble would bounce.",
+  }),
+
+  "media.permission_denied": event({
+    properties: z.object({
+      kind: mediaDeviceKind,
+      reason: z.string().optional().describe("Why permission was refused."),
+    }),
+    description:
+      "The browser refused camera or microphone access. Counted as an experience issue.",
+  }),
+
+  "media.device_error": event({
+    properties: z.object({
+      kind: mediaDeviceKind,
+      reason: z
+        .string()
+        .optional()
+        .describe("What went wrong with the device."),
+    }),
+    description:
+      "A camera or microphone failed. Counted as an experience issue.",
+  }),
+
+  "settings.microphone.changed": event({
+    properties: settingValueProperties,
+    description: "The user changed the microphone setting.",
+  }),
+
+  "settings.camera.changed": event({
+    properties: settingValueProperties,
+    description: "The user changed the camera setting.",
+  }),
+
+  "settings.notification.changed": event({
+    properties: settingValueProperties,
+    description: "The user changed the notification setting.",
+  }),
+
+  "settings.picture_in_picture.changed": event({
+    properties: settingValueProperties,
+    description: "The user changed the picture-in-picture setting.",
+  }),
+
+  "settings.fullscreen.changed": event({
+    properties: settingValueProperties,
+    description: "The user changed the fullscreen setting.",
+  }),
+
+  "scripting.website_opened": event({
+    properties: z.object({
+      url: z
+        .string()
+        .describe(
+          "Origin only. The query and hash carry auth tokens, and the path is not the app's to report.",
+        ),
+    }),
+    description:
+      "The scripting API put a URL on screen somewhere the app does not own: a browser tab (WA.nav.openTab), a navigation away (WA.nav.goToPage), a UI panel (WA.ui.website) or an in-map embedded website. None of these is a cowebsite, and all five used to report `cowebsite.opened` with no context at all — landing as triggerProperty `other` and diluting every per-area figure computed from that event.",
+  }),
+
+  "settings.ask_website.changed": event({
+    properties: settingValueProperties,
+    description: "The user changed the ask-before-opening-a-website setting.",
+  }),
+
+  "settings.request_follow.changed": event({
+    properties: settingValueProperties,
+    description: "The user changed the follow-request setting.",
+  }),
+
+  "settings.decrease_audio_volume.changed": event({
+    properties: settingValueProperties,
+    description: "The user changed the auto-lower-volume setting.",
+  }),
+
+  "media.background_effect.sample": event({
+    properties: z.object({
+      mode: z.enum(["blur", "image"]).describe("The effect running."),
+      transport: z
+        .enum(["insertable-streams", "image-bitmap"])
+        .describe(
+          "How camera frames reach the segmentation worker: insertable streams (Chromium, no main-thread work per frame) or ImageBitmap copies through postMessage (Firefox, Safari).",
+        ),
+      delegate: z
+        .enum(["GPU", "CPU"])
+        .describe("The MediaPipe delegate running the segmenter."),
+      model: z
+        .enum(["general", "landscape"])
+        .describe(
+          "The selfie segmenter model, picked from the camera's aspect ratio.",
+        ),
+      meanSegmentationMs: z
+        .number()
+        .nonnegative()
+        .describe(
+          "Mean duration of one segmentation over the sampling window.",
+        ),
+      fps: z
+        .number()
+        .nonnegative()
+        .describe("Composited frames per second over the sampling window."),
+      resegmentInterval: z
+        .number()
+        .int()
+        .min(1)
+        .max(4)
+        .describe(
+          "Segmentation runs every Nth frame and the mask is reused in between; adapted from meanSegmentationMs.",
+        ),
+      hardwareConcurrency: z
+        .number()
+        .int()
+        .nonnegative()
+        .describe(
+          "navigator.hardwareConcurrency, 0 when the browser hides it.",
+        ),
+    }),
+    description:
+      "How the virtual background pipeline performs on this device: once per session, after 45 s of rendering so the segmentation cadence has had two checkpoints to settle, then once after each change of effect. What decides the defaults of the segmentation cadence, the model choice and the capability gate.",
+  }),
+
+  "settings.background.changed": event({
+    properties: z.object({
+      backgroundType: z
+        .string()
+        .describe("The background effect selected, e.g. blur."),
+    }),
+    description: "The user changed their video background.",
+  }),
+
+  "settings.noise_suppression.changed": event({
+    properties: z.object({
+      enabled: z
+        .boolean()
+        .describe("Whether advanced noise reduction is on after the change."),
+      provider: noiseSuppressionProviderField,
+      engine: noiseSuppressionEngineField,
+    }),
+    description:
+      "The user changed advanced noise reduction: the switch, the mode or the engine. Carries the whole resulting setting, so the latest row per user is their current choice.",
+  }),
+
+  "media.noise_suppression.started": event({
+    properties: z.object({
+      engine: noiseSuppressionEngineField,
+      initMs: z
+        .number()
+        .nonnegative()
+        .describe(
+          "From the start of initialization to the worklet reporting ready, model download and wasm compilation included.",
+        ),
+      hardwareConcurrency: z
+        .number()
+        .int()
+        .nonnegative()
+        .describe(
+          "navigator.hardwareConcurrency, 0 when the browser hides it.",
+        ),
+    }),
+    description:
+      "WorkAdventure noise suppression is processing the microphone. Read against media.noise_suppression.failed for each engine's failure rate, the figure that decides whether DeepFilterNet3 can become the default.",
+  }),
+
+  "media.noise_suppression.load": event({
+    properties: z.object({
+      engine: noiseSuppressionEngineField,
+      windows: z
+        .number()
+        .int()
+        .nonnegative()
+        .describe("2 s windows measured (30 for the default minute)."),
+      medianLoad: z
+        .number()
+        .nonnegative()
+        .describe(
+          "Median share of real time the worklet spent denoising, per 2 s window. 0.05 = 5 %.",
+        ),
+      p95Load: z
+        .number()
+        .nonnegative()
+        .describe("95th percentile of the per-window load."),
+      maxLoad: z
+        .number()
+        .nonnegative()
+        .describe(
+          "Worst window. Above 0.7 twice in a row, the overload fallback kicks in.",
+        ),
+      slowFrames: z
+        .number()
+        .int()
+        .nonnegative()
+        .describe(
+          "Frames measured at 3 ms or more, i.e. that took 2 ms or more, close to the 2.67 ms render quantum: the ones that can crackle. Worklets only have Date.now() (1 ms steps), so shorter frames cannot be timed one by one.",
+        ),
+      frames: z
+        .number()
+        .int()
+        .nonnegative()
+        .describe("10 ms frames processed during the measurement."),
+      hardwareConcurrency: z
+        .number()
+        .int()
+        .nonnegative()
+        .describe(
+          "navigator.hardwareConcurrency, 0 when the browser hides it.",
+        ),
+    }),
+    description:
+      "How heavy WorkAdventure noise suppression really is on this device: sent once per pipeline, after a minute of processing (DeepFilterNet3 only). The data that decides whether noise suppression can be on by default — the overload fallback only says when it is too heavy.",
+  }),
+
+  "media.audio_quality.sample": event({
+    properties: z.object({
+      transportType: z
+        .enum(["P2P", "SFU"])
+        .describe("Direct peer connections, or LiveKit."),
+      windowSeconds: z
+        .number()
+        .positive()
+        .describe("Length of the window the counters were taken over."),
+      streams: z
+        .number()
+        .int()
+        .nonnegative()
+        .describe(
+          "Remote microphones whose audio the window counts: only the time each one was on counts.",
+        ),
+      concealedRatio: z
+        .number()
+        .min(0)
+        .max(1)
+        .describe(
+          "Share of the received audio the browser had to invent because packets were late or missing — what a listener hears as robotic or choppy. Excludes the silence Opus DTX fills during pauses.",
+        ),
+      concealmentEvents: z
+        .number()
+        .int()
+        .nonnegative()
+        .describe("How many separate concealment episodes the window had."),
+      deceleratedRatio: z
+        .number()
+        .min(0)
+        .max(1)
+        .optional()
+        .describe(
+          "Share of the received audio the jitter buffer added by slowing the voice down, to wait for late packets (insertedSamplesForDeceleration). Missing when the browser does not report it, or from older clients.",
+        ),
+      acceleratedRatio: z
+        .number()
+        .min(0)
+        .max(1)
+        .optional()
+        .describe(
+          "Share of the received audio the jitter buffer dropped by speeding the voice up, to catch up after a burst (removedSamplesForAcceleration). Missing when the browser does not report it, or from older clients.",
+        ),
+      packetLossRatio: z
+        .number()
+        .min(0)
+        .max(1)
+        .describe("Packets lost over packets expected."),
+      maxJitterMs: z
+        .number()
+        .nonnegative()
+        .describe(
+          "Highest jitter estimate among the streams, at the end of the window.",
+        ),
+      jitterBufferDelayMs: z
+        .number()
+        .nonnegative()
+        .nullable()
+        .describe(
+          "Mean time audio waited in the jitter buffer: the latency the network's irregularity costs.",
+        ),
+    }),
+    description:
+      "How the voices this client received survived the network over the last minute, aggregated over every remote microphone of one transport. Only the time a microphone was on counts: muted time (and the fade-out of each mute) would otherwise read as invented audio. No event for a window in which no audio was received. The counterpart of media.noise_suppression.*: those tell whether the sender's audio was clean, this tells whether it arrived intact.",
+  }),
+
+  "media.noise_suppression.failed": event({
+    properties: z.object({
+      engine: noiseSuppressionEngineField,
+      status: z
+        .enum(["error", "unsupported"])
+        .describe(
+          "unsupported: the browser lacks AudioWorklet. error: loading, the worklet or the AudioContext failed.",
+        ),
+      reason: z.string().max(200).describe("The failure message, truncated."),
+    }),
+    description:
+      "WorkAdventure noise suppression gave up; the microphone falls back to the browser's own processing.",
+  }),
+
+  "cowebsite.opened": event({
+    properties: cowebsiteOpenedProperties,
+    description:
+      "The user opened a cowebsite — a document, app or website embedded in the world. Emitted by the pusher when the visit's interval opens, so it pairs one-to-one with the cowebsite.closed that ends it.",
+    source: "pusher",
+  }),
+
+  "onboarding.woka_validated": event({
+    properties: z.object({
+      scene: z
+        .string()
+        .describe("Which onboarding scene the Woka was confirmed in."),
+    }),
+    description: "The user confirmed their Woka during onboarding.",
+  }),
+
+  "feedback.opened": event({
+    properties: z.object({ feedbackSource: feedbackSourceField }),
+    description: "The user opened the feedback form.",
+  }),
+
+  "feedback.submitted": event({
+    properties: z.object({
+      feedbackSource: feedbackSourceField,
+      hasScreenshot: z
+        .boolean()
+        .optional()
+        .describe("Whether the user attached a screenshot."),
+    }),
+    description: "The user submitted feedback. Content is never collected.",
+  }),
+
+  "external_module.chat_band.clicked": event({
+    properties: z.object({
+      externalModuleName: z
+        .string()
+        .describe("Which external module the band belongs to."),
+      action: z.string().describe("What the user clicked."),
+    }),
+    description: "The user clicked an external module's chat band.",
+  }),
+
+  "menu.custom.opened": event({
+    properties: z.object({
+      name: z.string().describe("The custom menu opened."),
+    }),
+    description: "The user opened a world-defined custom menu.",
+  }),
+
+  "emote.launched": event({
+    properties: z.object({ name: z.string().describe("The emote played.") }),
+    description: "The user played an emote.",
+  }),
+
+  "custom_button.clicked": event({
+    properties: z.object({
+      id: z.string().describe("The button's id."),
+      label: z.string().optional().describe("The button's visible label."),
+    }),
+    description: "The user clicked a world-defined custom button.",
+  }),
+
+  "popup.opened": event({
+    properties: z.object({
+      targetRectangle: z
+        .string()
+        .describe("The map rectangle the popup is anchored to."),
+      id: z
+        .number()
+        .describe(
+          "The popup's id, as assigned by the scripting API (OpenPopupEvent.popupId).",
+        ),
+    }),
+    description: "A scripted popup was opened.",
+  }),
+
+  "world.entered": event({
+    properties: z.object({
+      durationMs: z
+        .number()
+        .optional()
+        .describe("How long entering the world took."),
+    }),
+    description: "The user finished entering a world.",
+  }),
+
+  "asset.error": event({
+    properties: z.object({
+      kind: z
+        .enum(["tile", "asset"])
+        .describe("Whether a tileset or another asset failed."),
+      reason: z.string().optional().describe("What failed to load."),
+    }),
+    description:
+      "A map tile or asset failed to load. Counted as an experience issue.",
+  }),
+
+  "websocket.connection_lost": event({
+    properties: z.object({
+      reason: z.string().optional().describe("Why the socket dropped."),
+    }),
+    description:
+      "The websocket connection dropped. Counted as an experience issue.",
+  }),
+
+  "pwa.install_prompt_shown": event({
+    properties: z.object({
+      isIos: z
+        .boolean()
+        .describe("iOS needs a manual install flow, so the prompt differs."),
+    }),
+    description: "The install-as-an-app prompt was shown.",
+  }),
+
+  "pwa.install_outcome": event({
+    properties: z.object({
+      outcome: z
+        .enum(["accepted", "dismissed"])
+        .describe("What the user chose."),
+    }),
+    description: "The user accepted or dismissed the install prompt.",
+  }),
+
+  /* ---- Bare signals: the fact that they happened is the whole datum. ---- */
+
+  "auth.logged_sso": signal("The user signed in through SSO."),
+  "auth.logged_token": signal("The user signed in with a token."),
+  "auth.login_clicked": signal("The user clicked sign in."),
+  "auth.logout_clicked": signal("The user clicked sign out."),
+  "bubble.lock.toggled": signal(
+    "The user locked or unlocked their conversation bubble.",
+  ),
+  "bubble.say.opened": signal("The user opened the say bubble."),
+  "bubble.think.opened": signal("The user opened the think bubble."),
+  "chat.matrix_encryption_configuration.started": signal(
+    "The user started configuring chat encryption.",
+  ),
+  "chat.matrix_folder.created": signal("The user created a chat folder."),
+  "chat.matrix_room.created": signal("The user created a chat room."),
+  "chat.message_from_user_list_clicked": signal(
+    "The user started a chat from the user list.",
+  ),
+  "chat.message_list_opened": signal("The user opened the message list."),
+  "chat.opened": signal("The user opened the chat."),
+  "conversation.participant_added": signal(
+    "Someone joined the user's conversation.",
+  ),
+  // A cowebsite is open for as long as it is open, and that was never reported:
+  // `cowebsite.closed` was emitted from exactly one place — the tab's close button —
+  // against sixteen call sites that remove one, so the close count was near zero and
+  // any ratio built on it was fiction. Both ends now come from the store, and the
+  // pusher measures the time between them.
+  //
+  // The properties ride the interval, so the closing row carries the whole context —
+  // mediaKind, area, fileName — alongside the duration, without a join.
+  "cowebsite.closed": timedEvent({
+    openableBy: "client",
+    opensWith: "cowebsite.opened",
+    openProperties: cowebsiteOpenedProperties,
+    // A document glanced at and shut inside a second is a real interaction, and the
+    // bounce is exactly the thing worth seeing. Also mandatory with opensWith.
+    minDurationMs: 0,
+    endReasonDescription:
+      "`socket_closed` and the `pusher_*` values mean the tab went away with the cowebsite still open.",
+    description:
+      "A cowebsite visit, measured. One row per cowebsite when it closes, carrying the context it was opened with plus how long it stayed open.",
+  }),
+  "cowebsite.fullscreen_opened": signal("The user put a cowebsite fullscreen."),
+  "cowebsite.link_copied": signal("The user copied a cowebsite's link."),
+  "cowebsite.opened_in_new_tab": signal(
+    "The user opened a cowebsite in a browser tab.",
+  ),
+  "cowebsite.switched": signal("The user switched between open cowebsites."),
+  "emote.edit_opened": signal("The user opened the emote editor."),
+  "external_module.calendar_opened": signal(
+    "The user opened the calendar module.",
+  ),
+  "external_module.opened": signal("The user opened an external module."),
+  "external_module.todo_list_opened": signal(
+    "The user opened the todo list module.",
+  ),
+  "file.drag_dropped": signal("The user dropped a file into the world."),
+  "global_message.opened": signal(
+    "The user opened the global message composer.",
+  ),
+  "global_message.text_sent": signal(
+    "The user broadcast a text message to the world.",
+  ),
+  "invite.opened": signal("The user opened the invite panel."),
+  "map_editor.closed": signal("The user closed the map editor."),
+  "map_editor.opened": signal("The user opened the map editor."),
+  "map_explorer.center_to_user_clicked": signal(
+    "The user recentred the explorer on themselves.",
+  ),
+  "map_explorer.closed": signal("The user closed the map explorer."),
+  "map_explorer.filtered": signal("The user filtered the map explorer."),
+  "map_explorer.opened": signal("The user opened the map explorer."),
+  "map_explorer.top_button_clicked": signal(
+    "The user opened the explorer from the top button.",
+  ),
+  "map_explorer.zoom_in_clicked": signal(
+    "The user zoomed in on the map explorer.",
+  ),
+  "map_explorer.zoom_out_clicked": signal(
+    "The user zoomed out on the map explorer.",
+  ),
+  "media.camera.toggled": signal("The user turned their camera on or off."),
+  "media.microphone.dwell": timedEvent({
+    openableBy: "client",
+    openProperties: dwellMeetingProperties,
+    endReasonDescription:
+      "Why the microphone stopped being open, or what closed it.",
+    description:
+      "Time the user actually held their microphone open, measured by the pusher. Driven by the effective capture state rather than the user's preference: a denied permission, a track that never started, a privacy shutdown or an energy-saving pause all read as closed, so this is time a microphone could be heard rather than time a toggle was left on. media.microphone.toggled counts presses of that toggle and answers a different question.",
+  }),
+
+  "media.microphone.toggled": signal(
+    "The user turned their microphone on or off.",
+  ),
+
+  "media.speech.dwell": timedEvent({
+    openableBy: "client",
+    openProperties: dwellMeetingProperties,
+    endReasonDescription: "Why the speech period ended, or what ended it.",
+    description:
+      "Time the user was detected speaking while their microphone was open, from the local volume analyser with a hold applied so ordinary pauses between words do not cut a sentence into fragments. Reported by the speaker's own client and by nobody else, so the same speech cannot be counted once per listener. It is an estimate from loudness, not recognition: no audio is inspected, transmitted or stored.",
+  }),
+  "media.turn_test.failed": signal(
+    "The TURN connectivity test failed. Counted as an experience issue.",
+  ),
+  "media.turn_test.timeout": signal(
+    "The TURN connectivity test timed out. Counted as an experience issue.",
+  ),
+  "media.video_stream_missing": event({
+    // Every field is optional: tabs loaded before this event had properties keep sending it bare.
+    properties: z.object({
+      meetingProvider: z
+        .enum(["webrtc", "livekit"])
+        .optional()
+        .describe(
+          "Which backend the missing stream was coming over. Absent for the user's own previews.",
+        ),
+      local: z
+        .boolean()
+        .optional()
+        .describe(
+          "The missing stream was the user's own camera or screen-share preview, which comes over no backend.",
+        ),
+      streamCategory: z
+        .enum(["video", "screenSharing", "scripting", "component"])
+        .optional()
+        .describe("Whether the missing stream was a camera or a screen share."),
+      remoteSpaceUserId: z
+        .string()
+        .optional()
+        .describe(
+          "The space user whose video never arrived. Never sent to PostHog.",
+        ),
+      pending: z
+        .boolean()
+        .optional()
+        .describe(
+          "The stream was replacing one already on screen (a switch between backends or a reconnection) and was not shown yet.",
+        ),
+      trackMuted: z
+        .boolean()
+        .optional()
+        .describe(
+          "The video track was muted: no frame was arriving, from the network for a remote stream, from the camera or capture for a local one.",
+        ),
+      trackEnded: z
+        .boolean()
+        .optional()
+        .describe(
+          "The video track (the receiving one, or the capture track when local) had ended.",
+        ),
+      remoteMuted: z
+        .boolean()
+        .optional()
+        .describe("LiveKit only: the publisher's track was marked as muted."),
+      pictureInPicture: z
+        .boolean()
+        .optional()
+        .describe(
+          "The video was in the Picture-in-Picture window, a known source of false alarms. A hidden tab without Picture-in-Picture unmounts the video and never reports this event.",
+        ),
+    }),
+    description:
+      "A video stream was expected but no frame was rendered within 5 seconds.",
+  }),
+  "meeting.actions.opened": event({
+    properties: meetingActionProperties,
+    description: "The user opened the meeting actions menu.",
+  }),
+  "meeting.camera_layout_resized": event({
+    properties: meetingActionProperties,
+    description: "The user resized the camera layout.",
+  }),
+  "meeting.floor.given": event({
+    properties: meetingActionProperties,
+    description:
+      "A moderator gave the floor to a participant who had raised their hand.",
+  }),
+  "meeting.floor.given_back": event({
+    properties: meetingActionProperties,
+    description: "A participant handed the floor back themselves.",
+  }),
+  "meeting.floor.revoked": event({
+    properties: meetingActionProperties,
+    description: "A moderator took the floor back from a participant.",
+  }),
+  "meeting.hand.lowered_for_participant": event({
+    properties: meetingActionProperties,
+    description:
+      "A moderator lowered a participant's raised hand to clear the queue.",
+  }),
+  "meeting.hand.toggled": event({
+    properties: meetingActionProperties.extend({
+      raised: z
+        .boolean()
+        .describe("True when the hand was raised, false when lowered."),
+    }),
+    description: "The user raised or lowered their hand in a meeting.",
+  }),
+  "meeting.microphone.muted": event({
+    properties: meetingActionProperties,
+    description: "The user muted their microphone in a meeting.",
+  }),
+  "meeting.microphone.muted_for_everybody": event({
+    properties: meetingActionProperties,
+    description: "A moderator muted everyone's microphone.",
+  }),
+  "meeting.participation.ended": event({
+    properties: z
+      .object({
+        meetingId: z
+          .string()
+          .describe("Meeting this participation belongs to."),
+        meetingKind: reportedMeetingKindSchema.describe(
+          "What the meeting was: a bubble, an area, the world megaphone, a speaker zone, or `external`. Megaphone and speaker zone are broadcasts, `external` a meeting held elsewhere; see meeting.ended.",
+        ),
+        joinRank: joinRankProperty,
+        role: z
+          .enum(["speaker", "listener"])
+          .describe(
+            "`speaker` if they were on air at any point; a panelist who also listened to the others is a speaker. In a bubble or an area everyone is on air, so it is always `speaker` there — it only distinguishes anyone under a broadcast kind.",
+          ),
+        airtimeSeconds: z
+          .number()
+          .nonnegative()
+          .describe(
+            "This person's own time on air, summed over their stints. Equals durationSeconds in a bubble or an area; zero for a listener. Never to be summed into conversation time: broadcasting is not collaborating, and neither is listening.",
+          ),
+        ...transportSecondsProperties,
+      })
+      .merge(sessionIntervalProperties),
+    description:
+      "One person's time in one meeting, clipped to it: someone alone in an area before the second person arrived starts when the meeting opens, and a listener present before anyone went on air starts when the broadcast does. Emitted by the back when the meeting ends. Under a broadcast kind this is audience time, reported once per listener: it adds up to reach × duration, not duration. This is the per-user view of a meeting: meeting.ended is deliberately attributed to nobody, because a meeting belongs to no one participant. NOT to be joined to itself: grouping these rows by meetingId yields who was in a meeting with whom, and aggregated over months that is a map of who works with whom — a different product from a record of what happened, and one with a different legal footing. Nothing builds that query today, and the decision to leave it unbuilt is the reason this sentence exists: it is two lines of SQL away, so it will not stay unbuilt by accident.",
+    source: "pusher",
+  }),
+
+  "meeting.participant.kicked": event({
+    properties: meetingActionProperties,
+    description: "A moderator removed a participant.",
+  }),
+  "meeting.participant.pinned": event({
+    properties: meetingActionProperties,
+    description: "The user pinned a participant's video.",
+  }),
+  "meeting.private_message.clicked": event({
+    properties: meetingActionProperties,
+    description: "The user started a private message from a meeting.",
+  }),
+  "meeting.report.clicked": event({
+    properties: meetingActionProperties,
+    description: "The user reported someone from a meeting.",
+  }),
+  "meeting.screenshare.toggled": event({
+    properties: meetingActionProperties,
+    description: "The user toggled screen sharing.",
+  }),
+  "meeting.video.muted": event({
+    properties: meetingActionProperties,
+    description: "The user turned their camera off in a meeting.",
+  }),
+  "meeting.video.muted_for_everybody": event({
+    properties: meetingActionProperties,
+    description: "A moderator turned off everyone's camera.",
+  }),
+  // A click, not a broadcast: it means the panel was opened, not that anything went
+  // on air. Time on air is meeting.participation.ended, measured by the back.
+  "megaphone.opened": signal("The user opened the megaphone."),
+  "menu.contact.opened": signal("The user opened the contact page."),
+  "menu.credit.opened": signal("The user opened the credits."),
+  "menu.opened": signal("The user opened the main menu."),
+  "menu.shortcuts.opened": signal("The user opened the keyboard shortcuts."),
+  "onboarding.companion_selected": signal(
+    "The user picked a companion during onboarding.",
+  ),
+  "onboarding.custom_woka_selected": signal(
+    "The user picked a custom Woka during onboarding.",
+  ),
+  "onboarding.name_validated": signal(
+    "The user confirmed their name during onboarding.",
+  ),
+  "onboarding.video_validated": signal(
+    "The user confirmed their camera setup during onboarding.",
+  ),
+  "onboarding.woka_selected": signal(
+    "The user picked a Woka during onboarding.",
+  ),
+  "personal_desk.entered": signal("The user sat at their personal desk."),
+  "personal_desk.unclaimed": signal("The user released their personal desk."),
+  "profile.camera_edit_opened": signal(
+    "The user opened camera settings from their profile.",
+  ),
+  "profile.companion_edit_opened": signal(
+    "The user opened companion settings from their profile.",
+  ),
+  "profile.name_edit_opened": signal(
+    "The user opened name settings from their profile.",
+  ),
+  "profile.opened": event({
+    properties: z.object({
+      source: z
+        .enum(["menu", "profile_button"])
+        .describe("Which control opened the profile."),
+    }),
+    // See global_message.opened: PostHog has always had wa_menu_profile and
+    // wa_open_profile_menu, and this side had one undifferentiated event.
+    description: "The user opened their profile.",
+  }),
+  "profile.woka_edit_opened": signal(
+    "The user opened Woka settings from their profile.",
+  ),
+  "pwa.continue_in_browser_clicked": signal(
+    "The user chose to stay in the browser rather than install.",
+  ),
+  "pwa.install_clicked": signal("The user clicked install."),
+  "pwa.install_from_profile_menu_clicked": signal(
+    "The user started an install from the profile menu.",
+  ),
+  "recording.list_opened": signal("The user opened the recordings list."),
+  "recording.started": signal("A recording started."),
+  "recording.stopped": signal("A recording stopped."),
+  "room_list.opened": signal("The user opened the room list."),
+  "settings.audio_volume.opened": signal(
+    "The user opened the audio volume settings.",
+  ),
+  "settings.background.opened": signal(
+    "The user opened the video background settings.",
+  ),
+  "settings.camera.selected": signal("The user opened the camera picker."),
+  "settings.microphone.selected": signal(
+    "The user opened the microphone picker.",
+  ),
+  "settings.opened": signal("The user opened the settings."),
+  "settings.speaker.selected": signal("The user opened the speaker picker."),
+  "user.business_card.opened": signal(
+    "The user opened someone's business card.",
+  ),
+  "user.follow_requested": signal("The user asked to follow someone."),
+  "user.go_to_clicked": signal("The user jumped to someone's position."),
+  "user.report.clicked": signal("The user reported someone."),
+  "user.woka_menu.opened": signal("The user opened the Woka context menu."),
+  "user_list.opened": signal("The user opened the user list."),
+  "websocket.reconnected": signal(
+    "A websocket retry succeeded and the client is back. PostHog has counted this as wa_socket_reconnected since long before this pipeline; this side had nothing, so a reconnection that worked and one that never did looked the same here.",
+  ),
+  "websocket.reconnecting": signal(
+    "The client is retrying its websocket connection. Counted as an experience issue.",
+  ),
+} as const satisfies Record<string, AnalyticsEventDefinition>;
+
+/* -------------------------------------------------------------------------- */
+/*                            Derived from the catalog                        */
+/* -------------------------------------------------------------------------- */
+
+/** Every event name the pipeline knows about. */
+export type AnalyticsEventName = keyof typeof ANALYTICS_EVENTS;
+
+/**
+ * The properties a call site passes for event `N`.
+ *
+ * Indexed access, deliberately, rather than `Extract<z.infer<typeof analyticsEvent>,
+ * { eventName: N }>`: that would be a distributive conditional over 166 union
+ * members instantiated afresh at every one of the front's ~166 call sites, and it
+ * would print 166-member unions into every type error in AnalyticsClient. This is
+ * O(1) for the checker and names one event when it complains.
+ */
+export type AnalyticsEventProperties<N extends AnalyticsEventName> = z.input<
+  (typeof ANALYTICS_EVENTS)[N]["properties"]
+>;
+
+/**
+ * One event as the pusher queues it: the envelope plus that event's exact
+ * properties, per catalog entry.
+ *
+ * A mapped type over ANALYTICS_EVENTS rather than `z.infer<typeof
+ * analyticsEventCatalogUnion>`: the union is assembled from a generic option
+ * type, so inferring from it yields `unknown` for every field. This is what lets
+ * the compiler reject a synthesized event whose payload does not match its entry
+ * — `transportType: "Livekit"` against an enum of `"P2P" | "SFU"`, say.
+ *
+ * Strict on purpose: the wire schema is `.passthrough()` so an older or newer
+ * front is not rejected for an extra key, but code that *builds* an event has no
+ * business adding keys the catalog does not name.
+ */
+export type AnalyticsEventEnvelope<
+  N extends AnalyticsEventName = AnalyticsEventName,
+> = {
+  [K in N]: {
+    eventName: K;
+    source: (typeof ANALYTICS_EVENTS)[K]["source"];
+    clientEventTimeMs: number;
+    eventId: string;
+    properties: z.output<(typeof ANALYTICS_EVENTS)[K]["properties"]>;
+  };
+}[N];
+
+/** Every interval the pusher measures, whoever opens it. */
+export type AnyTimedAnalyticsEventName = {
+  [N in AnalyticsEventName]: (typeof ANALYTICS_EVENTS)[N] extends {
+    openProperties: z.AnyZodObject;
+  }
+    ? N
+    : never;
+}[AnalyticsEventName];
+
+/**
+ * The intervals a *client* may ask the pusher to open.
+ *
+ * Deliberately narrower than the set of timed events, and that gap is the whole
+ * security property: opening one makes the pusher emit a row signed
+ * `source: "pusher"`, which the admin trusts enough to project into connection
+ * sessions. Sessions themselves are timed events too, and must never be in here —
+ * a socket that could open its own session would be inventing its connection time.
+ */
+export type TimedAnalyticsEventName = {
+  [N in AnyTimedAnalyticsEventName]: (typeof ANALYTICS_EVENTS)[N] extends {
+    openableBy: "client";
+  }
+    ? N
+    : never;
+}[AnyTimedAnalyticsEventName];
+
+/** What the opener sends for event `N`. */
+export type TimedAnalyticsEventOpenProperties<
+  N extends AnyTimedAnalyticsEventName,
+> = z.input<(typeof ANALYTICS_EVENTS)[N]["openProperties"]>;
+
+function isTimedDefinition(
+  definition: AnalyticsEventDefinition,
+): definition is TimedAnalyticsEventDefinition {
+  return "openProperties" in definition;
+}
+
+/** Reads the interval options off a catalog entry, or undefined if it is not timed. */
+export function timedAnalyticsEventDefinition(
+  eventName: string,
+): TimedAnalyticsEventDefinition | undefined {
+  const definition = (
+    ANALYTICS_EVENTS as Record<string, AnalyticsEventDefinition | undefined>
+  )[eventName];
+
+  return definition && isTimedDefinition(definition) ? definition : undefined;
+}
+
+/**
+ * The allowlist for `timed_event.open`, derived rather than hand-maintained.
+ *
+ * Adding a `timedEvent` entry with `openableBy: "client"` widens what a socket may
+ * ask for, so the catalog test pins the exact contents — widening should be a
+ * deliberate act, not a side effect of documenting a new event.
+ */
+export const TIMED_ANALYTICS_EVENT_NAMES = Object.entries(ANALYTICS_EVENTS)
+  .filter(
+    ([, definition]) =>
+      isTimedDefinition(definition) && definition.openableBy === "client",
+  )
+  .map(([eventName]) => eventName) as [
+  TimedAnalyticsEventName,
+  ...TimedAnalyticsEventName[],
+];
+
+/** Keys of `T` that a caller cannot omit. */
+type RequiredKeys<T> = {
+  [K in keyof T]-?: Record<never, never> extends Pick<T, K> ? never : K;
+}[keyof T];
+
+/**
+ * The properties argument for event `N`, optional when the event has none that
+ * are required — which is the case for the ~94 bare signals, whose call sites
+ * read `track("menu.opened")` with no second argument.
+ *
+ * The naive test (`Record<string, never> extends P`) does not work: `never` is
+ * assignable to everything, so it also matches events that do have required
+ * fields. Probing the required keys is what actually distinguishes them.
+ */
+export type AnalyticsEventArgs<N extends AnalyticsEventName> = [
+  RequiredKeys<AnalyticsEventProperties<N>>,
+] extends [never]
+  ? [properties?: AnalyticsEventProperties<N>]
+  : [properties: AnalyticsEventProperties<N>];
+
+/**
+ * Wraps a definition in the envelope that travels on the wire.
+ *
+ * `passthrough()` on the properties is load-bearing: `z.object` strips unknown
+ * keys, so a long-lived tab running an older front — or a newer one that extended
+ * a payload — would have the extra fields silently dropped on the way to the
+ * admin. The byte cap in AnalyticsEventsQueue.normalizeEvent stays the real guard
+ * on size. Only the event *name* is closed; its payload is not.
+ */
+function envelopeFor(
+  eventName: string,
+  definition: AnalyticsEventDefinition,
+): z.ZodDiscriminatedUnionOption<"eventName"> {
+  return z
+    .object({
+      eventName: z.literal(eventName),
+      source: z
+        .literal(definition.source)
+        .describe(
+          definition.source === "pusher"
+            ? "Synthesized by the pusher. A socket claiming this name is rejected: the admin gives these events special meaning."
+            : "Reported by the client.",
+        ),
+      clientEventTimeMs: clientEventTimeMsField,
+      eventId: eventIdField,
+      properties: definition.properties.passthrough(),
+    })
+    .describe(definition.description);
+}
+
+/**
+ * Every event, keyed by name.
+ *
+ * Iterate this to generate documentation: each value is a Zod object whose
+ * `_def.description` is the event's description and whose `shape.properties`
+ * carries a description per field.
+ */
+export const ANALYTICS_EVENT_CATALOG = Object.fromEntries(
+  Object.entries(ANALYTICS_EVENTS).map(([eventName, definition]) => [
+    eventName,
+    envelopeFor(eventName, definition),
+  ]),
+) as Record<AnalyticsEventName, z.ZodDiscriminatedUnionOption<"eventName">>;
+
+const allEventSchemas = Object.values(ANALYTICS_EVENT_CATALOG) as [
+  z.ZodDiscriminatedUnionOption<"eventName">,
+  ...z.ZodDiscriminatedUnionOption<"eventName">[],
+];
+
+/** The catalog as one union. */
+export const analyticsEventCatalogUnion = z.discriminatedUnion(
+  "eventName",
+  allEventSchemas,
+);
+
+/** Reads the literal event name off a catalog entry. */
+export function analyticsEventNameOf(
+  schema: z.ZodDiscriminatedUnionOption<"eventName">,
+): string {
+  const shape = schema.shape as { eventName: z.ZodLiteral<string> };
+
+  return shape.eventName.value;
+}

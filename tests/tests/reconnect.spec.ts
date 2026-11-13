@@ -1,0 +1,60 @@
+import { expect, test } from "@playwright/test";
+import { publicTestMapUrl } from "./utils/urls";
+import Map from "./utils/map";
+import Menu from "./utils/menu";
+import { getPage } from "./utils/auth";
+import { isMobileViewport } from "./utils/isMobile";
+
+test.setTimeout(180_000);
+
+test.describe("Connection @nomobile @nowebkit", () => {
+    test.beforeEach(async ({ viewport, browserName }) => {
+        test.skip(
+            isMobileViewport(viewport) || browserName === "webkit",
+            "Skip on mobile and WebKit due to limitations",
+        );
+    });
+
+    test("can succeed even if WorkAdventure starts while pusher is down @slow", async ({ browser }) => {
+        await using page = await getPage(browser, "Alice", publicTestMapUrl("tests/mousewheel.json", "reconnect"));
+
+        //Simulation of offline network
+        await page.context().setOffline(true);
+
+        await expect(page.getByText("Connection to server lost")).toBeVisible({
+            timeout: 180_000,
+        });
+
+        //Reconnect
+        await page.context().setOffline(false);
+
+        await expect(page.getByText("Connection to server lost")).toBeHidden({
+            timeout: 180_000,
+        });
+
+        await Menu.waitForMapLoad(page, 180_000);
+        /*await expect(page.locator("button#menuIcon")).toBeVisible({
+      timeout: 180_000,
+    });*/
+    });
+
+    test("can succeed on WAM file even if WorkAdventure starts while pusher is down @slow", async ({ browser }) => {
+        await using page = await getPage(browser, "Alice", Map.url("empty"));
+
+        //Simulation of offline network
+        await page.context().setOffline(true);
+
+        await expect(page.getByText("Connection to server lost")).toBeVisible({
+            timeout: 180_000,
+        });
+
+        //Reconnect
+        await page.context().setOffline(false);
+
+        await expect(page.getByText("Connection to server lost")).toBeHidden({
+            timeout: 180_000,
+        });
+
+        await Menu.waitForMapLoad(page, 180_000);
+    });
+});

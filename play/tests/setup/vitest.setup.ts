@@ -1,0 +1,148 @@
+import type { FrontConfigurationInterface } from "../../src/common/FrontConfigurationInterface";
+
+// Vitest setup: provide a minimal MediaStream polyfill for Node test environment
+
+class MediaStreamPolyfill {
+    private tracks: unknown[];
+
+    constructor(tracks: unknown[] = []) {
+        this.tracks = tracks;
+    }
+
+    getTracks(): unknown[] {
+        return this.tracks;
+    }
+    getAudioTracks(): unknown[] {
+        return this.tracks.filter((track) => (track as MediaStreamTrack).kind === "audio");
+    }
+    getVideoTracks(): unknown[] {
+        return this.tracks.filter((track) => (track as MediaStreamTrack).kind === "video");
+    }
+    addTrack(track: unknown): void {
+        this.tracks.push(track);
+    }
+    removeTrack(track: unknown): void {
+        this.tracks = this.tracks.filter((currentTrack) => currentTrack !== track);
+    }
+}
+
+if (typeof globalThis.MediaStream === "undefined") {
+    globalThis.MediaStream = MediaStreamPolyfill as unknown as typeof MediaStream;
+}
+
+if (typeof window !== "undefined" && window.env === undefined) {
+    const defaultEnv: FrontConfigurationInterface = {
+        DEBUG_MODE: false,
+        PUSHER_URL: "http://pusher.test",
+        FRONT_URL: "http://front.test",
+        ADMIN_URL: undefined,
+        ICON_URL: "http://icon.test",
+        SKIP_RENDER_OPTIMIZATIONS: false,
+        JITSI_URL: undefined,
+        JITSI_PRIVATE_MODE: false,
+        ENABLE_MAP_EDITOR: true,
+        PUBLIC_MAP_STORAGE_PREFIX: undefined,
+        MAX_USERNAME_LENGTH: 20,
+        MAX_PER_GROUP: 4,
+        PROXIMITY_FILE_TRANSFER_MAX_USERS: 10,
+        MAX_DISPLAYED_VIDEOS: 4,
+        LIVEKIT_PIXEL_DENSITY: 2 / 3,
+        CONTACT_URL: undefined,
+        POSTHOG_API_KEY: undefined,
+        POSTHOG_URL: undefined,
+        DISABLE_ANONYMOUS: false,
+        ENABLE_OPENID: false,
+        OPID_PROFILE_SCREEN_PROVIDER: undefined,
+        ENABLE_CHAT_UPLOAD: false,
+        FALLBACK_LOCALE: "en",
+        OPID_WOKA_NAME_POLICY: undefined,
+        ENABLE_REPORT_ISSUES_MENU: undefined,
+        REPORT_ISSUES_URL: undefined,
+        CLIENT_DISCONNECTION_RETENTION_MS: 30_000,
+        SENTRY_DSN_FRONT: undefined,
+        SENTRY_DSN_PUSHER: undefined,
+        SENTRY_ENVIRONMENT: undefined,
+        SENTRY_RELEASE: undefined,
+        SENTRY_TRACES_SAMPLE_RATE: undefined,
+        WOKA_SPEED: 8,
+        KLAXOON_ENABLED: false,
+        KLAXOON_CLIENT_ID: undefined,
+        YOUTUBE_ENABLED: false,
+        GOOGLE_DRIVE_ENABLED: false,
+        GOOGLE_DOCS_ENABLED: false,
+        GOOGLE_SHEETS_ENABLED: false,
+        GOOGLE_SLIDES_ENABLED: false,
+        ERASER_ENABLED: false,
+        MINIMUM_DISTANCE: 2,
+        GOOGLE_DRIVE_PICKER_CLIENT_ID: undefined,
+        GOOGLE_DRIVE_PICKER_APP_ID: undefined,
+        EXCALIDRAW_ENABLED: false,
+        EXCALIDRAW_DOMAINS: [],
+        CARDS_ENABLED: false,
+        TLDRAW_ENABLED: false,
+        EMBEDLY_KEY: undefined,
+        MATRIX_PUBLIC_URI: undefined,
+        MATRIX_ADMIN_USER: undefined,
+        MATRIX_DOMAIN: undefined,
+        ENABLE_CHAT: undefined,
+        ENABLE_CHAT_ONLINE_LIST: undefined,
+        ENABLE_CHAT_DISCONNECTED_LIST: undefined,
+        ENABLE_SAY: undefined,
+        ENABLE_ISSUE_REPORT: undefined,
+        GRPC_MAX_MESSAGE_SIZE: 4194304,
+        TURN_CREDENTIALS_RENEWAL_TIME: 0,
+        DEFAULT_WOKA_NAME: undefined,
+        DEFAULT_WOKA_TEXTURE: undefined,
+        SKIP_CAMERA_PAGE: undefined,
+        BYPASS_PWA: undefined,
+        PROVIDE_DEFAULT_WOKA_NAME: undefined,
+        PROVIDE_DEFAULT_WOKA_TEXTURE: undefined,
+        ENABLE_TUTORIAL: false,
+    };
+
+    window.env = defaultEnv;
+}
+
+if (typeof window !== "undefined" && typeof window.matchMedia === "undefined") {
+    Object.defineProperty(window, "matchMedia", {
+        writable: true,
+        value: (query: string) => ({
+            matches: false,
+            media: query,
+            onchange: null,
+            addListener: () => undefined,
+            removeListener: () => undefined,
+            addEventListener: () => undefined,
+            removeEventListener: () => undefined,
+            dispatchEvent: () => false,
+        }),
+    });
+}
+
+// jsdom does not implement CanvasRenderingContext2D; Phaser expects it when a test imports it.
+// Provide a minimal stub so canvas feature detection does not crash in tests.
+const createStubContext = () => {
+    const data = new Uint8ClampedArray([0, 0, 0, 255]);
+    return {
+        fillStyle: "",
+        globalCompositeOperation: "source-over",
+        drawImage: () => undefined,
+        fillRect: () => undefined,
+        getImageData: () => ({ data }),
+        putImageData: () => undefined,
+    } as unknown as CanvasRenderingContext2D;
+};
+
+if (typeof HTMLCanvasElement !== "undefined") {
+    // @ts-ignore Override getContext to return our stub instead of throwing "not implemented".
+    HTMLCanvasElement.prototype.getContext = function getContext() {
+        return createStubContext();
+    };
+}
+
+// Note: do not import Phaser here. Setup files run once per test file and, with `isolate: true`,
+// in a fresh module registry every time, so a global import re-evaluates Phaser's 8.8 MB bundle
+// for each of the ~100 test files. That dominated both the runtime and the peak memory of the
+// suite, and made CI runners exceed their memory limit (SIGKILL / exit 137).
+// Modules that need Phaser import it themselves; the few tests that also need `globalThis.Phaser`
+// set it at the top of their own file (see src/front/Space/tests/*.test.ts).

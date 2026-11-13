@@ -1,0 +1,403 @@
+import fs from "fs";
+import path from "path";
+import { fileURLToPath } from "url";
+
+// Usage:
+//  - Single comparison: tsx scripts/diff-i18n.ts <target-locale> [source-locale]
+//  - Summary mode (no args): tsx scripts/diff-i18n.ts
+//  - Detailed check mode (CI/CD): tsx scripts/diff-i18n.ts --check
+//  - Verbose output: add --verbose
+// Defaults: source = en-US
+const args = process.argv.slice(2);
+const isCheckMode = args.includes("--check");
+const isVerboseMode = args.includes("--verbose");
+const isQuietMode = !isVerboseMode;
+// Filter out flags to get locale arguments
+const localeArgs = args.filter((arg) => !arg.startsWith("--"));
+const targetLocale = localeArgs[0];
+const sourceLocale = localeArgs[1] || "en-US";
+
+const srcDir = fileURLToPath(new URL(`../src/i18n/${sourceLocale}`, import.meta.url));
+const tgtDir = fileURLToPath(new URL(`../src/i18n/${targetLocale}`, import.meta.url));
+const baseI18nDir = fileURLToPath(new URL("../src/i18n", import.meta.url));
+
+async function loadModule(file: string): Promise<unknown> {
+    const mod = await import(file);
+    // return default export when available, fallback to the module namespace
+    return (mod as { default?: unknown }).default ?? mod;
+}
+
+function listFiles(dir: string) {
+    return fs.readdirSync(dir).filter((f) => f.endsWith(".ts"));
+}
+
+function deepKeys(obj: unknown, prefix = ""): string[] {
+    if (obj == null || typeof obj !== "object") return [];
+    const rec = obj as Record<string, unknown>;
+    const keys: string[] = [];
+    // Use Object.keys() to only get own enumerable properties, not inherited ones
+    for (const k of Object.keys(rec)) {
+        // Skip prototype properties and functions
+        if (typeof rec[k] === "function") continue;
+        const v = rec[k];
+        const full = prefix ? `${prefix}.${k}` : k;
+        if (v && typeof v === "object" && !Array.isArray(v) && v.constructor === Object) {
+            // Only recurse into plain objects, not class instances
+            keys.push(...deepKeys(v, full));
+        } else {
+            keys.push(full);
+        }
+    }
+    return keys;
+}
+
+function listLocaleDirs(baseDir: string, exclude?: string): string[] {
+    if (!fs.existsSync(baseDir)) return [];
+    return fs
+        .readdirSync(baseDir)
+        .map((name) => path.join(baseDir, name))
+        .filter((p) => {
+            try {
+                return fs.statSync(p).isDirectory();
+            } catch {
+                return false;
+            }
+        })
+        .map((p) => path.basename(p))
+        .filter((name) => (exclude ? name !== exclude : true));
+}
+
+async function preloadSourceModules(dir: string) {
+    const files = listFiles(dir).filter((f) => f !== "index.ts");
+    const map = new Map<string, { keys: string[]; count: number }>();
+    for (const file of files) {
+        const srcPath = path.join(dir, file);
+        // eslint-disable-next-line no-await-in-loop
+        const mod = await loadModule(srcPath);
+        // Ensure we're working with a plain object, not a class instance or merged object
+        const modObj = mod && typeof mod === "object" && mod.constructor === Object ? mod : {};
+        const keys = deepKeys(modObj);
+        map.set(file, { keys, count: keys.length });
+    }
+    return map;
+}
+
+async function computeMissingCountsForLocale(
+    srcModules: Map<string, { keys: string[]; count: number }>,
+    srcDir: string,
+    localeDir: string
+) {
+    let missingKeys = 0;
+    let missingFiles = 0;
+    for (const [file, { keys: srcKeys, count }] of srcModules.entries()) {
+        const tgtPath = path.join(localeDir, file);
+        if (!fs.existsSync(tgtPath)) {
+            missingKeys += count;
+            missingFiles += 1;
+            continue;
+        }
+        // eslint-disable-next-line no-await-in-loop
+        const tgt = await loadModule(tgtPath);
+        // Ensure we're working with a plain object, not a class instance or merged object
+        const tgtObj = tgt && typeof tgt === "object" && tgt.constructor === Object ? tgt : {};
+        const tgtKeys = deepKeys(tgtObj);
+        const missing = srcKeys.filter((k) => !tgtKeys.includes(k));
+        missingKeys += missing.length;
+    }
+    return { missingKeys, missingFiles };
+}
+
+async function runDetailedCheck() {
+    const baseDir = baseI18nDir;
+    let hasErrors = 0;
+
+    if (!isQuietMode) {
+        console.log("=== Complete inventory of incomplete translation files ===");
+        console.log("");
+        console.log("📁 Detecting locales in src/i18n/...");
+    }
+
+    const languages = listLocaleDirs(baseDir, sourceLocale);
+    const langCount = languages.length;
+    if (!isQuietMode) {
+        console.log(`✅ Locales detected: ${langCount}`);
+        console.log(`   ${languages.join(" ")}`);
+        console.log("");
+    }
+
+    if (langCount === 0) {
+        console.error(`❌ ERROR: No target locales detected in ${baseDir}`);
+        process.exitCode = 1;
+        return;
+    }
+
+    if (!isQuietMode) {
+        console.log(`📄 Reference locale: ${sourceLocale}`);
+        console.log("");
+    }
+
+    // Get all reference files
+    const referenceFiles = listFiles(srcDir).filter((f) => f !== "index.ts");
+
+    // Preload all source modules
+    const srcModules = await preloadSourceModules(srcDir);
+
+    // Process each reference file
+    for (const file of referenceFiles) {
+        const { keys: refKeys, count: refKeyCount } = srcModules.get(file) || { keys: [], count: 0 };
+
+        if (refKeyCount === 0) {
+            continue;
+        }
+
+        if (!isQuietMode) {
+            console.log(`📄 ${file} (${sourceLocale}: ${refKeyCount} keys):`);
+        }
+        let incompleteFound = false;
+
+        // Check each language
+        for (const lang of languages) {
+            const langFile = path.join(baseDir, lang, file);
+
+            if (!fs.existsSync(langFile)) {
+                if (isQuietMode && !incompleteFound) {
+                    console.log(`${file}:`);
+                }
+                console.log(`  ❌ ${lang}: MISSING FILE`);
+                incompleteFound = true;
+                hasErrors = 1;
+            } else {
+                // eslint-disable-next-line no-await-in-loop
+                const langMod = await loadModule(langFile);
+                // Ensure we're working with a plain object, not a class instance or merged object
+                const langObj = langMod && typeof langMod === "object" && langMod.constructor === Object ? langMod : {};
+                const langKeys = deepKeys(langObj);
+                const langKeyCount = langKeys.length;
+
+                // Find missing keys
+                const missingKeys = refKeys.filter((k) => !langKeys.includes(k));
+                const missingCount = missingKeys.length;
+
+                if (missingCount > 0 && refKeyCount > 0) {
+                    const percentage = Math.floor((langKeyCount * 100) / refKeyCount);
+                    if (isQuietMode && !incompleteFound) {
+                        console.log(`${file}:`);
+                    }
+                    console.log(
+                        `  ⚠️  ${lang}: ${langKeyCount}/${refKeyCount} keys (${percentage}% complete, ${missingCount} missing key(s))`
+                    );
+                    // Show first 15 missing keys
+                    const keysToShow = missingKeys.slice(0, 15);
+                    for (const key of keysToShow) {
+                        console.log(`     - ${key}`);
+                    }
+                    if (missingCount > 15) {
+                        const remaining = missingCount - 15;
+                        console.log(`     ... and ${remaining} more key(s)`);
+                    }
+                    incompleteFound = true;
+                    hasErrors = 1;
+                } else if (!isQuietMode) {
+                    console.log(`  ✅ ${lang}: All keys are present`);
+                }
+            }
+        }
+
+        if (!incompleteFound && !isQuietMode) {
+            console.log("  ✅ All locales complete");
+        }
+        if (!isQuietMode || incompleteFound) {
+            console.log("");
+        }
+    }
+
+    // Summary by language
+    if (!isQuietMode) {
+        console.log("=== Summary by locale ===");
+        console.log("");
+    }
+
+    for (const lang of languages) {
+        let totalFiles = 0;
+        let completeFiles = 0;
+        let missingFiles = 0;
+        let incompleteFiles = 0;
+        const incompleteFileNames: string[] = [];
+
+        for (const file of referenceFiles) {
+            const { keys: refKeys, count: refKeyCount } = srcModules.get(file) || {
+                keys: [],
+                count: 0,
+            };
+
+            if (refKeyCount === 0) {
+                continue;
+            }
+
+            totalFiles += 1;
+
+            const langFile = path.join(baseDir, lang, file);
+
+            if (!fs.existsSync(langFile)) {
+                missingFiles += 1;
+            } else {
+                // eslint-disable-next-line no-await-in-loop
+                const langMod = await loadModule(langFile);
+                // Ensure we're working with a plain object, not a class instance or merged object
+                const langObj = langMod && typeof langMod === "object" && langMod.constructor === Object ? langMod : {};
+                const langKeys = deepKeys(langObj);
+                const missingKeys = refKeys.filter((k) => !langKeys.includes(k));
+                const missingCount = missingKeys.length;
+
+                if (missingCount > 0) {
+                    incompleteFiles += 1;
+                    incompleteFileNames.push(file);
+                } else {
+                    completeFiles += 1;
+                }
+            }
+        }
+
+        if (totalFiles > 0) {
+            const completionRate = Math.floor((completeFiles * 100) / totalFiles);
+            const hasLocaleErrors = missingFiles > 0 || incompleteFiles > 0;
+
+            if (!isQuietMode || hasLocaleErrors) {
+                console.log(`🌍 ${lang}: ${completeFiles}/${totalFiles} complete files (${completionRate}%)`);
+            }
+            if (missingFiles > 0) {
+                console.log(`   ❌ ${missingFiles} missing file(s)`);
+                hasErrors = 1;
+            }
+            if (incompleteFiles > 0) {
+                console.log(`   ⚠️  ${incompleteFiles} incomplete file(s): ${incompleteFileNames.join(", ")}`);
+                hasErrors = 1;
+            }
+        }
+    }
+
+    if (!isQuietMode) {
+        console.log("");
+    }
+    if (hasErrors === 1) {
+        console.log("❌ ERROR: Some translations are incomplete or missing.");
+        if (!isQuietMode) {
+            console.log("   Please complete the translation files before continuing.");
+        }
+        process.exitCode = 1;
+    } else {
+        console.log("✅ All translations are complete.");
+    }
+}
+
+async function run() {
+    if (!fs.existsSync(srcDir)) {
+        console.error(`Source locale folder not found: ${srcDir}`);
+        process.exitCode = 1;
+        return;
+    }
+
+    // Detailed check mode (CI/CD format)
+    if (isCheckMode) {
+        await runDetailedCheck();
+        return;
+    }
+
+    // Summary mode when no target locale is provided
+    if (!targetLocale) {
+        const baseDir = baseI18nDir;
+        const locales = listLocaleDirs(baseDir, sourceLocale);
+
+        if (locales.length === 0) {
+            console.log(`No locales found to compare against ${sourceLocale}.`);
+            return;
+        }
+
+        const srcModules = await preloadSourceModules(srcDir);
+
+        const results: Array<{ locale: string; missingKeys: number; missingFiles: number }> = [];
+        for (const locale of locales) {
+            const localeDir = path.join(baseDir, locale);
+            // eslint-disable-next-line no-await-in-loop
+            const { missingKeys, missingFiles } = await computeMissingCountsForLocale(srcModules, srcDir, localeDir);
+            results.push({ locale, missingKeys, missingFiles });
+        }
+
+        // Sort by missing keys desc
+        results.sort((a, b) => b.missingKeys - a.missingKeys);
+
+        if (!isQuietMode) {
+            console.log(`i18n diff summary (source: ${sourceLocale})`);
+        }
+        for (const r of results) {
+            if (isQuietMode && r.missingKeys === 0 && r.missingFiles === 0) {
+                continue;
+            }
+            console.log(
+                `${r.locale}: ${r.missingKeys} missing keys${r.missingFiles ? `, ${r.missingFiles} missing files` : ""}`
+            );
+        }
+        const totalMissing = results.reduce((acc, r) => acc + r.missingKeys, 0);
+        if (totalMissing === 0) console.log("All locales are fully translated. ✅");
+        if (!isQuietMode) {
+            console.log(
+                "\nTip: to view detailed missing keys for one locale, run: npm run i18n:diff -- <language-code>"
+            );
+        }
+        return;
+    }
+
+    if (!fs.existsSync(tgtDir)) {
+        console.error(`Target locale folder not found: ${tgtDir}`);
+        process.exitCode = 1;
+        return;
+    }
+
+    const srcFiles = listFiles(srcDir);
+    const report: string[] = [];
+
+    for (const file of srcFiles) {
+        const srcPath = path.join(srcDir, file);
+        //eslint-disable-next-line no-await-in-loop
+        const src = await loadModule(srcPath);
+        if (file === "index.ts") continue;
+
+        const baseName = path.basename(file);
+        const tgtPath = path.join(tgtDir, baseName);
+
+        // Ensure we're working with a plain object, not a class instance or merged object
+        const srcObj = src && typeof src === "object" && src.constructor === Object ? src : {};
+        const srcKeys = deepKeys(srcObj);
+        let tgtKeys: string[] = [];
+        let tgtExists = false;
+
+        if (fs.existsSync(tgtPath)) {
+            tgtExists = true;
+            //eslint-disable-next-line no-await-in-loop
+            const tgt = await loadModule(tgtPath);
+            // Ensure we're working with a plain object, not a class instance or merged object
+            const tgtObj = tgt && typeof tgt === "object" && tgt.constructor === Object ? tgt : {};
+            tgtKeys = deepKeys(tgtObj);
+        }
+
+        const missing = srcKeys.filter((k) => !tgtKeys.includes(k));
+
+        if (!tgtExists) {
+            report.push(`[MISSING FILE] ${baseName}`);
+        } else if (missing.length) {
+            report.push(`Module ${baseName}:`);
+            for (const k of missing) report.push(`  - ${k}`);
+        }
+    }
+
+    if (report.length === 0) {
+        console.log(`No missing keys between ${sourceLocale} -> ${targetLocale}. ✅`);
+    } else {
+        console.log(`Diff for ${sourceLocale} -> ${targetLocale}`);
+        console.log(report.join("\n"));
+        process.exitCode = 2;
+    }
+}
+
+// eslint-disable-next-line no-void
+void run();

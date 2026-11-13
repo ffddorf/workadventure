@@ -1,0 +1,41 @@
+{
+  "extends": "@tsconfig/svelte/tsconfig.json",
+  "compilerOptions": {
+    "target": "ES2020",
+    "lib": [ "ES2022", "DOM", "DOM.Iterable" ],
+    "module": "esnext",
+    "moduleResolution": "bundler",
+
+    "sourceMap": true,
+    "inlineSources": true,
+    "declaration": false,
+    "outDir": "./dist/public",
+
+    "strict": true,
+    "forceConsistentCasingInFileNames": true,
+    "noImplicitThis": false,
+    "noImplicitReturns": true,
+    "noFallthroughCasesInSwitch": true,
+
+    "strictNullChecks": true,
+    "strictFunctionTypes": true,
+    "strictBindCallApply": true,
+    "strictPropertyInitialization": true,
+
+    // Set `sourceRoot` to  `/` to strip the build path prefix from
+    // generated source code references. This allows Sentry to match source files
+    // relative to your source root folder.
+    "sourceRoot": "/",
+    "paths": {
+      "@wa-icons": ["./src/front/Components/Icons.ts"],
+      "@wa-modals": ["./src/front/Components/Modal/modalManager.ts"]
+    },
+  },
+  "exclude": [
+    "dist",
+    "node_modules",
+    "public/iframe_api.js",
+    "packages/iframe-api-typings",
+    "eslint.config.js",
+  ]
+}

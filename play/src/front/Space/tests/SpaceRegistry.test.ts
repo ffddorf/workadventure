@@ -1,0 +1,460 @@
+import * as Phaser from "phaser";
+globalThis.Phaser = Phaser;
+
+import { describe, expect, it, vi } from "vitest";
+import { Subject } from "rxjs";
+import { get, writable } from "svelte/store";
+import { FilterType } from "@workadventure/messages";
+import { emptySpaceState } from "@workadventure/shared-utils";
+import type { RoomConnectionForSpacesInterface } from "../SpaceRegistry/SpaceRegistry";
+import { SpaceRegistry } from "../SpaceRegistry/SpaceRegistry";
+import type { SpaceInterface } from "../SpaceInterface";
+import { SpaceAlreadyExistError, SpaceDoesNotExistError } from "../Errors/SpaceError";
+import { Space } from "../Space";
+import type { SpaceRegistryInterface } from "../SpaceRegistry/SpaceRegistryInterface";
+import { MockRoomConnectionForSpaces } from "./MockRoomConnectionForSpaces";
+
+vi.mock("../../Phaser/Entity/CharacterLayerManager", () => {
+    return {
+        CharacterLayerManager: {
+            wokaBase64(): Promise<string> {
+                return Promise.resolve("");
+            },
+        },
+    };
+});
+
+vi.mock("../../Phaser/Game/GameManager", () => {
+    return {
+        gameManager: {
+            getCurrentGameScene: () => ({
+                getRemotePlayersRepository: () => ({
+                    getPlayer: vi.fn(),
+                }),
+                roomUrl: "test-room",
+            }),
+        },
+    };
+});
+
+// Mock SimplePeer
+vi.mock("../../WebRtc/SimplePeer", () => ({
+    SimplePeer: vi.fn().mockImplementation(() => ({
+        closeAllConnections: vi.fn(),
+        destroy: vi.fn(),
+    })),
+}));
+
+vi.mock("../../Stores/ScreenSharingStore", () => {
+    const requested = writable(false);
+    return {
+        requestedScreenSharingState: {
+            subscribe: requested.subscribe,
+            enableScreenSharing: () => requested.set(true),
+            disableScreenSharing: () => requested.set(false),
+        },
+        screenSharingLocalStreamStore: writable({ type: "success" }),
+        screenSharingConstraintsStore: writable({ video: false, audio: false }),
+        screenSharingAvailableStore: writable(false),
+        screenSharingLocalVideoBox: writable(undefined),
+        activeScreenShareSourceStore: writable(undefined),
+        screenShareQualityStore: {
+            subscribe: writable("recommended").subscribe,
+            setQuality: vi.fn(),
+        },
+        screenSharingLocalMedia: writable(undefined),
+    };
+});
+
+vi.mock(
+    "../../Enum/EnvironmentVariable.ts",
+    () => import("../../../../tests/front/mocks/frontEnvironmentVariableMock"),
+);
+
+vi.mock("../../Stores/MegaphoneStore", () => {
+    return {
+        liveStreamingEnabledStore: writable(false),
+        requestedMegaphoneStore: writable(false),
+        megaphoneSpaceStore: writable(undefined),
+        megaphoneCanBeUsedStore: writable(false),
+        givenFloorSpaceStore: writable(undefined),
+    };
+});
+
+vi.mock("../../Stores/MenuStore", () => {
+    return {
+        menuIconVisiblilityStore: writable(false),
+        menuVisiblilityStore: writable(false),
+        screenSharingActivatedStore: writable(false),
+        inviteUserActivated: writable(false),
+        mapEditorActivated: writable(false),
+        roomListActivated: writable(false),
+    };
+});
+
+vi.mock("../../WebRtc/MediaManager", () => {
+    return {
+        MediaManager: vi.fn(),
+        mediaManager: {
+            enableMyCamera: vi.fn(),
+            disableMyCamera: vi.fn(),
+            enableMyMicrophone: vi.fn(),
+            disableMyMicrophone: vi.fn(),
+            enableProximityMeeting: vi.fn(),
+            disableProximityMeeting: vi.fn(),
+        },
+    };
+});
+
+vi.mock("../../Connection/ConnectionManager", () => {
+    return {
+        connectionManager: {
+            roomConnectionStream: new Subject(),
+        },
+    };
+});
+
+const defaultRoomConnectionMock: RoomConnectionForSpacesInterface = new MockRoomConnectionForSpaces();
+
+describe("SpaceProviderInterface implementation", () => {
+    describe("SpaceRegistry", () => {
+        describe("SpaceRegistry Add", () => {
+            it("should add a space when ...", async () => {
+                const newSpace: Pick<SpaceInterface, "getName"> = {
+                    getName(): string {
+                        return "space-test";
+                    },
+                };
+
+                const spaceRegistry: SpaceRegistryInterface = new SpaceRegistry(
+                    defaultRoomConnectionMock,
+                    new Subject(),
+                );
+                await spaceRegistry.joinSpace(
+                    newSpace.getName(),
+                    FilterType.ALL_USERS,
+                    [],
+                    new AbortController().signal,
+                );
+                expect(spaceRegistry.get(newSpace.getName())).toBeInstanceOf(Space);
+            });
+            it("should return a error when you try to add a space which already exist", async () => {
+                const newSpace: SpaceInterface = {
+                    getName(): string {
+                        return "space-test";
+                    },
+                } as SpaceInterface;
+
+                const spaceRegistry: SpaceRegistryInterface = new SpaceRegistry(
+                    defaultRoomConnectionMock,
+                    new Subject(),
+                );
+                await spaceRegistry.joinSpace(
+                    newSpace.getName(),
+                    FilterType.ALL_USERS,
+                    [],
+                    new AbortController().signal,
+                );
+                await expect(
+                    spaceRegistry.joinSpace(newSpace.getName(), FilterType.ALL_USERS, [], new AbortController().signal),
+                ).rejects.toThrow(SpaceAlreadyExistError);
+            });
+        });
+        describe("SpaceRegistry exist", () => {
+            it("should return true when space is in store", async () => {
+                const newSpace: SpaceInterface = {
+                    getName(): string {
+                        return "space-test";
+                    },
+                } as SpaceInterface;
+
+                const spaceRegistry: SpaceRegistryInterface = new SpaceRegistry(
+                    defaultRoomConnectionMock,
+                    new Subject(),
+                );
+
+                await spaceRegistry.joinSpace(
+                    newSpace.getName(),
+                    FilterType.ALL_USERS,
+                    [],
+                    new AbortController().signal,
+                );
+
+                const result: boolean = spaceRegistry.exist(newSpace.getName());
+
+                expect(result).toBeTruthy();
+            });
+            it("should return false when space is in store", () => {
+                const newSpace: SpaceInterface = {
+                    getName(): string {
+                        return "space-test";
+                    },
+                } as SpaceInterface;
+                const spaceRegistry: SpaceRegistryInterface = new SpaceRegistry(
+                    defaultRoomConnectionMock,
+                    new Subject(),
+                );
+                const result: boolean = spaceRegistry.exist(newSpace.getName());
+                expect(result).toBeFalsy();
+            });
+        });
+        describe("SpaceRegistry delete", () => {
+            it("should delete a space when space is in the store", async () => {
+                const roomConnectionMock = new MockRoomConnectionForSpaces();
+                const spaceRegistry: SpaceRegistryInterface = new SpaceRegistry(roomConnectionMock, new Subject());
+
+                await spaceRegistry.joinSpace("space-test1", FilterType.ALL_USERS, [], new AbortController().signal);
+                await spaceRegistry.joinSpace("space-test2", FilterType.ALL_USERS, [], new AbortController().signal);
+                const spaceToDelete = await spaceRegistry.joinSpace(
+                    "space-to-delete",
+                    FilterType.ALL_USERS,
+                    [],
+                    new AbortController().signal,
+                );
+
+                await spaceRegistry.leaveSpace(spaceToDelete);
+                expect(spaceRegistry.getAll().find((space) => space.getName() === "space-to-delete")).toBeUndefined();
+                expect(roomConnectionMock.emitLeaveSpace).toHaveBeenCalledOnce();
+            });
+            it("should return a error when you try to delete a space who is not in the space ", async () => {
+                const newSpace: SpaceInterface = {
+                    getName(): string {
+                        return "space-test";
+                    },
+                } as SpaceInterface;
+                const spaceRegistry: SpaceRegistryInterface = new SpaceRegistry(
+                    defaultRoomConnectionMock,
+                    new Subject(),
+                );
+
+                await expect(spaceRegistry.leaveSpace(newSpace)).rejects.toThrow(SpaceDoesNotExistError);
+            });
+        });
+        describe("SpaceRegistry destroy", () => {
+            it("should destroy space store", async () => {
+                const roomConnectionMock = new MockRoomConnectionForSpaces();
+                const spaceRegistry: SpaceRegistryInterface = new SpaceRegistry(roomConnectionMock, new Subject());
+
+                await spaceRegistry.joinSpace("space-test1", FilterType.ALL_USERS, [], new AbortController().signal);
+                await spaceRegistry.joinSpace("space-test2", FilterType.ALL_USERS, [], new AbortController().signal);
+                await spaceRegistry.joinSpace("space-test3", FilterType.ALL_USERS, [], new AbortController().signal);
+
+                await spaceRegistry.destroy();
+                expect(spaceRegistry.getAll()).toHaveLength(0);
+
+                expect(roomConnectionMock.emitLeaveSpace).toHaveBeenCalledTimes(3);
+            });
+        });
+        describe("SpaceRegistry raisedHandSectionsStore", () => {
+            const replaceState = (
+                roomConnectionMock: MockRoomConnectionForSpaces,
+                space: SpaceInterface,
+                state: Partial<ReturnType<typeof emptySpaceState>>,
+            ) =>
+                roomConnectionMock.spaceStatePatchMessageStream.next({
+                    spaceName: space.getName(),
+                    patch: JSON.stringify([{ op: "replace", path: "", value: { ...emptySpaceState(), ...state } }]),
+                });
+
+            it("should keep one section per space with a raised hand, never merging spaces", async () => {
+                const roomConnectionMock = new MockRoomConnectionForSpaces();
+                const spaceRegistry = new SpaceRegistry(roomConnectionMock, new Subject());
+
+                await spaceRegistry.joinSpace("space-quiet", FilterType.ALL_USERS, [], new AbortController().signal);
+                const bubble = await spaceRegistry.joinSpace(
+                    "space-bubble",
+                    FilterType.ALL_USERS,
+                    [],
+                    new AbortController().signal,
+                );
+                const megaphone = await spaceRegistry.joinSpace(
+                    "space-megaphone",
+                    FilterType.LIVE_STREAMING_USERS,
+                    [],
+                    new AbortController().signal,
+                );
+                replaceState(roomConnectionMock, bubble, {
+                    raisedHands: [{ spaceUserId: "user-1", name: "Alice", at: 1 }],
+                });
+                replaceState(roomConnectionMock, megaphone, {
+                    raisedHands: [
+                        { spaceUserId: "user-2", name: "Bob", at: 2 },
+                        { spaceUserId: "user-1", name: "Alice", at: 3 },
+                    ],
+                });
+
+                const sections = get(spaceRegistry.raisedHandSectionsStore);
+                expect(sections.map((section) => section.space.getName())).toEqual(["space-bubble", "space-megaphone"]);
+                expect(sections[0].hands.map((hand) => hand.name)).toEqual(["Alice"]);
+                expect(sections[1].hands.map((hand) => hand.name)).toEqual(["Bob", "Alice"]);
+            });
+
+            it("should say the local user is on air as a host, but not as a guest given the floor", async () => {
+                const roomConnectionMock = new MockRoomConnectionForSpaces();
+                roomConnectionMock.emitJoinSpace.mockResolvedValue("room_me");
+                const spaceRegistry = new SpaceRegistry(roomConnectionMock, new Subject());
+                const megaphone = await spaceRegistry.joinSpace(
+                    "space-megaphone",
+                    FilterType.LIVE_STREAMING_USERS,
+                    [],
+                    new AbortController().signal,
+                );
+                replaceState(roomConnectionMock, megaphone, {
+                    raisedHands: [{ spaceUserId: "user-2", name: "Bob", at: 2 }],
+                });
+                expect(get(spaceRegistry.raisedHandSectionsStore)[0].onAirHere).toBe(false);
+
+                megaphone.startStreaming();
+                expect(get(spaceRegistry.raisedHandSectionsStore)[0].onAirHere).toBe(true);
+
+                replaceState(roomConnectionMock, megaphone, {
+                    raisedHands: [{ spaceUserId: "user-2", name: "Bob", at: 2 }],
+                    floorHolders: [{ spaceUserId: megaphone.mySpaceUserId, name: "Me" }],
+                });
+                expect(get(spaceRegistry.raisedHandSectionsStore)[0].onAirHere).toBe(false);
+            });
+        });
+        describe("SpaceRegistry shouldPublishScreenShareStore", () => {
+            const megaphoneFields = ["cameraState", "microphoneState", "screenSharingState", "megaphoneState"];
+
+            it("should be true in a bubble and for a speaker, never for an audience", async () => {
+                const spaceRegistry = new SpaceRegistry(new MockRoomConnectionForSpaces(), new Subject());
+                const roomMegaphone = await spaceRegistry.joinSpace(
+                    "room-megaphone",
+                    FilterType.LIVE_STREAMING_USERS,
+                    megaphoneFields,
+                    new AbortController().signal,
+                );
+                expect(get(spaceRegistry.shouldPublishScreenShareStore)).toBe(false);
+
+                // The speaker sees this audience, which streams its camera: still not its screen.
+                const speakerZone = await spaceRegistry.joinSpace(
+                    "speaker-zone",
+                    FilterType.LIVE_STREAMING_USERS_WITH_FEEDBACK,
+                    [...megaphoneFields, "attendeesState"],
+                    new AbortController().signal,
+                );
+                speakerZone.startListenerStreaming();
+                expect(get(spaceRegistry.isLiveStreamingStore)).toBe(true);
+                expect(get(spaceRegistry.isLiveStreamingAudioStore)).toBe(false);
+                expect(get(spaceRegistry.shouldPublishScreenShareStore)).toBe(false);
+
+                speakerZone.startStreaming();
+                expect(get(spaceRegistry.isLiveStreamingAudioStore)).toBe(true);
+                expect(get(spaceRegistry.shouldPublishScreenShareStore)).toBe(true);
+                speakerZone.stopStreaming();
+                expect(get(spaceRegistry.isLiveStreamingAudioStore)).toBe(false);
+                expect(get(spaceRegistry.shouldPublishScreenShareStore)).toBe(false);
+
+                roomMegaphone.startStreaming();
+                expect(get(spaceRegistry.shouldPublishScreenShareStore)).toBe(true);
+                roomMegaphone.stopStreaming();
+                expect(get(spaceRegistry.shouldPublishScreenShareStore)).toBe(false);
+
+                const bubble = await spaceRegistry.joinSpace(
+                    "bubble",
+                    FilterType.ALL_USERS,
+                    ["cameraState", "microphoneState", "screenSharingState"],
+                    new AbortController().signal,
+                );
+                expect(get(spaceRegistry.isLiveStreamingStore)).toBe(true);
+                expect(get(spaceRegistry.isLiveStreamingAudioStore)).toBe(true);
+                expect(get(spaceRegistry.shouldPublishScreenShareStore)).toBe(true);
+
+                await spaceRegistry.leaveSpace(bubble);
+                await spaceRegistry.leaveSpace(speakerZone);
+                await spaceRegistry.leaveSpace(roomMegaphone);
+                expect(get(spaceRegistry.isLiveStreamingAudioStore)).toBe(false);
+            });
+        });
+        describe("SpaceRegistry race condition handling", () => {
+            it("should handle race condition when leaving and joining the same space immediately", async () => {
+                const roomConnectionMock = new MockRoomConnectionForSpaces();
+                const spaceRegistry: SpaceRegistryInterface = new SpaceRegistry(roomConnectionMock, new Subject());
+
+                // Join a space first
+                const initialSpace = await spaceRegistry.joinSpace(
+                    "race-condition-test",
+                    FilterType.ALL_USERS,
+                    [],
+                    new AbortController().signal,
+                );
+                expect(spaceRegistry.exist("race-condition-test")).toBeTruthy();
+
+                // Add a delay to emitLeaveSpace to simulate async operation
+                let leaveSpaceResolve: () => void;
+                const leaveSpacePromise = new Promise<void>((resolve) => {
+                    leaveSpaceResolve = resolve;
+                });
+                roomConnectionMock.emitLeaveSpace.mockImplementation(() => {
+                    return leaveSpacePromise;
+                });
+
+                // Start leaving the space (this will be async)
+                const leavePromise = spaceRegistry.leaveSpace(initialSpace);
+
+                // Immediately try to join the same space again
+                // This should wait for the leave operation to complete
+                const rejoinPromise = spaceRegistry.joinSpace(
+                    "race-condition-test",
+                    FilterType.ALL_USERS,
+                    [],
+                    new AbortController().signal,
+                );
+
+                // Complete the leave operation
+                leaveSpaceResolve!();
+                await leavePromise;
+
+                // The rejoin should succeed without throwing an error
+                const newSpace = await rejoinPromise;
+                expect(newSpace.getName()).toBe("race-condition-test");
+                expect(spaceRegistry.exist("race-condition-test")).toBeTruthy();
+                expect(roomConnectionMock.emitLeaveSpace).toHaveBeenCalledOnce();
+                expect(roomConnectionMock.emitJoinSpace).toHaveBeenCalledTimes(2);
+            });
+
+            it("should coalesce concurrent joins of the same space instead of throwing SpaceAlreadyExistError", async () => {
+                const roomConnectionMock = new MockRoomConnectionForSpaces();
+                const spaceRegistry: SpaceRegistryInterface = new SpaceRegistry(roomConnectionMock, new Subject());
+
+                // Delay emitJoinSpace so the server round-trip is still in flight when the second
+                // join starts. This is the window where the old "exist() then create" logic would
+                // let both joins pass the existence check.
+                let resolveJoin: (spaceUserId: string) => void;
+                const joinAnswerPromise = new Promise<string>((resolve) => {
+                    resolveJoin = resolve;
+                });
+                roomConnectionMock.emitJoinSpace.mockImplementation(() => joinAnswerPromise);
+
+                const firstJoin = spaceRegistry.joinSpace(
+                    "concurrent-join-test",
+                    FilterType.ALL_USERS,
+                    [],
+                    new AbortController().signal,
+                );
+                const secondJoin = spaceRegistry.joinSpace(
+                    "concurrent-join-test",
+                    FilterType.ALL_USERS,
+                    [],
+                    new AbortController().signal,
+                );
+
+                // Let the in-flight server answer arrive.
+                resolveJoin!("space-user-id");
+
+                const [firstSpace, secondSpace] = await Promise.all([firstJoin, secondJoin]);
+
+                // Both callers get the same instance, no error is thrown, and only one space is
+                // registered (no leak / overwrite).
+                expect(firstSpace).toBe(secondSpace);
+                expect(firstSpace.getName()).toBe("concurrent-join-test");
+                expect(
+                    spaceRegistry.getAll().filter((space) => space.getName() === "concurrent-join-test"),
+                ).toHaveLength(1);
+                // The second join reused the in-flight creation, so the server was only contacted once.
+                expect(roomConnectionMock.emitJoinSpace).toHaveBeenCalledOnce();
+            });
+        });
+    });
+});

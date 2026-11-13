@@ -1,0 +1,819 @@
+import fs from "fs";
+import { v4 } from "uuid";
+import type { MeResponse } from "@workadventure/messages";
+import { MeRequest } from "@workadventure/messages";
+import { z } from "zod";
+import { errors } from "jose";
+import Mustache from "mustache";
+import type { Application } from "express";
+import Debug from "debug";
+import type { AuthTokenData } from "../services/JWTTokenManager";
+import { jwtTokenManager } from "../services/JWTTokenManager";
+import { openIDClient } from "../services/OpenIDClient";
+import { ADMIN_URL, DISABLE_ANONYMOUS, FRONT_URL, MATRIX_PUBLIC_URI, PUSHER_URL } from "../enums/EnvironmentVariable";
+import { adminService } from "../services/AdminService";
+import { desktopAuthService } from "../services/DesktopAuthService";
+import { desktopOidcTransactionService } from "../services/DesktopOidcTransactionService";
+import { validateQuery } from "../services/QueryValidator";
+import { VerifyDomainService } from "../services/verifyDomain/VerifyDomainService";
+import { matrixProvider } from "../services/MatrixProvider";
+import { getClientIpFromXForwardedFor } from "../services/ClientIp";
+import { BaseHttpController } from "./BaseHttpController";
+import { normalizeDesktopCallbackUrl } from "./DesktopCallbackUrl";
+
+const debug = Debug("pusher:requests");
+
+const OIDC_COOKIE_OPTIONS = {
+    httpOnly: true,
+    path: "/",
+    sameSite: "lax" as const,
+    maxAge: 10 * 60 * 1000,
+};
+
+export class AuthenticateController extends BaseHttpController {
+    private readonly redirectToMatrixFile: string;
+    private readonly redirectToPlayFile: string;
+    constructor(app: Application) {
+        super(app);
+
+        let redirectToMatrixPath: string;
+        if (fs.existsSync("dist/public/redirectToMatrix.html")) {
+            // In prod mode
+            redirectToMatrixPath = "dist/public/redirectToMatrix.html";
+        } else if (fs.existsSync("redirectToMatrix.html")) {
+            // In dev mode
+            redirectToMatrixPath = "redirectToMatrix.html";
+        } else {
+            throw new Error("Could not find redirectToMatrix.html file");
+        }
+
+        this.redirectToMatrixFile = fs.readFileSync(redirectToMatrixPath, "utf8");
+
+        // Pre-parse the file for speed (and validation)
+        Mustache.parse(this.redirectToMatrixFile);
+
+        let redirectToPlayPath: string;
+        if (fs.existsSync("dist/public/redirectToPlay.html")) {
+            // In prod mode
+            redirectToPlayPath = "dist/public/redirectToPlay.html";
+        } else if (fs.existsSync("redirectToPlay.html")) {
+            // In dev mode
+            redirectToPlayPath = "redirectToPlay.html";
+        } else {
+            throw new Error("Could not find redirectToPlay.html file");
+        }
+
+        this.redirectToPlayFile = fs.readFileSync(redirectToPlayPath, "utf8");
+
+        // Pre-parse the file for speed (and validation)
+        Mustache.parse(this.redirectToPlayFile);
+    }
+
+    routes(): void {
+        this.openIDLogin();
+        this.desktopAuthExchange();
+        this.me();
+        this.openIDCallback();
+        this.matrixCallback();
+        this.logoutCallback();
+        this.anonymLogin();
+        this.profileCallback();
+        this.logoutUser();
+    }
+
+    private openIDLogin(): void {
+        /**
+         * @openapi
+         * /login-screen:
+         *   get:
+         *     description: Redirects the user to the OpenID login screen
+         *     parameters:
+         *      - name: "nonce"
+         *        in: "query"
+         *        description: "todo"
+         *        required: true
+         *        type: "string"
+         *      - name: "state"
+         *        in: "query"
+         *        description: "todo"
+         *        required: true
+         *        type: "string"
+         *      - name: "playUri"
+         *        in: "query"
+         *        description: "todo"
+         *        required: false
+         *        type: "string"
+         *     responses:
+         *       302:
+         *         description: Redirects the user to the OpenID login screen
+         *
+         */
+
+        this.app.get("/login-screen", async (req, res) => {
+            debug(`AuthenticateController => [${req.method}] ${req.originalUrl} — IP: ${req.ip} — Time: ${Date.now()}`);
+            const query = validateQuery(
+                req,
+                res,
+                z.object({
+                    playUri: z.string(),
+                    manuallyTriggered: z.literal("true").optional(),
+                    chatRoomId: z.string().optional(),
+                    providerId: z.string().optional(),
+                    providerScopes: z.string().array().optional(), // Optional scopes to request
+                    // The email the user already typed (desktop app), so the login page does not ask again.
+                    login_hint: z.string().max(320).optional(),
+                    desktop: z.literal("true").optional(),
+                    desktopCallbackUrl: z.string().optional(),
+                }),
+            );
+            if (query === undefined) {
+                return;
+            }
+
+            // Let's validate the playUri (we don't want a hacker to forge a URL that will redirect to a malicious URL)
+            const verifyDomainService_ = VerifyDomainService.get(await adminService.getCapabilities());
+            const verifyDomainResult = await verifyDomainService_.verifyDomain(query.playUri);
+            if (!verifyDomainResult) {
+                res.status(403);
+                res.send("Unauthorized domain in playUri");
+                return;
+            }
+
+            // The desktop code only ever goes back through the app's loopback server, which checks
+            // its own secret + state: without a valid loopback URL there is nowhere safe to send it.
+            const desktopCallbackUrl =
+                query.desktop === "true" ? normalizeDesktopCallbackUrl(query.desktopCallbackUrl) : undefined;
+            if (query.desktop === "true" && !desktopCallbackUrl) {
+                res.status(400).send("Invalid desktopCallbackUrl");
+                return;
+            }
+
+            const authorization = await openIDClient.authorizationUrl(
+                res,
+                query.playUri,
+                req,
+                query.manuallyTriggered,
+                query.chatRoomId,
+                query.providerId,
+                query.providerScopes,
+                query.login_hint,
+            );
+            res.cookie("playUri", query.playUri, {
+                ...OIDC_COOKIE_OPTIONS,
+                secure: req.secure,
+            });
+            if (desktopCallbackUrl) {
+                res.cookie("desktopAuth", "true", {
+                    ...OIDC_COOKIE_OPTIONS,
+                    secure: req.secure,
+                });
+                await desktopOidcTransactionService.createDesktopOidcTransaction(authorization.state, {
+                    playUri: query.playUri,
+                    codeVerifier: authorization.codeVerifier,
+                    callbackUrl: desktopCallbackUrl,
+                });
+                debug(
+                    `Desktop OIDC transaction created for state ${authorization.state.substring(0, 8)}... and playUri ${
+                        query.playUri
+                    } with callback ${desktopCallbackUrl}`,
+                );
+            } else {
+                res.clearCookie("desktopAuth", { path: "/" });
+            }
+
+            res.redirect(authorization.loginUri);
+            return;
+        });
+    }
+
+    private desktopAuthExchange(): void {
+        this.app.post("/desktop-auth/exchange", async (req, res) => {
+            debug(`AuthenticateController => [${req.method}] ${req.originalUrl} — IP: ${req.ip} — Time: ${Date.now()}`);
+            res.setHeader("Cache-Control", "no-store");
+
+            const body = z
+                .object({
+                    code: z.string().min(1),
+                })
+                .safeParse(req.body);
+
+            if (!body.success) {
+                res.status(400).json(body.error.flatten());
+                return;
+            }
+
+            const payload = await desktopAuthService.exchangeDesktopAuthCode(body.data.code);
+            if (!payload) {
+                debug(`Desktop auth exchange failed for code ${body.data.code.substring(0, 8)}...`);
+                res.status(410).json({
+                    error: "desktop_auth_code_expired_or_consumed",
+                });
+                return;
+            }
+
+            debug(`Desktop auth exchange succeeded for code ${body.data.code.substring(0, 8)}...`);
+            res.json(payload);
+            return;
+        });
+    }
+
+    private me(): void {
+        /**
+         * @openapi
+         * /me:
+         *   get:
+         *     description: TODO
+         *     parameters:
+         *      - name: "code"
+         *        in: "query"
+         *        description: "todo"
+         *        required: false
+         *        type: "string"
+         *      - name: "nonce"
+         *        in: "query"
+         *        description: "todo"
+         *        required: false
+         *        type: "string"
+         *      - name: "token"
+         *        in: "query"
+         *        description: "todo"
+         *        required: false
+         *        type: "string"
+         *      - name: "playUri"
+         *        in: "query"
+         *        description: "todo"
+         *        required: true
+         *        type: "string"
+         *     responses:
+         *       200:
+         *         description: Response to the /me endpoint
+         *         schema:
+         *           $ref: '#/definitions/MeResponse'
+         *       401:
+         *         description: Thrown when the token is invalid
+         */
+
+        this.app.get("/me", async (req, res) => {
+            const IPAddress = getClientIpFromXForwardedFor(req.header("x-forwarded-for"));
+            debug(
+                `AuthenticateController => [${req.method}] ${req.originalUrl} — IP: ${IPAddress} — Time: ${Date.now()}`,
+            );
+            const query = validateQuery(req, res, MeRequest);
+            if (query === undefined) {
+                return;
+            }
+            const { token, playUri, localStorageCompanionTextureId, chatID } = query;
+            let localStorageCharacterTextureIds = query["localStorageCharacterTextureIds[]"];
+            if (typeof localStorageCharacterTextureIds === "string") {
+                localStorageCharacterTextureIds = [localStorageCharacterTextureIds];
+            }
+            try {
+                const authTokenData: AuthTokenData = await jwtTokenManager.verifyJWTToken(token, false);
+
+                // Check the OpenID access token (renewing it if expired) before calling the admin, which uses it to
+                // identify the member
+                const checkResult =
+                    authTokenData.accessToken === undefined
+                        ? undefined
+                        : await openIDClient
+                              .checkTokenAuthWithRefresh(authTokenData.accessToken, authTokenData.encryptedRefreshToken)
+                              .catch((err) => {
+                                  console.warn("Error while checking token auth", err);
+                                  throw new errors.JWTInvalid("Invalid token");
+                              });
+                // A renewal stands for a new login: use the current claims so that removed tags are not carried over
+                const { username, locale, tags } = checkResult?.refreshed ? checkResult.claims : authTokenData;
+
+                //Get user data from Admin Back Office
+                //This is very important to create User Local in LocalStorage in WorkAdventure
+                const resUserData = await adminService.fetchMemberDataByUuid(
+                    authTokenData.identifier,
+                    checkResult?.accessToken,
+                    playUri,
+                    IPAddress,
+                    localStorageCharacterTextureIds ?? [],
+                    localStorageCompanionTextureId,
+                    req.header("accept-language"),
+                    tags,
+                    chatID,
+                );
+
+                if (resUserData.status === "error") {
+                    res.json(resUserData);
+                    return;
+                }
+
+                if (checkResult === undefined) {
+                    //if not nonce and code, anonymous user connected
+                    //get data with identifier and return token
+                    res.json({
+                        authToken: token,
+                        username,
+                        locale,
+                        // TODO: replace ... with each property
+                        ...resUserData,
+                        matrixUserId: authTokenData?.matrixUserId,
+                        matrixServerUrl: MATRIX_PUBLIC_URI,
+                    } satisfies MeResponse);
+                    return;
+                }
+
+                const authToken = checkResult.refreshed
+                    ? await jwtTokenManager.createAuthToken(
+                          authTokenData.identifier,
+                          checkResult.accessToken,
+                          username,
+                          locale,
+                          tags,
+                          authTokenData.matrixUserId,
+                          checkResult.encryptedRefreshToken,
+                      )
+                    : token;
+
+                res.json({
+                    username,
+                    authToken,
+                    locale,
+                    matrixUserId: authTokenData?.matrixUserId,
+                    matrixServerUrl: (checkResult.userInfo.matrix_url as string | undefined) ?? MATRIX_PUBLIC_URI,
+                    // TODO: replace ... with each property
+                    ...resUserData,
+                    ...checkResult.userInfo,
+                } satisfies MeResponse);
+                return;
+            } catch (err) {
+                if (err instanceof errors.JWTInvalid || err instanceof errors.JWTExpired) {
+                    res.status(401);
+                    res.send("Invalid token");
+                    return;
+                }
+
+                /*if (isAxiosError(err)) {
+                    const errorType = ErrorApiData.safeParse(err?.response?.data);
+                    if (errorType.success) {
+                        const status = err?.response?.status ?? 500;
+                        res.atomic(() => {
+                            res.sendStatus(status);
+                            res.json(errorType.data);
+                        });
+                        return;
+                    }
+                }*/
+                throw err;
+            }
+        });
+    }
+
+    private openIDCallback(): void {
+        /**
+         * @openapi
+         * /openid-callback:
+         *   get:
+         *     description: This endpoint is meant to be called by the OpenID provider after the OpenID provider handles a login attempt. The OpenID provider redirects the browser to this endpoint.
+         *     parameters:
+         *      - name: "code"
+         *        in: "query"
+         *        description: "A unique code to be exchanged for an authentication token"
+         *        required: false
+         *        type: "string"
+         *      - name: "nonce"
+         *        in: "query"
+         *        description: "todo"
+         *        required: false
+         *        type: "string"
+         *     responses:
+         *       302:
+         *         description: Redirects to play once authentication is done, unless we use an AdminAPI (in this case, we redirect to the AdminAPI with same parameters)
+         */
+
+        this.app.get("/openid-callback", async (req, res) => {
+            debug(`AuthenticateController => [${req.method}] ${req.originalUrl} — IP: ${req.ip} — Time: ${Date.now()}`);
+            const callbackState = typeof req.query.state === "string" ? req.query.state : undefined;
+            const desktopTransaction =
+                await desktopOidcTransactionService.exchangeDesktopOidcTransaction(callbackState);
+            debug(
+                `OpenID callback received state ${callbackState?.substring(0, 8) ?? "missing"}... desktop transaction: ${
+                    desktopTransaction ? "found" : "not found"
+                }`,
+            );
+
+            // The transaction is looked up by the `state` of the URL, which anyone can replay: it must
+            // also match the `oidc_state` cookie set on /login-screen, so the callback completes only in
+            // the browser that started this login (otherwise an attacker's IdP callback URL, opened by
+            // a victim, would log the victim's desktop app into the attacker's account).
+            if (desktopTransaction && req.cookies.oidc_state !== callbackState) {
+                debug("Desktop OIDC callback rejected: state does not match the oidc_state cookie");
+                res.status(400).type("html").send(this.getOpenIdCallbackErrorHtml());
+                return;
+            }
+
+            const playUri = desktopTransaction?.playUri ?? req.cookies.playUri;
+            if (!playUri) {
+                res.status(400).type("html").send(this.getOpenIdCallbackErrorHtml());
+                return;
+            }
+
+            let userInfo = null;
+            try {
+                userInfo = await openIDClient.getUserInfo(
+                    req,
+                    res,
+                    playUri,
+                    desktopTransaction && callbackState
+                        ? {
+                              state: callbackState,
+                              codeVerifier: desktopTransaction.codeVerifier,
+                          }
+                        : undefined,
+                );
+            } catch (err) {
+                //if no access on openid provider, return error
+                console.error("An error occurred while connecting to OpenID Provider => ", err);
+                res.status(500);
+                res.send("An error occurred while connecting to OpenID Provider");
+                return;
+            }
+            const email = userInfo.email || userInfo.sub;
+            if (!email) {
+                throw new Error("No email in the response");
+            }
+            const authToken = await jwtTokenManager.createAuthToken(
+                email,
+                userInfo?.access_token,
+                userInfo?.username,
+                userInfo?.locale,
+                userInfo?.tags,
+                email ? matrixProvider.getBareMatrixIdFromEmail(email) : undefined,
+                userInfo?.encrypted_refresh_token,
+            );
+
+            const matrixPublicUri = userInfo.matrix_url ?? MATRIX_PUBLIC_URI;
+            if (desktopTransaction || req.cookies.desktopAuth === "true") {
+                const desktopCallbackUrl = normalizeDesktopCallbackUrl(desktopTransaction?.callbackUrl);
+                if (!desktopCallbackUrl) {
+                    // No transaction (expired, other pusher) or no loopback: never hand the code to a
+                    // `workadventure://` deep link, which the app cannot tie to a login it started.
+                    res.clearCookie("desktopAuth", { path: "/" });
+                    res.status(400).type("html").send(this.getOpenIdCallbackErrorHtml());
+                    return;
+                }
+                const code = await desktopAuthService.createDesktopAuthCode({
+                    token: authToken,
+                    targetUrl: playUri,
+                });
+
+                // If Matrix is configured, run the same Synapse SSO round-trip the browser does, but
+                // carry the desktop loopback context (callback URL + WA auth code) across it via
+                // cookies so /matrix-callback can hand the resulting matrixLoginToken back to the app
+                // through the loopback. Without this the desktop flow returns with only the WA token
+                // and Matrix chat has no login token to initialise with.
+                if (matrixPublicUri) {
+                    res.cookie("desktopAuth", "true", { ...OIDC_COOKIE_OPTIONS, secure: req.secure });
+                    res.cookie("desktopCallbackUrl", desktopCallbackUrl, {
+                        ...OIDC_COOKIE_OPTIONS,
+                        secure: req.secure,
+                    });
+                    res.cookie("desktopAuthCode", code, { ...OIDC_COOKIE_OPTIONS, secure: req.secure });
+
+                    const matrixCallbackUrl = new URL("/matrix-callback", PUSHER_URL).toString();
+                    let redirectPath = "/_matrix/client/v3/login/sso/redirect";
+                    if (userInfo.matrix_identity_provider) {
+                        redirectPath += "/" + userInfo.matrix_identity_provider;
+                    }
+                    const matrixRedirectUrl = new URL(redirectPath, matrixPublicUri);
+                    matrixRedirectUrl.searchParams.append("redirectUrl", matrixCallbackUrl);
+
+                    const html = Mustache.render(this.redirectToMatrixFile, {
+                        authToken,
+                        matrixRedirectUrl: matrixRedirectUrl.toString(),
+                    });
+                    res.type("html").send(html);
+                    return;
+                }
+
+                // No Matrix: finish the desktop login straight away.
+                res.clearCookie("playUri", { path: "/" });
+                res.clearCookie("desktopAuth", { path: "/" });
+                const callbackUrl = new URL(desktopCallbackUrl);
+                callbackUrl.searchParams.set("origin", new URL(PUSHER_URL).origin);
+                callbackUrl.searchParams.set("code", code);
+                debug(
+                    `Desktop OIDC callback redirecting to the loopback for state ${
+                        callbackState?.substring(0, 8) ?? "missing"
+                    }...`,
+                );
+
+                res.redirect(callbackUrl.toString());
+                return;
+            }
+
+            // If Matrix is configured, we need to get an access token for the Synapse server
+            if (matrixPublicUri) {
+                // TODO: check Matrix server login parameters to be sure we can connect
+
+                const matrixCallbackUrl = new URL("/matrix-callback", PUSHER_URL).toString();
+                let redirectPath = "/_matrix/client/v3/login/sso/redirect";
+                if (userInfo.matrix_identity_provider) {
+                    redirectPath += "/" + userInfo.matrix_identity_provider;
+                }
+                const matrixRedirectUrl = new URL(redirectPath, matrixPublicUri);
+                matrixRedirectUrl.searchParams.append("redirectUrl", matrixCallbackUrl);
+
+                // Note: the authToken cannot be saved in a cookie because sometimes, it can be pretty large (>4kB)
+                // Therefore, we use localStorage to store it. So we need to render an HTML page with a script that will
+                // save the token in localStorage
+                const html = Mustache.render(this.redirectToMatrixFile, {
+                    authToken,
+                    matrixRedirectUrl: matrixRedirectUrl.toString(),
+                });
+
+                res.type("html").send(html);
+
+                return;
+            }
+
+            res.clearCookie("playUri", { path: "/" });
+            res.clearCookie("desktopAuth", { path: "/" });
+            // FIXME: possibly redirect to Admin instead.
+            res.redirect(playUri + "?token=" + encodeURIComponent(authToken));
+            return;
+        });
+    }
+
+    private getOpenIdCallbackErrorHtml(): string {
+        return `<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <title>WorkAdventure sign-in</title>
+</head>
+<body>
+    <h1>Sign-in failed</h1>
+    <p>The sign-in session has expired or could not be found. Start signing in again from WorkAdventure.</p>
+</body>
+</html>`;
+    }
+
+    private matrixCallback(): void {
+        /**
+         * @openapi
+         * /matrix-callback:
+         *   get:
+         *     description: This endpoint is meant to be called by the Matrix server (Synapse) after the OpenID provider connected to Synapse handles a login attempt. Synapse redirects the browser to this endpoint.
+         *     parameters:
+         *      - name: "loginToken"
+         *        in: "query"
+         *        description: "A unique token that can be exchanged for a Matrix authentication token"
+         *        required: true
+         *        type: "string"
+         *     responses:
+         *       302:
+         *         description: Redirects to play once authentication is done.
+         */
+        this.app.get("/matrix-callback", (req, res) => {
+            debug(`AuthenticateController => [${req.method}] ${req.originalUrl} — IP: ${req.ip} — Time: ${Date.now()}`);
+
+            const query = validateQuery(
+                req,
+                res,
+                z.object({ loginToken: z.string(), chatRoomId: z.string().optional() }),
+            );
+            if (query === undefined) {
+                return;
+            }
+
+            // Desktop: hand the Matrix login token back to the app via the loopback callback (together
+            // with the WA auth code carried from /openid-callback), instead of loading the play page in
+            // the throwaway auth window. The front then consumes matrixLoginToken from the room URL.
+            const desktopCallbackUrl = normalizeDesktopCallbackUrl(req.cookies.desktopCallbackUrl);
+            const desktopAuthCode =
+                typeof req.cookies.desktopAuthCode === "string" ? req.cookies.desktopAuthCode : undefined;
+            if (req.cookies.desktopAuth === "true" && desktopCallbackUrl && desktopAuthCode) {
+                res.clearCookie("playUri", { path: "/" });
+                res.clearCookie("desktopAuth", { path: "/" });
+                res.clearCookie("desktopCallbackUrl", { path: "/" });
+                res.clearCookie("desktopAuthCode", { path: "/" });
+
+                const callbackUrl = new URL(desktopCallbackUrl);
+                callbackUrl.searchParams.set("origin", new URL(PUSHER_URL).origin);
+                callbackUrl.searchParams.set("code", desktopAuthCode);
+                callbackUrl.searchParams.set("matrixLoginToken", query.loginToken);
+                res.redirect(callbackUrl.toString());
+                return;
+            }
+
+            const playUri = req.cookies.playUri;
+            if (!playUri) {
+                throw new Error("Missing playUri in cookies");
+            }
+
+            res.clearCookie("playUri");
+            res.clearCookie("authToken");
+            const playUriUrl = new URL(req.cookies.playUri);
+            playUriUrl.searchParams.append("matrixLoginToken", query.loginToken);
+
+            if (query.chatRoomId) {
+                playUriUrl.searchParams.append("chatRoomId", query.chatRoomId);
+            }
+
+            const html = Mustache.render(this.redirectToPlayFile, {
+                playUri: playUriUrl.toString(),
+            });
+            res.type("html").send(html);
+            return;
+        });
+    }
+
+    /**
+     * @openapi
+     * /anonymLogin:
+     *   post:
+     *     description: Generates an "anonymous" JWT token allowing to connect to WorkAdventure anonymously.
+     *     responses:
+     *       200:
+     *         description: The details of the logged user
+     *         content:
+     *           application/json:
+     *             schema:
+     *               type: object
+     *               properties:
+     *                 authToken:
+     *                   type: string
+     *                   description: A unique identification JWT token
+     *                 userUuid:
+     *                   type: string
+     *                   description: Unique user ID
+     *       403:
+     *         description: Anonymous login is disabled at the configuration level (environment variable DISABLE_ANONYMOUS = true)
+     */
+    private anonymLogin(): void {
+        this.app.post("/anonymLogin", async (req, res) => {
+            debug(`AuthenticateController => [${req.method}] ${req.originalUrl} — IP: ${req.ip} — Time: ${Date.now()}`);
+            // We refuse the anonymous login if the anonymous mode is disabled AND that the default woka name is not set
+            if (DISABLE_ANONYMOUS) {
+                res.status(403).send("");
+                return;
+            } else {
+                const userUuid = v4();
+                const authToken = await jwtTokenManager.createAuthToken(userUuid);
+                res.json({
+                    authToken,
+                    userUuid,
+                });
+                return;
+            }
+        });
+    }
+
+    /**
+     * @openapi
+     * /profile-callback:
+     *   get:
+     *     description: ???
+     *     parameters:
+     *      - name: "token"
+     *        in: "query"
+     *        description: "A JWT authentication token ???"
+     *        required: true
+     *        type: "string"
+     *      - name: "playUri"
+     *        in: "query"
+     *        description: "Room URL of the current virtual place"
+     *        required: true
+     *        type: "string"
+     *     responses:
+     *       302:
+     *         description: Redirects the user to the profile screen of the admin
+     */
+    private profileCallback(): void {
+        this.app.get("/profile-callback", async (req, res) => {
+            debug(`AuthenticateController => [${req.method}] ${req.originalUrl} — IP: ${req.ip} — Time: ${Date.now()}`);
+            const query = validateQuery(
+                req,
+                res,
+                z.object({
+                    token: z.string(),
+                    playUri: z.string(),
+                }),
+            );
+            if (query === undefined) {
+                return;
+            }
+            const { token, playUri } = query;
+            const authTokenData: AuthTokenData = await jwtTokenManager.verifyJWTToken(token, false);
+            if (authTokenData.accessToken == undefined) {
+                throw Error("Token cannot be checked on OpenID connect provider");
+            }
+            await openIDClient.checkTokenAuth(authTokenData.accessToken);
+
+            const accessToken = authTokenData.accessToken;
+            //get login profile
+            res.status(302);
+            res.setHeader("Location", adminService.getProfileUrl(accessToken, playUri));
+            res.send("");
+            return;
+        });
+    }
+
+    private logoutCallback(): void {
+        /**
+         * @openapi
+         * /logout-callback:
+         *   get:
+         *     description: TODO
+         *     parameters:
+         *      - name: "token"
+         *        in: "query"
+         *        description: "todo"
+         *        required: false
+         *        type: "string"
+         *     responses:
+         *       200:
+         *         description: TODO
+         *
+         */
+        this.app.get("/logout-callback", (req, res) => {
+            debug(`AuthenticateController => [${req.method}] ${req.originalUrl} — IP: ${req.ip} — Time: ${Date.now()}`);
+            // if no playUri, redirect to front
+            if (!req.cookies.playUri) {
+                res.redirect(FRONT_URL);
+                return;
+            }
+
+            // when user logout, redirect to playUri saved in cookie
+            const logOutAdminUrl = new URL(req.cookies.playUri);
+            res.clearCookie("playUri");
+            res.redirect(logOutAdminUrl.toString());
+            return;
+        });
+    }
+
+    private logoutUser(): void {
+        /**
+         * @openapi
+         * /logout:
+         *   get:
+         *     description: TODO
+         *     responses:
+         *       302:
+         *         description: Redirects the user to the OpenID logout screen
+         */
+        this.app.get("/logout", async (req, res) => {
+            debug(`AuthenticateController => [${req.method}] ${req.originalUrl} — IP: ${req.ip} — Time: ${Date.now()}`);
+            const query = validateQuery(
+                req,
+                res,
+                z.object({
+                    playUri: z.string(),
+                    token: z.string(),
+                    redirect: z.string().optional(),
+                    desktop: z.literal("true").optional(),
+                    desktopCallbackUrl: z.string().optional(),
+                }),
+            );
+            if (query === undefined) {
+                return;
+            }
+
+            const verifyDomainService_ = VerifyDomainService.get(await adminService.getCapabilities());
+            const verifyDomainResult = await verifyDomainService_.verifyDomain(query.playUri);
+            if (!verifyDomainResult) {
+                res.status(403);
+                res.send("Unauthorized domain in playUri");
+                return;
+            }
+
+            const authTokenData: AuthTokenData = await jwtTokenManager.verifyJWTToken(query.token, false);
+            if (authTokenData.accessToken == undefined) {
+                throw Error("Cannot log out, no access token found.");
+            }
+            // TODO: change that to use end session endpoint
+            // Use post logout redirect and id token hint to redirect on the logut session endpoint of the OpenId provider
+            // https://openid.net/specs/openid-connect-session-1_0.html#RPLogout
+            await openIDClient.logoutUser(authTokenData.accessToken, authTokenData.encryptedRefreshToken);
+
+            if (query.desktop === "true") {
+                const desktopCallbackUrl = normalizeDesktopCallbackUrl(query.desktopCallbackUrl);
+                const callbackUrl = new URL(desktopCallbackUrl || "workadventure://join");
+                callbackUrl.searchParams.set("url", ADMIN_URL || FRONT_URL || query.playUri);
+                res.redirect(callbackUrl.toString());
+                return;
+            }
+
+            // if no redirect, redirect to playUri and connect user to the world
+            // if the world is with authentication mandatory, the user will be redirected to the login screen
+            // if the world is anonymous or with authentication optional, the user will be connected to the world
+            if (!query.redirect) {
+                res.redirect(query.playUri);
+                return;
+            }
+
+            // save the playUri in cookie to redirect to the world after logout
+            res.cookie("playUri", query.playUri, {
+                httpOnly: true, // dont let browser javascript access cookie ever
+                secure: req.secure, // only use cookie over https
+            });
+            res.redirect(query.redirect);
+        });
+    }
+}

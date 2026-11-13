@@ -1,0 +1,43 @@
+import type { DeepPartial } from "../DeepPartial";
+import type { Translation } from "../i18n-types";
+
+const megaphone: DeepPartial<Translation["megaphone"]> = {
+    announcement: {
+        title: "Envoyer une annonce",
+        audience: "Qui la reçoit ?",
+        thisRoom: "Cette salle",
+        wholeWorld: "Tout le monde",
+        place: "Lieu à rejoindre (facultatif)",
+        noPlace: "Aucun lieu",
+        noPlaceOnMap: "Cette carte n'a pas encore de zone nommée.",
+        preview: "Aperçu",
+        sendToRoom: "Envoyer à cette salle",
+        sendToWorld: "Envoyer à tout le monde",
+        confirmWorld: "Toutes les salles du monde la recevront.",
+        confirmSend: "Oui, envoyer à tout le monde",
+        cancel: "Annuler",
+        sentToRoom: "Annonce envoyée à cette salle",
+        sentToWorld: "Annonce envoyée à tout le monde",
+        join: "Rejoindre {place}",
+        joinMap: "Rejoindre",
+        placeNotFound: "Ce lieu n'existe plus sur la carte.",
+        admin: "Administrateur",
+        more: "Annonces en attente : {count}",
+    },
+    modal: {
+        liveMessage: {
+            microphoneOff: "Micro coupé",
+            cameraOff: "Caméra coupée",
+            cameraOffHint: "Vous pouvez passer en direct avec le micro seul.",
+            devices: "Caméra et micro",
+            whoHears: "Qui vous entend ?",
+            thisRoom: "Cette salle",
+            wholeWorld: "Toutes les salles du monde",
+            live: "En direct",
+            stop: "Arrêter",
+            title: "Mégaphone",
+        },
+    },
+};
+
+export default megaphone;

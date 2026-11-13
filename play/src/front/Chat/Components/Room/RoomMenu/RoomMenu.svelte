@@ -1,0 +1,240 @@
+<script lang="ts">
+    import { onMount } from "svelte";
+    import type { Readable } from "svelte/store";
+    import { AskPositionMessage_AskType } from "@workadventure/messages";
+    import { hasMatrixChatCapabilities } from "../../../Connection/ChatConnection";
+    import type {
+        ChatRoom,
+        ChatRoomMembershipManagement,
+        ChatRoomModeration,
+        ChatRoomNotificationControl,
+        ChatUser,
+        MatrixChatConnectionLike,
+    } from "../../../Connection/ChatConnection";
+    import { isMatrixChatEnabledStore } from "../../../../Stores/ChatStore";
+    import { localUserStore } from "../../../../Connection/LocalUserStore";
+    import LL from "../../../../../i18n/i18n-svelte";
+    import { selectedRoomStore } from "../../../Stores/SelectRoomStore";
+    import { membersFocusRequestStore, roomSidePanelStore } from "../../../Stores/RoomSidePanelStore";
+    import { gameManager } from "../../../../Phaser/Game/GameManager";
+    import { analyticsClient } from "../../../../Administration/AnalyticsClient";
+    import { scriptUtils } from "../../../../Api/ScriptUtils";
+    import type { UserProviderMerger } from "../../../UserProviderMerger/UserProviderMerger";
+    import { DEBUG_MODE } from "../../../../Enum/EnvironmentVariable";
+    import MatrixPeerProfileDebugModal from "../../MatrixPeerProfileDebugModal.svelte";
+    import { confirmLeaveRoom } from "../confirmLeaveRoom";
+    import ChatMenu from "../../ChatMenu.svelte";
+    import RoomOption from "./RoomOption.svelte";
+    import {
+        IconLogout,
+        IconUsersGroup,
+        IconMute,
+        IconUnMute,
+        IconMapPin,
+        IconCamera,
+        IconUserPlus,
+        IconSettings,
+    } from "@wa-icons";
+    import { modals } from "@wa-modals";
+
+    interface Props {
+        room: ChatRoom & ChatRoomMembershipManagement & ChatRoomNotificationControl & ChatRoomModeration;
+    }
+
+    let { room }: Props = $props();
+    let roomType = $derived(room.type);
+    let areNotificationsMuted = $derived(room.areNotificationsMuted);
+    let roomMembers = $derived(room.members);
+    let roomName = $derived(room.name);
+    let usersByRoomStore:
+        | Readable<Map<string | undefined, { roomName: string | undefined; users: ChatUser[] }>>
+        | undefined = $state(undefined);
+
+    const { connection } = gameManager.getCurrentGameScene();
+
+    function matrixConnectionFromGameManager(): MatrixChatConnectionLike | undefined {
+        try {
+            const c = gameManager.chatConnection;
+            return hasMatrixChatCapabilities(c) ? c : undefined;
+        } catch {
+            return undefined;
+        }
+    }
+
+    onMount(() => {
+        // Initialize usersByRoomStore
+        gameManager
+            .getCurrentGameScene()
+            .userProviderMerger.then((merger: UserProviderMerger) => {
+                usersByRoomStore = merger.usersByRoomStore;
+            })
+            .catch((error) => {
+                console.error("Failed to get users by room store : ", error);
+            });
+    });
+
+    function closeMenuAndLeaveRoom() {
+        confirmLeaveRoom(room);
+    }
+
+    // Everyone can open the member list; inviting, roles, kick and ban are offered there to those allowed.
+    function openMembers() {
+        selectedRoomStore.set(room);
+        roomSidePanelStore.setActiveSection("participants");
+        membersFocusRequestStore.set(true);
+    }
+
+    function closeMenuAndSetMuteStatus() {
+        if ($areNotificationsMuted) {
+            room.unmuteNotification().catch(() => {
+                console.error("Failed to unmute room");
+            });
+            return;
+        }
+        room.muteNotification().catch(() => {
+            console.error("Failed to mute room");
+        });
+    }
+
+    let usersByRoomMap = $derived(usersByRoomStore && $usersByRoomStore ? $usersByRoomStore : new Map());
+
+    // Flatten usersByRoomMap into a list of users with playUri from their room
+    let usersWithRoomPlayUri = $derived(
+        (() => {
+            const usersList: (ChatUser & { playUri: string })[] = [];
+            for (const [playUri, roomData] of usersByRoomMap.entries()) {
+                for (const user of roomData.users) {
+                    usersList.push({
+                        ...user,
+                        playUri: playUri ?? user.playUri ?? "",
+                    });
+                }
+            }
+            return usersList;
+        })(),
+    );
+
+    let matrixChatUser = $derived(
+        $roomType === "direct" ? $roomMembers.find((u) => u.id !== localUserStore.getChatId()) : undefined,
+    );
+
+    let chatUser = $derived(usersWithRoomPlayUri.find((u) => u.chatId === matrixChatUser?.id));
+    let isInTheSameMap = $derived(chatUser?.playUri === gameManager.getCurrentGameScene().roomUrl);
+
+    function locateUser() {
+        if (chatUser == undefined || chatUser.uuid == undefined) return;
+        // Track the open woka menu action
+        analyticsClient.trackAdminEvent("user.woka_menu.opened");
+
+        const currentScerne = gameManager.getCurrentGameScene();
+
+        // Il user is in view port and represented by remote player, use it to activate the woka menu
+        const remotePlayerData = currentScerne.getRemotePlayersRepository().getPlayerByUuid(chatUser.uuid);
+        if (remotePlayerData != undefined) {
+            // Get the actual RemotePlayer sprite from MapPlayersByKey using userId
+            const remotePlayer = currentScerne.MapPlayersByKey.get(remotePlayerData.userId);
+            if (remotePlayer != undefined) {
+                remotePlayer.activate();
+                return;
+            }
+        }
+
+        // If the user isn't in the view port, emit the ask position message to the server
+        connection?.emitAskPosition(chatUser.uuid ?? "", chatUser.playUri ?? "", AskPositionMessage_AskType.LOCATE);
+    }
+
+    function talkToUser() {
+        if (chatUser == undefined) return;
+        // Track the talk to user action
+        analyticsClient.trackAdminEvent("user.go_to_clicked");
+
+        if (isInTheSameMap) {
+            connection?.emitAskPosition(chatUser.uuid ?? "", chatUser.playUri ?? "", AskPositionMessage_AskType.MOVE);
+        } else {
+            scriptUtils.goToPage(`${chatUser.playUri}#moveToUser=${chatUser.uuid}`);
+        }
+    }
+
+    function inviteUserToMeeting() {
+        if (chatUser == undefined || chatUser.uuid == undefined) return;
+        connection?.emitMeetingInvitationRequest(chatUser.uuid);
+    }
+
+    /** Reactive on `$isMatrixChatEnabledStore` so the connection appears when Matrix chat connects. */
+    let matrixChatConnection = $derived($isMatrixChatEnabledStore ? matrixConnectionFromGameManager() : undefined);
+
+    let showMatrixPeerProfileDebug = $derived(
+        DEBUG_MODE && matrixChatConnection !== undefined && $roomType === "direct" && Boolean(matrixChatUser?.id),
+    );
+
+    function openMatrixPeerProfileDebug() {
+        if (!matrixChatConnection || matrixChatUser?.id === undefined) {
+            return;
+        }
+        modals.open(MatrixPeerProfileDebugModal, {
+            connection: matrixChatConnection,
+            matrixUserId: matrixChatUser.id,
+            label: chatUser?.username,
+        });
+    }
+</script>
+
+<ChatMenu
+    label={$LL.chat.a11y.optionsFor({ name: $roomName })}
+    dataTestId="toggleRoomMenu"
+    onopen={() => room.ensureMembersInitialized().catch((error) => console.error(error))}
+    buttonClass="m-0 p-0 flex items-center justify-center h-7 w-7 hover:bg-white/10 rounded"
+    menuClass="bg-contrast/50 backdrop-blur-md rounded-md overflow-hidden z-[99] w-max end-2 top-10 p-1"
+>
+    {#if $roomType === "direct"}
+        <!-- Create Room Option to talk to the user -->
+        <RoomOption
+            IconComponent={IconCamera}
+            title={$LL.chat.userList.TalkTo()}
+            onclick={talkToUser}
+            disabled={chatUser == undefined || chatUser.uuid == undefined}
+        />
+        <!-- Create Room Option to locate to the user -->
+        <RoomOption
+            IconComponent={IconMapPin}
+            title={$LL.chat.userList.follow()}
+            onclick={locateUser}
+            disabled={chatUser == undefined || isInTheSameMap == false}
+        />
+        <!-- Create Room Option to invite the user to the meeting -->
+        <RoomOption
+            IconComponent={IconUserPlus}
+            title={$LL.chat.userList.invite()}
+            onclick={inviteUserToMeeting}
+            disabled={chatUser == undefined || chatUser.uuid == undefined}
+        />
+        {#if showMatrixPeerProfileDebug}
+            <RoomOption
+                dataTestId="dm-matrix-peer-profile-debug"
+                IconComponent={IconSettings}
+                title={$LL.chat.matrixPeerProfileDebug.menuItemTitle()}
+                tagText={$LL.chat.matrixPeerProfileDebug.menuItemDebugTag()}
+                onclick={openMatrixPeerProfileDebug}
+            />
+        {/if}
+    {/if}
+    <RoomOption
+        dataTestId="roomMembersOption"
+        IconComponent={IconUsersGroup}
+        title={$LL.chat.manageRoomUsers.sectionJoined()}
+        onclick={openMembers}
+    />
+
+    <RoomOption
+        IconComponent={$areNotificationsMuted ? IconUnMute : IconMute}
+        title={$areNotificationsMuted ? $LL.chat.roomMenu.unmuteRoom() : $LL.chat.roomMenu.muteRoom()}
+        onclick={closeMenuAndSetMuteStatus}
+    />
+
+    <RoomOption
+        IconComponent={IconLogout}
+        title={$LL.chat.roomMenu.leaveRoom.label()}
+        bg="bg-danger-900 hover:bg-danger"
+        onclick={closeMenuAndLeaveRoom}
+    />
+</ChatMenu>

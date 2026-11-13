@@ -1,0 +1,2169 @@
+import * as Sentry from "@sentry/svelte";
+import Debug from "debug";
+import { ForwardableStore, MapStore, SearchableArrayStore } from "@workadventure/store-utils";
+import type { Readable, Writable, Unsubscriber } from "svelte/store";
+import { derived, get, readable, writable } from "svelte/store";
+import { v4 as uuidv4 } from "uuid";
+import { Subscription } from "rxjs";
+import type { CharacterTextureMessage, SpaceMessageQuote } from "@workadventure/messages";
+import { AvailabilityStatus, FilterType, type SpaceKind } from "@workadventure/messages";
+import { asError } from "catch-unknown";
+import { eventToAbortReason } from "@workadventure/shared-utils/src/Abort/raceAbort";
+import { AbortError } from "@workadventure/shared-utils/src/Abort/AbortError";
+import { Deferred } from "@workadventure/shared-utils";
+import type { ProximityPoll, ProximityQuestion, SpaceState } from "@workadventure/shared-utils";
+import { abortAny } from "@workadventure/shared-utils/src/Abort/AbortAny";
+import { type WAMSettings, WAMSettingsUtils } from "@workadventure/map-editor";
+import type {
+    AnyKindOfUser,
+    ChatAttachmentRecipient,
+    ChatAttachmentStatus,
+    ChatConversation,
+    ChatMessage,
+    ChatMessageAttachment,
+    ChatMessageContent,
+    ChatMessagePreview,
+    ChatMessageReaction,
+    ChatPollCreateOptions,
+    ChatPollCreationCapability,
+    ChatPollItem,
+    ChatMessageType,
+    ChatQuestionCreateOptions,
+    ChatQuestionCreationCapability,
+    ChatQuestionItem,
+    ChatRoom,
+} from "../ChatConnection";
+import LL, { locale } from "../../../../i18n/i18n-svelte";
+import { iframeListener } from "../../../Api/IframeListener";
+import type { SpaceInterface, SpaceUserExtended } from "../../../Space/SpaceInterface";
+import type { MeetingParticipant } from "../../../Stores/MeetingInvitationStore";
+import type { SpaceRegistryInterface } from "../../../Space/SpaceRegistry/SpaceRegistryInterface";
+import { chatVisibilityStore } from "../../../Stores/ChatStore";
+import {
+    isAChatRoomIsVisible,
+    navChat,
+    selectedChatMessageToReply,
+    shouldRestoreChatStateStore,
+} from "../../Stores/ChatStore";
+import { roomSidePanelStore } from "../../Stores/RoomSidePanelStore";
+import { selectedRoomStore } from "../../Stores/SelectRoomStore";
+import { addPendingMention, chatMessageBannerStore } from "../../Stores/ChatMessageBannerStore";
+import { planMessageNotification, type MessageNotificationPlan } from "../../MessageNotificationPolicy";
+import { mapExtendedSpaceUserToChatUser } from "../../UserProvider/ChatUserMapper";
+import { gameManager } from "../../../Phaser/Game/GameManager";
+import { availabilityStatusStore, requestedCameraState, requestedMicrophoneState } from "../../../Stores/MediaStore";
+import { localUserStore } from "../../../Connection/LocalUserStore";
+import { chatNotificationStore } from "../../../Stores/ProximityNotificationStore";
+import { MessageNotification } from "../../../Notification/MessageNotification";
+import { notificationManager } from "../../../Notification/NotificationManager";
+import { blackListManager } from "../../../WebRtc/BlackListManager";
+import { isMediaBreakpointUp } from "../../../Utils/BreakpointsUtils";
+import { ScriptingOutputAudioStreamManager } from "../../../WebRtc/AudioStream/ScriptingOutputAudioStreamManager";
+import { ScriptingInputAudioStreamManager } from "../../../WebRtc/AudioStream/ScriptingInputAudioStreamManager";
+import type { MessageUserJoined } from "../../../Connection/ConnexionModels";
+import type { RemotePlayersRepository } from "../../../Phaser/Game/RemotePlayersRepository";
+import { hideBubbleConfirmationModal } from "../../../Rules/StatusRules/statusChangerFunctions";
+import { statusChanger } from "../../../Components/ActionBar/AvailabilityStatus/statusChanger";
+import type { GameScene } from "../../../Phaser/Game/GameScene";
+import { faviconManager } from "../../../WebRtc/FaviconManager";
+import { screenWakeLock } from "../../../Utils/ScreenWakeLock";
+import { PROXIMITY_FILE_TRANSFER_MAX_USERS } from "../../../Enum/EnvironmentVariable";
+import type { PictureStore } from "../../../Stores/PictureStore";
+import { CharacterLayerManager } from "../../../Phaser/Entity/CharacterLayerManager";
+import { BubbleNotification as BasicNotification } from "../../../Notification/BubbleNotification";
+import { iceServersManager } from "../../../WebRtc/IceServersManager";
+import { analyticsClient } from "../../../Administration/AnalyticsClient";
+import {
+    getMentionedIds,
+    markOwnMentions,
+    type MentionCandidate,
+    mentionsToPlainText,
+    ROOM_MENTION,
+    ROOM_MENTION_ID,
+    withoutRoomMention,
+} from "../../Mentions";
+import { DEFAULT_PROXIMITY_SPACE_NAME, type ProximityChatRoomKind } from "./ProximityChatRoomManager";
+import { ProximityChatQuestion } from "./ProximityChatQuestion";
+import { canCreateProximityContent } from "./ProximityCreationPermissions";
+import { ProximityChatPoll } from "./ProximityChatPoll";
+import { muteProximityChatNotifications, unmuteProximityChatNotifications } from "./ProximityNotificationControl";
+import { sortByCreatedAt } from "./ProximityPollState";
+import { createProximityTimelineItemsStore } from "./ProximityTimelineItemsStore";
+import {
+    getMessageTypeFromMimeType,
+    ProximityFileTransferService,
+    type IncomingProximityFileTransferOffer,
+    type OutgoingProximityFileTransferUpdate,
+    type ProximityFileTransferUpdate,
+} from "./ProximityFileTransferService";
+import { estimateProximityFileTransferRemainingSeconds } from "./ProximityFileTransferEta";
+import { applyProximityReaction } from "./ProximityChatMessageReaction";
+import { TypingExpiry } from "./TypingExpiry";
+
+const debug = Debug("ProximityChatRoom");
+
+// Long enough to recognise the quoted message, short enough to keep the reply event small.
+const QUOTE_EXCERPT_MAX_LENGTH = 200;
+
+export class ProximityChatMessage implements ChatMessage {
+    isQuotedMessage: boolean | undefined = undefined;
+    quotedMessage: ChatMessage | undefined = undefined;
+    isDeleted = writable(false);
+    isModified = writable(false);
+    canEdit = writable(false);
+    canReact: Readable<boolean>;
+    canDelete = writable(false);
+    reactions: MapStore<string, ChatMessageReaction> = new MapStore();
+    // False once I left the bubble the message was sent in: its participants would never see a reaction or a reply.
+    private readonly inConversation = writable(true);
+    readonly canReply: Readable<boolean> = { subscribe: this.inConversation.subscribe };
+    constructor(
+        public id: string,
+        public sender: AnyKindOfUser,
+        public content: Readable<ChatMessageContent>,
+        public date: Date,
+        public isMyMessage: boolean,
+        public type: ChatMessageType,
+        public attachment?: ChatMessageAttachment,
+        // Only messages every participant knows under the same id can be reacted to.
+        private readonly toggleReaction?: (messageId: string, key: string) => void,
+    ) {
+        this.canReact = derived(
+            this.inConversation,
+            (inConversation) => inConversation && toggleReaction !== undefined,
+        );
+    }
+
+    leaveConversation(): void {
+        this.inConversation.set(false);
+    }
+
+    remove(): Promise<void> {
+        console.info("Function not implemented.");
+        return Promise.resolve();
+    }
+    edit(newContent: string): Promise<void> {
+        console.info("Function not implemented.", newContent);
+        return Promise.resolve();
+    }
+    addReaction(reaction: string): Promise<void> {
+        this.toggleReaction?.(this.id, reaction);
+        return Promise.resolve();
+    }
+}
+
+type SoundManager = Pick<
+    GameScene,
+    "playBubbleInSound" | "playBubbleOutSound" | "playMeetingInSound" | "playMeetingOutSound"
+>;
+
+const MAX_PARTICIPANTS_FOR_SOUND_NOTIFICATIONS = 5;
+
+// Deadlock backstop for getFirstUsers: if the peer's browser never registers in the space,
+// observeUserJoined would never fire and joinSpace would hang forever. Set below the LockByKey
+// backstop (ROOM_OPERATION_LOCK_TIMEOUT_MS = 10_000) so this fires first, letting joinSpace finish
+// cleanly before the room operation lock queue is released. High enough to only fire on a genuine
+// hang, never on ordinary slowness.
+const GET_FIRST_USERS_TIMEOUT_MS = 9_000;
+
+/**
+ * What the space behind a room is, for the back: the proximity room is the bubble, a
+ * meeting room is a meeting area, the speaker and listener rooms share the speaker
+ * zone's space. A plain area chat room has no media and is nobody's session.
+ */
+const SPACE_KIND_OF_ROOM: Record<ProximityChatRoomKind, SpaceKind | undefined> = {
+    default: "bubble",
+    proximity: "bubble",
+    meeting: "area",
+    speaker: "speaker_zone",
+    listener: "speaker_zone",
+    area: undefined,
+};
+
+export class ProximityChatRoom implements ChatRoom {
+    id: string;
+    conversationKind = "room" as const;
+    name: Writable<string>;
+    kind: Writable<ProximityChatRoomKind>;
+    type = readable<"direct" | "multiple">("multiple");
+    hasUnreadMessages = writable(false);
+    unreadMessagesCount = writable(0);
+    unreadNotificationCount = writable(0);
+    // Set when an unread message mentions us, cleared when a new unread streak starts: whoever marks the room as
+    // read only resets hasUnreadMessages.
+    private readonly unreadMention = writable(false);
+    readonly hasUnreadMentions = derived(
+        [this.hasUnreadMessages, this.unreadMention],
+        ([hasUnreadMessages, unreadMention]) => hasUnreadMessages && unreadMention,
+    );
+    initializationState = readable<"ready">("ready");
+    initializationError = readable<Error | undefined>(undefined);
+    pictureStore = readable(undefined);
+    avatarFallbackColor = readable(undefined);
+    messages: SearchableArrayStore<string, ChatMessage> = new SearchableArrayStore((item) => item.id);
+    // Arrivals and departures are not messages.
+    readonly lastMessagePreview: Readable<ChatMessagePreview | undefined> = derived(this.messages, (messages) => {
+        const message = messages.filter(({ type }) => type !== "incoming" && type !== "outcoming").pop();
+        const body = message ? get(message.content).body : "";
+        return message && body
+            ? { body, senderName: message.sender?.username, timestamp: message.date?.getTime() ?? 0 }
+            : undefined;
+    });
+    /** Space users of the current space (forwarded from _space.usersStore on join, empty map on leave). */
+    public readonly spaceUsersStore = new ForwardableStore<Map<string, SpaceUserExtended>>(new Map());
+    readonly mentionCandidates: Readable<readonly MentionCandidate[]> = derived(this.spaceUsersStore, (users) => [
+        ...(this.isCurrentUserAdmin(this.getCurrentSpaceUser(users)) ? [ROOM_MENTION] : []),
+        ...Array.from(users.values())
+            .filter((user) => user.spaceUserId !== this._spaceUserId)
+            .map((user) => ({
+                id: user.spaceUserId,
+                name: user.name,
+                pictureStore: user.pictureStore,
+                color: user.color,
+                // Everyone in the bubble is here.
+                online: true,
+            })),
+    ]);
+    // The polls and questions of the space state (owned by the back).
+    // One store per slice, set only when the slice changed: a raised hand must not rebuild the polls.
+    private readonly pollsStore = writable<SpaceState["polls"]>({});
+    private readonly questionsStore = writable<SpaceState["questions"]>({});
+    readonly pollItems: Readable<readonly ChatPollItem[]> = derived(
+        [this.pollsStore, this.spaceUsersStore],
+        ([$polls, $users]) => this.createPollItems($polls, $users),
+    );
+    readonly canModerateQuestions: Readable<boolean> = derived(this.spaceUsersStore, (users) =>
+        this.computeCanModerateQuestions(users),
+    );
+    readonly canDeleteQuestions: Readable<boolean> = derived(this.spaceUsersStore, (users) =>
+        this.computeCanDeleteAnyQuestion(users),
+    );
+    readonly qaItems: Readable<readonly ChatQuestionItem[]> = derived(
+        [this.questionsStore, this.spaceUsersStore, this.canModerateQuestions, this.canDeleteQuestions],
+        ([$questions, $users, $canModerateQuestions, $canDeleteQuestions]) =>
+            this.createQuestionItems($questions, $users, $canModerateQuestions, $canDeleteQuestions),
+    );
+    private readonly unreadQuestionIdsStore = writable<ReadonlySet<string>>(new Set());
+    readonly unreadQuestionCount: Readable<number> = derived(this.unreadQuestionIdsStore, (ids) => ids.size);
+    timelineItems = createProximityTimelineItemsStore(this.messages, this.pollItems, this.qaItems);
+    readonly pollCreation: ChatPollCreationCapability;
+    readonly questionCreation: ChatQuestionCreationCapability;
+    messageReactions: MapStore<string, MapStore<string, ChatMessageReaction>> = new MapStore();
+    hasPreviousMessage = writable(false);
+    isEncrypted = writable(false);
+    typingMembers: Writable<Array<{ id: string; name: string | null; pictureStore: PictureStore }>>;
+    private _space: SpaceInterface | undefined;
+    private spaceMessageSubscription: Subscription | undefined;
+    private spaceIsTypingSubscription: Subscription | undefined;
+    private readonly typingExpiry = new TypingExpiry((id) => this.removeTypingUserbyID(id));
+    private spaceMessageReactionSubscription: Subscription | undefined;
+    private spaceStateUnsubscriber: Unsubscriber | undefined;
+    private roomSidePanelUnsubscriber: Unsubscriber;
+    private selectedRoomUnsubscriber: Unsubscriber;
+    private readonly proximityPolls = new Map<string, ProximityChatPoll>();
+    private readonly proximityQuestions = new Map<string, ProximityChatQuestion>();
+    private fileTransferSubscriptions = new Subscription();
+    private observeUserJoinedSubscription: Subscription | undefined;
+    private observeUserLeftSubscription: Subscription | undefined;
+    // Users by spaceUserId
+    private users: Map<string, SpaceUserExtended> | undefined;
+    private usersUnsubscriber: Unsubscriber | undefined;
+    private spaceWatcherUserJoinedObserver: Subscription | undefined;
+    private spaceWatcherUserLeftObserver: Subscription | undefined;
+    private joinSpaceAbortController: AbortController | undefined;
+    areNotificationsMuted = writable(false);
+    isRoomFolder = false;
+    lastMessageTimestamp = 0;
+    hasUserInProximityChat = writable(false);
+    isJoined = writable(false);
+    isChatDisabled = writable(false);
+    intentionallyClosed = writable(false);
+    hasUserMessages = writable(false);
+    readonly joinedMemberCount = derived(this.spaceUsersStore, (users) => users.size);
+    // Files travel peer to peer: the sender uploads a copy to every recipient, which does not scale to a crowd.
+    readonly canSendFiles = derived(this.joinedMemberCount, (count) => count <= PROXIMITY_FILE_TRANSFER_MAX_USERS);
+    /** Participants currently in the same meeting/space (reactive list from space users). */
+    private _currentMeetingParticipantsStore = writable<MeetingParticipant[]>([]);
+    public readonly currentMeetingParticipantsStore: Readable<MeetingParticipant[]> =
+        this._currentMeetingParticipantsStore;
+
+    ensureInitialized(): Promise<void> {
+        return Promise.resolve();
+    }
+    ensureTimelineInitialized(): Promise<void> {
+        return Promise.resolve();
+    }
+    ensureMembersInitialized(): Promise<void> {
+        return Promise.resolve();
+    }
+    currentMatrixRoom: ChatConversation | undefined;
+    currentChatVisibility = false;
+
+    private unknownUser = {
+        chatId: "0",
+        uuid: "0",
+        availabilityStatus: writable(AvailabilityStatus.ONLINE),
+        username: get(LL).chat.question.unknownAuthor(),
+        pictureStore: readable(undefined),
+        roomName: undefined,
+        playUri: undefined,
+        color: undefined,
+        spaceUserId: undefined,
+    } as AnyKindOfUser;
+
+    private isDefaultProximityRoom(): boolean {
+        return this.spaceName === DEFAULT_PROXIMITY_SPACE_NAME;
+    }
+
+    private planNotification(mentionsMe: boolean): MessageNotificationPlan {
+        const chatVisible = get(chatVisibilityStore);
+        return planMessageNotification({
+            chatVisible,
+            roomDisplayed: chatVisible && get(selectedRoomStore)?.id === this.id,
+            // Like in Matrix rooms, a mention gets through a muted chat.
+            muted: get(this.areNotificationsMuted),
+            mentionsMe,
+            direct: false,
+        });
+    }
+
+    private get unknownUserName(): string {
+        return this.unknownUser.username ?? get(LL).chat.question.unknownAuthor();
+    }
+
+    private scriptingOutputAudioStreamManager: ScriptingOutputAudioStreamManager | undefined;
+    private scriptingInputAudioStreamManager: ScriptingInputAudioStreamManager | undefined;
+    private fileTransferService: ProximityFileTransferService | undefined;
+    private fileTransfers = new Map<
+        string,
+        {
+            message: ProximityChatMessage;
+            content: Writable<ChatMessageContent>;
+            status: Writable<ChatAttachmentStatus>;
+            decision: Writable<"pending" | "accepted" | "declined">;
+            sizeBytes: number;
+            downloadStartedAt?: number;
+        }
+    >();
+    // For each file we sent, how each recipient's copy is doing.
+    private outgoingFileTransfers = new Map<string, Writable<ChatAttachmentRecipient[]>>();
+    private fileTransferObjectUrls = new Set<string>();
+    private screenWakeRelease: undefined | (() => Promise<void>);
+
+    constructor(
+        public readonly spaceName: string,
+        displayName: string,
+        kind: ProximityChatRoomKind,
+        private _spaceUserId: string,
+        private spaceRegistry: SpaceRegistryInterface,
+        _iframeListenerInstance: Pick<typeof iframeListener, "newChatMessageWritingStatusStream">,
+        private remotePlayersRepository: RemotePlayersRepository,
+        private soundManager: SoundManager,
+        private wamSettings: WAMSettings | undefined,
+        private tags: string[],
+        private notifyNewMessage = (message: ProximityChatMessage) => {
+            const { body, mentionsMe = false } = get(message.content);
+            const plan = this.planNotification(mentionsMe);
+
+            if (plan.sound && localUserStore.getChatSounds()) {
+                gameManager.getCurrentGameScene().playSound("new-message");
+            }
+
+            if (!plan.browser) {
+                return;
+            }
+
+            notificationManager.createNotification(
+                new MessageNotification(
+                    message.sender.username ?? this.unknownUserName,
+                    mentionsToPlainText(body),
+                    this.id,
+                    get(this.name),
+                    mentionsMe,
+                ),
+            );
+        },
+    ) {
+        this.id = `proximity:${spaceName}`;
+        this.name = writable(displayName);
+        this.kind = writable(kind);
+        this.typingMembers = writable([]);
+        this.pollCreation = {
+            canCreate: derived(this.isChatDisabled, canCreateProximityContent),
+            supportedKinds: ["open", "closed"],
+            limits: {
+                questionMaxLength: 340,
+                answerMaxLength: 240,
+                minAnswers: 2,
+                maxAnswers: 20,
+            },
+            create: (options) => this.createPoll(options),
+        };
+        this.questionCreation = {
+            canCreate: derived(this.isChatDisabled, canCreateProximityContent),
+            maxLength: 500,
+            create: (options) => this.createQuestion(options),
+        };
+
+        this.roomSidePanelUnsubscriber = roomSidePanelStore.subscribe(() =>
+            this.markQuestionsAsReadIfQuestionsSectionOpen(),
+        );
+        this.selectedRoomUnsubscriber = selectedRoomStore.subscribe(() =>
+            this.markQuestionsAsReadIfQuestionsSectionOpen(),
+        );
+    }
+
+    sendMessage(message: string, action: ChatMessageType = "proximity", broadcast = true): void {
+        // Create content message
+        const newChatMessageContent = {
+            body: message,
+            url: undefined,
+        };
+
+        const spaceUser = this.users?.get(this._spaceUserId);
+        let chatUser: AnyKindOfUser = this.unknownUser;
+        if (spaceUser) {
+            chatUser = mapExtendedSpaceUserToChatUser(spaceUser);
+        }
+
+        // Create message
+        const newMessage = new ProximityChatMessage(
+            uuidv4(),
+            chatUser,
+            writable(newChatMessageContent),
+            new Date(),
+            true,
+            action,
+            undefined,
+            action === "proximity" ? this.toggleReaction : undefined,
+        );
+
+        const quote = action === "proximity" && broadcast ? this.quoteOfSelectedReply() : undefined;
+        if (quote) {
+            newMessage.quotedMessage = this.createQuotedMessage(quote);
+            selectedChatMessageToReply.set(null);
+        }
+
+        // Add message to the list
+        this.messages.push(newMessage);
+        if (action === "proximity") {
+            this.hasUserMessages.set(true);
+        }
+
+        this.lastMessageTimestamp = newMessage.date.getTime();
+
+        // Use the room connection to send the message to other users of the space
+        if (broadcast) {
+            this._space?.emitPublicMessage({
+                $case: "spaceMessage",
+                spaceMessage: {
+                    message: message,
+                    characterTextures: spaceUser?.characterTextures ?? [],
+                    name: chatUser.username ?? this.unknownUserName,
+                    id: newMessage.id,
+                    quote,
+                },
+            });
+        }
+
+        if (action === "proximity") {
+            // Send local message to WorkAdventure scripting API
+            try {
+                iframeListener.sendUserInputChat(mentionsToPlainText(message), undefined);
+            } catch (e) {
+                console.error("Error while sending message to WorkAdventure scripting API", e);
+            }
+        }
+    }
+
+    private addEnteringChatWithUsers(users: SpaceUserExtended[]) {
+        // No peer to announce (e.g. getFirstUsers hit its backstop while alone). A late peer will
+        // be announced by the observeUserJoined observers instead, so skip the empty message here.
+        if (users.length === 0) {
+            return;
+        }
+        let userNames: string;
+        if (Intl.ListFormat) {
+            const formatter = new Intl.ListFormat(get(locale), { style: "long", type: "conjunction" });
+            userNames = formatter.format(users.map((user) => user.name));
+        } else {
+            // For old browsers
+            userNames = users.map((user) => user.name).join(", ");
+        }
+        this.sendMessage(get(LL).chat.timeLine.newDiscussion({ userNames }), "incoming", false);
+    }
+
+    private addIncomingUser(spaceUser: SpaceUserExtended): void {
+        this.sendMessage(get(LL).chat.timeLine.incoming({ userName: spaceUser.name }), "incoming", false);
+    }
+
+    private addOutcomingUser(spaceUser: SpaceUserExtended): void {
+        this.sendMessage(get(LL).chat.timeLine.outcoming({ userName: spaceUser.name }), "outcoming", false);
+        this.removeTypingUserbyID(spaceUser.spaceUserId.toString());
+    }
+
+    /**
+     * Add a message from a remote user to the proximity chat.
+     */
+    private addNewMessage(
+        message: string,
+        senderUserId: string,
+        characterTextures: CharacterTextureMessage[],
+        name: string,
+        messageId?: string,
+        quote?: SpaceMessageQuote,
+    ): void {
+        // Ignore messages from the current user
+        if (senderUserId === this._spaceUserId) {
+            return;
+        }
+
+        const spaceUser = this.users?.get(senderUserId);
+
+        // Create content message
+        const mentionedIds = getMentionedIds(message);
+        // Only an admin of the map may mention everyone. The message comes straight from a peer, with no server to
+        // enforce it: check the sender here (an unknown sender is not an admin), and leave a plain "@room" otherwise.
+        const roomMention = mentionedIds.includes(ROOM_MENTION_ID) && (spaceUser?.tags ?? []).includes("admin");
+        const mentionsMe = roomMention || mentionedIds.includes(this._spaceUserId);
+        const newChatMessageContent = {
+            body: markOwnMentions(roomMention ? message : withoutRoomMention(message), [
+                this._spaceUserId,
+                ROOM_MENTION_ID,
+            ]),
+            url: undefined,
+            mentionsMe,
+        };
+
+        let chatUser: AnyKindOfUser = { ...this.unknownUser, spaceUserId: senderUserId };
+        if (spaceUser) {
+            chatUser = mapExtendedSpaceUserToChatUser(spaceUser);
+        }
+
+        if (characterTextures.length > 0) {
+            chatUser.pictureStore = readable<string | undefined>(undefined, (set) => {
+                CharacterLayerManager.wokaBase64(characterTextures)
+                    .then((wokaBase64) => {
+                        set(wokaBase64);
+                    })
+                    .catch((e) => {
+                        Sentry.captureException(e);
+                        console.warn("Error while getting woka base64", e);
+                    });
+            });
+        }
+
+        if (name) {
+            chatUser.username = name;
+        }
+
+        // Create message. Older clients send no id: such a message cannot be reacted to, the others would not find it.
+        const isNewId = messageId !== undefined && messageId !== "" && !this.messages.has(messageId);
+        const newMessage = new ProximityChatMessage(
+            isNewId ? messageId : uuidv4(),
+            chatUser,
+            writable(newChatMessageContent),
+            new Date(),
+            false,
+            "proximity",
+            undefined,
+            isNewId ? this.toggleReaction : undefined,
+        );
+        if (quote) {
+            newMessage.quotedMessage = this.createQuotedMessage(quote);
+        }
+
+        // Add message to the list
+        this.messages.push(newMessage);
+        this.hasUserMessages.set(true);
+
+        this.lastMessageTimestamp = newMessage.date.getTime();
+
+        this.notifyNewMessage(newMessage);
+
+        if (get(selectedRoomStore) !== this) {
+            if (!get(this.hasUnreadMessages)) {
+                this.unreadMention.set(false);
+            }
+            this.hasUnreadMessages.set(true);
+            this.unreadNotificationCount.set(get(this.unreadNotificationCount) + 1);
+            if (mentionsMe) {
+                this.unreadMention.set(true);
+            }
+        }
+        // Send bubble message to WorkAdventure scripting API
+        try {
+            iframeListener.sendUserInputChat(mentionsToPlainText(message), senderUserId);
+        } catch (e) {
+            console.error("Error while sending message to WorkAdventure scripting API", e);
+        }
+    }
+
+    async sendFiles(files: FileList): Promise<void> {
+        if (!this.fileTransferService) {
+            return Promise.reject(new Error("Proximity file transfer service is not initialized"));
+        }
+        if (!get(this.canSendFiles)) {
+            return Promise.reject(new Error("Too many users in the proximity chat to send files"));
+        }
+
+        const recipients = Array.from(this.users?.values() ?? [])
+            .filter((user) => user.spaceUserId !== this._spaceUserId)
+            .filter((user) => !blackListManager.isBlackListed(user.uuid));
+
+        const spaceUser = this.users?.get(this._spaceUserId);
+        const chatUser = spaceUser ? mapExtendedSpaceUserToChatUser(spaceUser) : this.unknownUser;
+        const offers = this.fileTransferService.createOutgoingOffers(
+            Array.from(files),
+            recipients.map((user) => user.spaceUserId),
+        );
+        for (const offer of offers) {
+            analyticsClient.trackAdminEvent("chat.proximity_file.sent", {
+                sizeBytes: offer.file.size,
+                recipientCount: recipients.length,
+            });
+            const objectUrl = URL.createObjectURL(offer.file);
+            this.fileTransferObjectUrls.add(objectUrl);
+            const attachmentRecipients = writable<ChatAttachmentRecipient[]>(
+                recipients.map((user) => ({
+                    spaceUserId: user.spaceUserId,
+                    name: user.name,
+                    pictureStore: user.pictureStore,
+                    color: user.color,
+                    state: "waiting",
+                    progress: 0,
+                })),
+            );
+            this.outgoingFileTransfers.set(offer.transferId, attachmentRecipients);
+            const message = new ProximityChatMessage(
+                offer.transferId,
+                chatUser,
+                writable<ChatMessageContent>({ body: offer.file.name, url: objectUrl }),
+                new Date(),
+                true,
+                getMessageTypeFromMimeType(offer.file.type),
+                {
+                    status: readable<ChatAttachmentStatus>({ state: "ready" }),
+                    size: offer.file.size,
+                    delivery: attachmentRecipients,
+                },
+                this.toggleReaction,
+            );
+            this.messages.push(message);
+            this.lastMessageTimestamp = message.date.getTime();
+        }
+    }
+
+    private createPoll(options: ChatPollCreateOptions): Promise<void> {
+        return this._space?.state.createPoll({ ...options, maxSelections: 1 }) ?? Promise.resolve();
+    }
+
+    private createQuestion(options: ChatQuestionCreateOptions): Promise<void> {
+        const body = options.body.trim();
+        if (body.length === 0) {
+            return Promise.resolve();
+        }
+
+        return this._space?.state.askQuestion(body) ?? Promise.resolve();
+    }
+
+    private notifyNewPolls(previousPolls: SpaceState["polls"], nextPolls: SpaceState["polls"]): void {
+        const currentVoterId = this.getCurrentVoterId(this.users ?? new Map());
+        const newPolls = Object.values(nextPolls).filter(
+            (poll) => !(poll.id in previousPolls) && poll.senderId !== currentVoterId,
+        );
+        if (newPolls.length === 0) {
+            return;
+        }
+
+        if (get(selectedRoomStore) !== this) {
+            this.hasUnreadMessages.set(true);
+            this.unreadNotificationCount.set(get(this.unreadNotificationCount) + newPolls.length);
+        }
+
+        if (!get(this.intentionallyClosed)) {
+            chatVisibilityStore.set(true);
+            chatNotificationStore.clearRoom(this.id);
+            return;
+        }
+
+        this.unreadMessagesCount.set(get(this.unreadMessagesCount) + newPolls.length);
+        for (const poll of newPolls) {
+            chatNotificationStore.addNotification(
+                poll.senderName ?? this.unknownUserName,
+                `${get(LL).chat.poll.title()}: ${poll.question}`,
+                this,
+                poll.id,
+            );
+        }
+    }
+
+    private notifyNewQuestions(
+        previousQuestions: SpaceState["questions"],
+        nextQuestions: SpaceState["questions"],
+    ): void {
+        const currentVoterId = this.getCurrentVoterId(this.users ?? new Map());
+        const newQuestions = Object.values(nextQuestions).filter(
+            (question) => !(question.id in previousQuestions) && question.senderId !== currentVoterId,
+        );
+        const newQuestionIds = newQuestions.map((question) => question.id);
+        if (newQuestions.length === 0) {
+            return;
+        }
+
+        if (this.isQuestionsSectionOpen()) {
+            this.markQuestionsAsRead();
+        } else {
+            this.addUnreadQuestionIds(newQuestionIds);
+        }
+
+        // Notify every participant of a new question (not only moderators), mirroring notifyNewPolls.
+        if (get(selectedRoomStore) !== this) {
+            this.hasUnreadMessages.set(true);
+            this.unreadNotificationCount.set(get(this.unreadNotificationCount) + newQuestions.length);
+        }
+
+        if (!get(this.intentionallyClosed)) {
+            chatVisibilityStore.set(true);
+            chatNotificationStore.clearRoom(this.id);
+            return;
+        }
+
+        this.unreadMessagesCount.set(get(this.unreadMessagesCount) + newQuestions.length);
+        for (const question of newQuestions) {
+            // No sidePanelSection: clicking the toast scrolls to and highlights the question card in the timeline.
+            chatNotificationStore.addNotification(
+                question.senderName ?? this.unknownUserName,
+                get(LL).chat.question.notification({ question: question.body }),
+                this,
+                question.id,
+            );
+        }
+    }
+
+    private createPollItems(
+        polls: SpaceState["polls"],
+        users: Map<string, SpaceUserExtended>,
+    ): readonly ChatPollItem[] {
+        const space = this._space;
+        if (!space) {
+            return [];
+        }
+        const activePollIds = new Set<string>();
+        const currentVoterId = this.getCurrentVoterId(users);
+
+        const pollItems = sortByCreatedAt(polls).map((poll) => {
+            activePollIds.add(poll.id);
+            const sender = this.findPollSender(poll, users);
+            const existingPoll = this.proximityPolls.get(poll.id);
+
+            if (existingPoll) {
+                existingPoll.update({ poll, currentVoterId, sender });
+                return existingPoll;
+            }
+
+            const proximityPoll = new ProximityChatPoll({ poll, currentVoterId, sender, spaceState: space.state });
+            this.proximityPolls.set(poll.id, proximityPoll);
+            return proximityPoll;
+        });
+        this.deleteInactivePolls(activePollIds);
+        return pollItems;
+    }
+
+    private createQuestionItems(
+        questions: SpaceState["questions"],
+        users: Map<string, SpaceUserExtended>,
+        canMarkAnswered: boolean,
+        canDeleteAny: boolean,
+    ): readonly ChatQuestionItem[] {
+        const space = this._space;
+        if (!space) {
+            return [];
+        }
+        const activeQuestionIds = new Set<string>();
+        const currentVoterId = this.getCurrentVoterId(users);
+
+        const questionItems = sortByCreatedAt(questions)
+            .map((question) => {
+                activeQuestionIds.add(question.id);
+                const sender = this.findQuestionSender(question, users);
+                const existingQuestion = this.proximityQuestions.get(question.id);
+
+                if (existingQuestion) {
+                    existingQuestion.update({ question, currentVoterId, sender, canMarkAnswered, canDeleteAny });
+                    return existingQuestion;
+                }
+
+                const proximityQuestion = new ProximityChatQuestion({
+                    question,
+                    currentVoterId,
+                    sender,
+                    canMarkAnswered,
+                    canDeleteAny,
+                    spaceState: space.state,
+                });
+
+                this.proximityQuestions.set(question.id, proximityQuestion);
+                return proximityQuestion;
+            })
+            .sort((left, right) => {
+                const leftState = get(left.state);
+                const rightState = get(right.state);
+                return (
+                    rightState.upvoteCount - leftState.upvoteCount ||
+                    (left.date?.getTime() ?? 0) - (right.date?.getTime() ?? 0)
+                );
+            });
+
+        this.deleteInactiveQuestions(activeQuestionIds);
+        return questionItems;
+    }
+
+    private deleteInactivePolls(activePollIds: Set<string>): void {
+        for (const pollId of this.proximityPolls.keys()) {
+            if (!activePollIds.has(pollId)) {
+                this.proximityPolls.delete(pollId);
+            }
+        }
+    }
+
+    private deleteInactiveQuestions(activeQuestionIds: Set<string>): void {
+        for (const questionId of this.proximityQuestions.keys()) {
+            if (!activeQuestionIds.has(questionId)) {
+                this.proximityQuestions.delete(questionId);
+            }
+        }
+    }
+
+    private findPollSender(poll: ProximityPoll, users: Map<string, SpaceUserExtended>): AnyKindOfUser | undefined {
+        for (const user of users.values()) {
+            if (this.getUserVoterId(user) === poll.senderId) {
+                return mapExtendedSpaceUserToChatUser(user);
+            }
+        }
+
+        return {
+            ...this.unknownUser,
+            chatId: poll.senderId,
+            uuid: poll.senderId,
+            username: poll.senderName ?? this.unknownUserName,
+            spaceUserId: poll.senderId,
+        };
+    }
+
+    private findQuestionSender(
+        question: ProximityQuestion,
+        users: Map<string, SpaceUserExtended>,
+    ): AnyKindOfUser | undefined {
+        for (const user of users.values()) {
+            if (this.isUserIdentity(user, question.senderId)) {
+                return mapExtendedSpaceUserToChatUser(user);
+            }
+        }
+
+        return {
+            ...this.unknownUser,
+            chatId: question.senderId,
+            uuid: question.senderId,
+            username: question.senderName ?? this.unknownUserName,
+            spaceUserId: question.senderId,
+        };
+    }
+
+    private getCurrentVoterId(users: Map<string, SpaceUserExtended>): string {
+        const user = users.get(this._spaceUserId);
+
+        if (!user) {
+            return this._spaceUserId;
+        }
+
+        return this.getUserVoterId(user);
+    }
+
+    private getCurrentUserName(): string | undefined {
+        return (
+            this.users?.get(this._spaceUserId)?.name ??
+            this._space?.getSpaceUserBySpaceUserId(this._spaceUserId)?.name ??
+            localUserStore.getDisplayNameForMatrixProfile() ??
+            localUserStore.getName() ??
+            undefined
+        );
+    }
+
+    private getUserVoterId(user: SpaceUserExtended): string {
+        return user.uuid || user.spaceUserId;
+    }
+
+    private isUserIdentity(user: SpaceUserExtended, identity: string): boolean {
+        return identity === user.spaceUserId || identity === user.uuid;
+    }
+
+    private computeCanModerateQuestions(users: Map<string, SpaceUserExtended>): boolean {
+        const user = this.getCurrentSpaceUser(users);
+
+        return this.isCurrentUserAdmin(user) || user?.megaphoneState === true;
+    }
+
+    private computeCanDeleteAnyQuestion(users: Map<string, SpaceUserExtended>): boolean {
+        return this.isCurrentUserAdmin(this.getCurrentSpaceUser(users));
+    }
+
+    private getCurrentSpaceUser(users: Map<string, SpaceUserExtended>): SpaceUserExtended | undefined {
+        return users.get(this._spaceUserId) ?? this._space?.getSpaceUserBySpaceUserId(this._spaceUserId);
+    }
+
+    private isCurrentUserAdmin(user: SpaceUserExtended | undefined): boolean {
+        return (user?.tags ?? this.tags).includes("admin");
+    }
+
+    private addUnreadQuestionIds(questionIds: string[]): void {
+        this.unreadQuestionIdsStore.update((currentIds) => new Set([...currentIds, ...questionIds]));
+    }
+
+    private markQuestionsAsRead(): void {
+        if (get(this.unreadQuestionIdsStore).size === 0) {
+            return;
+        }
+
+        this.unreadQuestionIdsStore.set(new Set());
+    }
+
+    private markQuestionsAsReadIfQuestionsSectionOpen(): void {
+        if (this.isQuestionsSectionOpen()) {
+            this.markQuestionsAsRead();
+        }
+    }
+
+    private isQuestionsSectionOpen(): boolean {
+        const sidePanelState = get(roomSidePanelStore);
+        return sidePanelState.isOpen && sidePanelState.activeSection === "questions" && get(selectedRoomStore) === this;
+    }
+
+    private setupFileTransferService(space: SpaceInterface): void {
+        this.fileTransferService?.destroy();
+        this.fileTransferSubscriptions.unsubscribe();
+        this.fileTransferSubscriptions = new Subscription();
+        this.fileTransferService = new ProximityFileTransferService({
+            localSpaceUserId: this._spaceUserId,
+            space,
+            getIceServers: () => iceServersManager.getIceServersConfig(),
+            canExchangeWith: (spaceUserId) => !this.isBlackListedSpaceUser(spaceUserId),
+        });
+        this.fileTransferSubscriptions.add(
+            this.fileTransferService.incomingOffers.subscribe((offer) => {
+                if (this.isBlackListedSpaceUser(offer.senderSpaceUserId)) {
+                    return;
+                }
+                this.addIncomingFileOffer(offer);
+            }),
+        );
+        this.fileTransferSubscriptions.add(
+            this.fileTransferService.transferUpdates.subscribe((update) => this.applyFileTransferUpdate(update)),
+        );
+        this.fileTransferSubscriptions.add(
+            this.fileTransferService.outgoingUpdates.subscribe((update) =>
+                this.applyOutgoingFileTransferUpdate(update),
+            ),
+        );
+    }
+
+    private addIncomingFileOffer(offer: IncomingProximityFileTransferOffer): void {
+        if (this.fileTransfers.has(offer.transferId)) {
+            return;
+        }
+
+        const spaceUser = this.users?.get(offer.senderSpaceUserId);
+        let chatUser: AnyKindOfUser = { ...this.unknownUser, spaceUserId: offer.senderSpaceUserId };
+        if (spaceUser) {
+            chatUser = mapExtendedSpaceUserToChatUser(spaceUser);
+        }
+
+        if (offer.characterTextures.length > 0) {
+            chatUser.pictureStore = readable<string | undefined>(undefined, (set) => {
+                CharacterLayerManager.wokaBase64(offer.characterTextures)
+                    .then((wokaBase64) => set(wokaBase64))
+                    .catch((e) => {
+                        Sentry.captureException(e);
+                        console.warn("Error while getting woka base64", e);
+                    });
+            });
+        }
+
+        if (offer.name) {
+            chatUser.username = offer.name;
+        }
+
+        const content = writable<ChatMessageContent>({ body: offer.fileName, url: undefined });
+        const status = writable<ChatAttachmentStatus>({ state: "loading", progress: 0 });
+        const decision = writable<"pending" | "accepted" | "declined">("pending");
+        const message = new ProximityChatMessage(
+            offer.transferId,
+            chatUser,
+            content,
+            new Date(),
+            false,
+            getMessageTypeFromMimeType(offer.mimeType),
+            {
+                status,
+                size: offer.size,
+                consent: {
+                    decision,
+                    accept: () => this.fileTransferService?.download(offer.transferId) ?? Promise.resolve(),
+                    decline: () => this.refuseIncomingFileOffer(offer.transferId),
+                },
+            },
+            this.toggleReaction,
+        );
+
+        this.fileTransfers.set(offer.transferId, { message, content, status, decision, sizeBytes: offer.size });
+        this.messages.push(message);
+        this.lastMessageTimestamp = message.date.getTime();
+        this.notifyNewMessage(message);
+
+        const isRoomDisplayed = get(selectedRoomStore)?.id === this.id && get(chatVisibilityStore);
+        if (!isRoomDisplayed) {
+            this.hasUnreadMessages.set(true);
+            this.unreadNotificationCount.set(get(this.unreadNotificationCount) + 1);
+            this.unreadMessagesCount.set(get(this.unreadMessagesCount) + 1);
+
+            if (!get(this.areNotificationsMuted)) {
+                chatNotificationStore.addNotification(
+                    message.sender.username ?? "unknown",
+                    get(LL).chat.notification.file({ fileName: offer.fileName }),
+                    this,
+                    message.id,
+                );
+            }
+        }
+    }
+
+    private applyFileTransferUpdate(update: ProximityFileTransferUpdate): void {
+        const transfer = this.fileTransfers.get(update.transferId);
+        if (!transfer) {
+            return;
+        }
+        const { content, status, decision } = transfer;
+
+        if (update.state === "ready") {
+            analyticsClient.trackAdminEvent("chat.proximity_file.received", {
+                sizeBytes: transfer.sizeBytes,
+                durationMs: update.durationMs,
+                relay: update.route?.relay,
+                relayProtocol: update.route?.relay ? update.route.protocol : undefined,
+            });
+            transfer.downloadStartedAt = undefined;
+            this.fileTransferObjectUrls.add(update.url);
+            content.update((currentContent) => ({ ...currentContent, url: update.url }));
+            decision.set("accepted");
+            status.set({ state: "ready" });
+            return;
+        }
+
+        if (update.state === "error") {
+            transfer.downloadStartedAt = undefined;
+            // A file already received stays usable whatever happens to the connection afterwards.
+            if (get(content).url === undefined) {
+                status.set({ state: "error", error: update.error === "unavailable" ? "unavailable" : "download" });
+            }
+            return;
+        }
+
+        let remainingSeconds: number | undefined;
+        if (update.state === "downloading") {
+            transfer.downloadStartedAt ??= Date.now();
+            remainingSeconds = estimateProximityFileTransferRemainingSeconds(
+                update.progress,
+                Date.now() - transfer.downloadStartedAt,
+            );
+        } else {
+            transfer.downloadStartedAt = undefined;
+        }
+        decision.set(update.state === "pending" ? "pending" : "accepted");
+        status.set({ state: "loading", progress: update.progress, remainingSeconds });
+    }
+
+    private refuseIncomingFileOffer(transferId: string): void {
+        this.fileTransferService?.decline(transferId);
+        const transfer = this.fileTransfers.get(transferId);
+        if (transfer && get(transfer.content).url === undefined) {
+            transfer.decision.set("declined");
+        }
+    }
+
+    private applyOutgoingFileTransferUpdate(update: OutgoingProximityFileTransferUpdate): void {
+        this.updateOutgoingRecipients(update.transferId, (recipient) =>
+            recipient.spaceUserId === update.recipientSpaceUserId
+                ? { ...recipient, state: update.state, progress: update.progress }
+                : recipient,
+        );
+    }
+
+    private updateOutgoingRecipients(
+        transferId: string,
+        change: (recipient: ChatAttachmentRecipient) => ChatAttachmentRecipient,
+    ): void {
+        // Received and declined are final: a later failure (the recipient leaving afterwards) must not undo them.
+        this.outgoingFileTransfers
+            .get(transferId)
+            ?.update((recipients) =>
+                recipients.map((recipient) =>
+                    recipient.state === "received" || recipient.state === "declined" ? recipient : change(recipient),
+                ),
+            );
+    }
+
+    /** Recipients who will not get our files any more: the one who left, or all of them when we leave. */
+    private failUnfinishedOutgoingRecipients(spaceUserId?: string): void {
+        for (const transferId of this.outgoingFileTransfers.keys()) {
+            this.updateOutgoingRecipients(transferId, (recipient) =>
+                spaceUserId === undefined || recipient.spaceUserId === spaceUserId
+                    ? { ...recipient, state: "failed" }
+                    : recipient,
+            );
+        }
+    }
+
+    /**
+     * Adds or removes my reaction locally, then tells the other participants.
+     * The pusher does not echo a public event back to its sender.
+     */
+    private readonly toggleReaction = (messageId: string, key: string): void => {
+        const message = this.messages.get(messageId);
+        if (!message || !get(message.canReact)) {
+            return;
+        }
+        const added = !message.reactions.get(key)?.users.has(this._spaceUserId);
+        this.applyReaction(message, key, this._spaceUserId, added);
+        this._space?.emitPublicMessage({
+            $case: "spaceMessageReaction",
+            spaceMessageReaction: { messageId, reaction: key, added },
+        });
+    };
+
+    private applyRemoteReaction(
+        senderUserId: string,
+        { messageId, reaction, added }: { messageId: string; reaction: string; added: boolean },
+    ): void {
+        if (senderUserId === this._spaceUserId || this.isBlackListedSpaceUser(senderUserId)) {
+            return;
+        }
+        const message = this.messages.get(messageId);
+        if (!message || !get(message.canReact)) {
+            return;
+        }
+        this.applyReaction(message, reaction, senderUserId, added);
+    }
+
+    private applyReaction(message: ChatMessage, key: string, spaceUserId: string, added: boolean): void {
+        const spaceUser = this.users?.get(spaceUserId);
+        const user = spaceUser ? mapExtendedSpaceUserToChatUser(spaceUser) : { ...this.unknownUser, spaceUserId };
+        // Anonymous users have no chat id.
+        const chatUser = { ...user, chatId: user.chatId || spaceUserId };
+        applyProximityReaction(
+            message.reactions,
+            key,
+            spaceUserId,
+            chatUser,
+            added,
+            this._spaceUserId,
+            (reactionKey) => this.toggleReaction(message.id, reactionKey),
+            message.canReact,
+        );
+    }
+
+    /** The quote to send with my next message, if a message of this room is selected for a reply. */
+    private quoteOfSelectedReply(): SpaceMessageQuote | undefined {
+        const selected = get(selectedChatMessageToReply);
+        const message = selected ? this.messages.get(selected.id) : undefined;
+        if (!message || message !== selected) {
+            return undefined;
+        }
+        return {
+            messageId: message.id,
+            excerpt: get(message.content).body.slice(0, QUOTE_EXCERPT_MAX_LENGTH),
+            senderName: message.sender?.username,
+        };
+    }
+
+    /**
+     * The quoted copy shown inside a reply: the original message when it is still in the timeline,
+     * otherwise the excerpt carried by the reply (the receiver joined the bubble after the original).
+     */
+    private createQuotedMessage(quote: SpaceMessageQuote): ProximityChatMessage {
+        const original = this.messages.get(quote.messageId);
+        const quoted = new ProximityChatMessage(
+            quote.messageId,
+            original?.sender ?? { ...this.unknownUser, username: quote.senderName || this.unknownUserName },
+            original?.content ?? writable({ body: quote.excerpt.slice(0, QUOTE_EXCERPT_MAX_LENGTH), url: undefined }),
+            original?.date ?? new Date(),
+            original?.isMyMessage ?? false,
+            "proximity",
+        );
+        quoted.isQuotedMessage = true;
+        return quoted;
+    }
+
+    private isBlackListedSpaceUser(spaceUserId: string): boolean {
+        const uuid = this.users?.get(spaceUserId)?.uuid;
+        return uuid !== undefined && blackListManager.isBlackListed(uuid);
+    }
+
+    private markFileOffersFromSenderUnavailable(spaceUserId: string): void {
+        for (const [transferId, { message }] of this.fileTransfers.entries()) {
+            if (message.sender?.spaceUserId !== spaceUserId || get(message.content).url !== undefined) {
+                continue;
+            }
+            this.applyFileTransferUpdate({ transferId, state: "error", progress: 0, error: "unavailable" });
+        }
+    }
+
+    setTimelineAsRead(): void {
+        console.info("setTimelineAsRead => Method not implemented yet!");
+    }
+
+    muteNotification(): Promise<void> {
+        return muteProximityChatNotifications(this.areNotificationsMuted);
+    }
+
+    unmuteNotification(): Promise<void> {
+        return unmuteProximityChatNotifications(this.areNotificationsMuted);
+    }
+
+    loadMorePreviousMessages(): Promise<void> {
+        return Promise.resolve();
+    }
+
+    addExternalMessage(type: "local" | "bubble", message: string, authorName?: string): void {
+        // Create content message
+        const newChatMessageContent = {
+            body: message,
+            url: undefined,
+        };
+
+        // Create message
+        const newMessage = new ProximityChatMessage(
+            uuidv4(),
+            {
+                ...this.unknownUser,
+                username: authorName ?? this.unknownUserName,
+            },
+            writable(newChatMessageContent),
+            new Date(),
+            false,
+            "proximity",
+            undefined,
+            type === "bubble" ? this.toggleReaction : undefined,
+        );
+
+        // Add message to the list
+        this.messages.push(newMessage);
+        this.hasUserMessages.set(true);
+
+        // If type is bubble, we need to forward the message to the other users
+        if (type === "bubble") {
+            this._space?.emitPublicMessage({
+                $case: "spaceMessage",
+                spaceMessage: {
+                    message: message,
+                    characterTextures: [],
+                    id: newMessage.id,
+                },
+            });
+        }
+    }
+
+    startTyping(): Promise<object> {
+        this._space?.emitPublicMessage({
+            $case: "spaceIsTyping",
+            spaceIsTyping: {
+                isTyping: true,
+                characterTextures: [],
+            },
+        });
+        return Promise.resolve({});
+    }
+    stopTyping(): Promise<object> {
+        this._space?.emitPublicMessage({
+            $case: "spaceIsTyping",
+            spaceIsTyping: {
+                isTyping: false,
+                characterTextures: [],
+            },
+        });
+
+        return Promise.resolve({});
+    }
+
+    private addTypingUser(
+        senderUserId: string,
+        characterTextures: CharacterTextureMessage[],
+        name: string | undefined,
+    ): void {
+        this.typingMembers.update((typingMembers) => {
+            if (typingMembers.find((user) => user.id === senderUserId) == undefined) {
+                typingMembers.push({
+                    id: senderUserId,
+                    name: name ?? null,
+                    pictureStore: readable<string | undefined>(undefined, (set) => {
+                        CharacterLayerManager.wokaBase64(characterTextures)
+                            .then((wokaBase64) => {
+                                set(wokaBase64);
+                            })
+                            .catch((e) => {
+                                Sentry.captureException(e);
+                                console.warn("Error while getting woka base64", e);
+                            });
+                    }),
+                });
+            }
+            return typingMembers;
+        });
+        this.typingExpiry.refresh(senderUserId);
+    }
+
+    private removeTypingUser(senderUserId: string): void {
+        const sender = this.users?.get(senderUserId);
+        let userIdToRemove = senderUserId;
+        if (sender !== undefined) {
+            userIdToRemove = sender.spaceUserId.toString();
+        }
+
+        this.removeTypingUserbyID(userIdToRemove);
+    }
+
+    private removeTypingUserbyID(id: string) {
+        this.typingExpiry.forget(id);
+        this.typingMembers.update((typingMembers) => {
+            return typingMembers.filter((user) => user.id !== id);
+        });
+    }
+
+    addExternalTypingUser(id: string, name: string, avatarUrl: string | null): void {
+        this.typingMembers.update((typingMembers) => {
+            if (typingMembers.find((user) => user.id === id) == undefined) {
+                typingMembers.push({ id, name, pictureStore: readable(avatarUrl ?? undefined) });
+            }
+            return typingMembers;
+        });
+        this.typingExpiry.refresh(id);
+    }
+
+    removeExternalTypingUser(id: string) {
+        this.removeTypingUserbyID(id);
+    }
+
+    public setDisplayName(displayName: string): void {
+        this.name.set(displayName);
+    }
+
+    public async joinSpace(
+        spaceName: string,
+        propertiesToSync: string[],
+        isMeetingRoomChat: boolean = false,
+        filterType: FilterType = FilterType.ALL_USERS,
+        disableChat: boolean = false,
+        signal?: AbortSignal,
+    ): Promise<SpaceInterface> {
+        if (spaceName !== this.spaceName && !this.isDefaultProximityRoom()) {
+            throw new Error(`Cannot join proximity room "${this.spaceName}" with different space "${spaceName}"`);
+        }
+        if (this._space && !this._space.destroyed) {
+            if (this._space.getName() !== spaceName && this.isDefaultProximityRoom()) {
+                await this.leaveSpace(this._space.getName(), isMeetingRoomChat);
+            } else {
+                return this._space;
+            }
+        }
+        if (this.joinSpaceAbortController) {
+            this.joinSpaceAbortController.abort(new AbortError("A space is already being joined"));
+            this.joinSpaceAbortController = undefined;
+            this.scriptingOutputAudioStreamManager?.close();
+            this.scriptingInputAudioStreamManager?.close();
+        }
+
+        this.joinSpaceAbortController = new AbortController();
+        const joinSignal =
+            signal !== undefined
+                ? abortAny([this.joinSpaceAbortController.signal, signal])
+                : this.joinSpaceAbortController.signal;
+
+        try {
+            this._space = await this.spaceRegistry.joinSpace(spaceName, filterType, propertiesToSync, joinSignal, {
+                canRecord: WAMSettingsUtils.canStartRecording(this.wamSettings, this.tags, localUserStore.isLogged()),
+                spaceKind: SPACE_KIND_OF_ROOM[get(this.kind)],
+            });
+        } catch (e) {
+            this.joinSpaceAbortController = undefined;
+            throw e;
+        }
+
+        const spaceForThisJoin = this._space;
+        await this.throwIfAborted(joinSignal, spaceForThisJoin);
+
+        this.isChatDisabled.set(disableChat);
+        this.intentionallyClosed.set(false);
+        this.isJoined.set(true);
+        this.setupFileTransferService(this._space);
+
+        await this.throwIfAborted(joinSignal, spaceForThisJoin);
+
+        let hasUserInProximityChat = false;
+
+        this.spaceUsersStore.forward(this._space.usersStore);
+        this.spaceStateUnsubscriber?.();
+        const joinedSpace = this._space;
+        // The polls and questions already there when we joined are not news. They are only known once the whole
+        // state has arrived, which can be after we subscribe (the store is empty until then).
+        let hasBaseline = false;
+        this.spaceStateUnsubscriber = joinedSpace.state.store.subscribe((state) => {
+            if (hasBaseline) {
+                this.notifyNewPolls(get(this.pollsStore), state.polls);
+                this.notifyNewQuestions(get(this.questionsStore), state.questions);
+            }
+            hasBaseline ||= joinedSpace.state.isInitialized();
+            // writable.set() notifies for any object, even the same one: compare first.
+            if (state.polls !== get(this.pollsStore)) {
+                this.pollsStore.set(state.polls);
+            }
+            if (state.questions !== get(this.questionsStore)) {
+                this.questionsStore.set(state.questions);
+            }
+        });
+
+        this.usersUnsubscriber = this._space.usersStore.subscribe((users) => {
+            this.users = users;
+            this._currentMeetingParticipantsStore.set(this.mapSpaceUsersToMeetingParticipants(users));
+            if (!hasUserInProximityChat && users.size > 1) {
+                let name = this.unknownUserName;
+                // Let's find the first user that is not us
+                for (const user of users.values()) {
+                    if (user.spaceUserId !== this._spaceUserId) {
+                        name = user.name;
+                        break;
+                    }
+                }
+
+                const notificationText = get(LL).notification.discussion({
+                    name,
+                });
+                notificationManager.createNotification(new BasicNotification(notificationText));
+            }
+            hasUserInProximityChat = users.size > 1;
+            this.hasUserInProximityChat.set(users.size > 1);
+        });
+
+        const isBlackListed = (sender: string) => {
+            const uuid = this.users?.get(sender)?.uuid;
+            return uuid && blackListManager.isBlackListed(uuid);
+        };
+
+        this.spaceMessageSubscription?.unsubscribe();
+        this.spaceMessageSubscription = this._space.observePublicEvent("spaceMessage").subscribe((event) => {
+            if (isBlackListed(event.sender)) {
+                return;
+            }
+
+            this.addNewMessage(
+                event.spaceMessage.message,
+                event.sender,
+                event.spaceMessage.characterTextures ?? [],
+                event.spaceMessage.name ?? "",
+                event.spaceMessage.id,
+                event.spaceMessage.quote,
+            );
+
+            // Get the last message to use for notification
+            const lastMessage = this.messages.length > 0 ? this.messages[this.messages.length - 1] : undefined;
+
+            // if the proximity chat is not open, open it to see the message
+            const intentionallyClosed = get(this.intentionallyClosed);
+            if (!intentionallyClosed) {
+                chatVisibilityStore.set(true);
+                chatNotificationStore.clearRoom(this.id);
+            } else {
+                const previousCount = get(this.unreadMessagesCount);
+                this.unreadMessagesCount.set(previousCount + 1);
+            }
+            if (get(selectedRoomStore) == undefined) selectedRoomStore.set(this);
+
+            // Over the map while the chat is closed; in the chat, a banner for a mention only.
+            const mentionsMe = lastMessage !== undefined && get(lastMessage.content).mentionsMe === true;
+            const plan = this.planNotification(mentionsMe);
+            if (lastMessage?.sender && plan.banner) {
+                if (mentionsMe) {
+                    addPendingMention(this.id);
+                }
+                chatMessageBannerStore.show({
+                    room: this,
+                    message: lastMessage,
+                    senderName: lastMessage.sender.username ?? this.unknownUserName,
+                    body: get(lastMessage.content).body,
+                    mentionsMe,
+                    roomName: get(this.name),
+                    author: { pictureStore: lastMessage.sender.pictureStore, color: lastMessage.sender.color },
+                });
+            } else if (lastMessage?.sender && plan.toast) {
+                const userName = lastMessage.sender.username ?? this.unknownUserName;
+                const messageBody = mentionsToPlainText(get(lastMessage.content).body);
+                const numberOfChar = 60;
+                const messageToDisplay =
+                    messageBody.length > numberOfChar ? messageBody.slice(0, numberOfChar) + "..." : messageBody;
+                chatNotificationStore.addNotification(
+                    userName,
+                    messageToDisplay,
+                    this,
+                    lastMessage.id,
+                    true,
+                    undefined,
+                    mentionsMe
+                        ? { pictureStore: lastMessage.sender.pictureStore, color: lastMessage.sender.color }
+                        : undefined,
+                );
+            }
+        });
+
+        this.spaceMessageReactionSubscription?.unsubscribe();
+        this.spaceMessageReactionSubscription = this._space
+            .observePublicEvent("spaceMessageReaction")
+            .subscribe((event) => this.applyRemoteReaction(event.sender, event.spaceMessageReaction));
+
+        this.spaceIsTypingSubscription?.unsubscribe();
+        this.spaceIsTypingSubscription = this._space.observePublicEvent("spaceIsTyping").subscribe((event) => {
+            if (isBlackListed(event.sender) || disableChat) {
+                return;
+            }
+            if (event.spaceIsTyping.isTyping) {
+                this.addTypingUser(event.sender, event.spaceIsTyping.characterTextures, event.spaceIsTyping.name);
+            } else {
+                this.removeTypingUser(event.sender);
+            }
+        });
+        await this.throwIfAborted(joinSignal, spaceForThisJoin);
+
+        this.saveChatState();
+
+        const actualStatus = get(availabilityStatusStore);
+        if (!isAChatRoomIsVisible()) {
+            selectedRoomStore.set(this);
+            navChat.switchToChat();
+            if (
+                !get(requestedMicrophoneState) &&
+                !get(requestedCameraState) &&
+                (actualStatus === AvailabilityStatus.ONLINE || actualStatus === AvailabilityStatus.AWAY)
+            ) {
+                // If the user is not on the mobile, open the chat
+                // The user experience is disrupted by the chat on mobile
+                if (!isMediaBreakpointUp("md")) {
+                    chatVisibilityStore.set(true);
+                    chatNotificationStore.clearRoom(this.id);
+                }
+            }
+        }
+        await this.throwIfAborted(joinSignal, spaceForThisJoin);
+
+        let users: SpaceUserExtended[] = [];
+        if (!isMeetingRoomChat) {
+            // Let's wait for the users to be loaded
+            try {
+                users = await this.getFirstUsers(this._space, {
+                    signal: joinSignal,
+                });
+            } catch (e) {
+                await this.cleanupJoinAttemptAndLeave(spaceForThisJoin);
+                throw e;
+            }
+            await this.throwIfAborted(joinSignal, spaceForThisJoin);
+
+            faviconManager.pushNotificationFavicon();
+
+            // Note: by design, if someone comes talk to us, there should be only one new user in the space.
+            // So we know for sure that there is only one new user.
+            const peer = Array.from(users.values()).find((user) => user.spaceUserId !== this._spaceUserId);
+
+            if (peer) {
+                statusChanger.setUserNameInteraction(peer.name ?? this.unknownUserName);
+                statusChanger.applyInteractionRules();
+            }
+        }
+        await this.throwIfAborted(joinSignal, spaceForThisJoin);
+        if (!isMeetingRoomChat) {
+            this.addEnteringChatWithUsers(users);
+            this.soundManager.playBubbleInSound();
+        } else {
+            this.sendMessage(get(LL).chat.timeLine.youJoinedMeetingRoom(), "incoming", false);
+            this.soundManager.playMeetingInSound();
+        }
+
+        // Request a screen wake lock so the device does not go to sleep while chatting (proximity or meeting room).
+        screenWakeLock
+            .requestWakeLock()
+            .then((release) => {
+                if (joinSignal.aborted || this._space !== spaceForThisJoin) {
+                    // The join attempt was aborted while we were acquiring the lock. Release it right away,
+                    // the cleanup code already ran and will not do it for us.
+                    release?.().catch((error) => console.error(error));
+                    return;
+                }
+                this.screenWakeRelease = release;
+            })
+            .catch((error) => console.error(error));
+
+        await this.throwIfAborted(joinSignal, spaceForThisJoin);
+
+        this.spaceWatcherUserJoinedObserver = this._space.observeUserJoined.subscribe((spaceUser) => {
+            debug("User joined space: ", spaceUser);
+            if (spaceUser.spaceUserId === this._spaceUserId || isMeetingRoomChat) {
+                return;
+            }
+            this.addIncomingUser(spaceUser);
+        });
+
+        this.spaceWatcherUserLeftObserver = this._space.observeUserLeft.subscribe((spaceUser) => {
+            if (isMeetingRoomChat) return;
+            this.markFileOffersFromSenderUnavailable(spaceUser.spaceUserId);
+            this.failUnfinishedOutgoingRecipients(spaceUser.spaceUserId);
+            this.addOutcomingUser(spaceUser);
+        });
+        await this.throwIfAborted(joinSignal, spaceForThisJoin);
+
+        // Now that we have the complete user list we can listen to incoming and outgoing users.
+        // The initial join events (sent below) may still be waiting for the zone data of the users already in the
+        // space, so late joiners are held back until those events are out: a user is announced exactly once, either
+        // in the initial list or as a participant joining afterwards.
+        const initialJoinEvents = new Deferred<void>();
+        initialJoinEvents.promise.catch(() => {});
+        const announcedUserIds = new Set<number>();
+        let joinEventsSent = false;
+        this.observeUserJoinedSubscription = this._space.observeUserJoined.subscribe((spaceUser) => {
+            (async () => {
+                const player = await this.waitForRemotePlayer(spaceUser.spaceUserId);
+                await initialJoinEvents.promise;
+                // The wait may outlive the meeting (we left, or joined another space) or the user (already gone).
+                if (this._space !== spaceForThisJoin || !this.users?.has(spaceUser.spaceUserId)) {
+                    return;
+                }
+                if (!player || announcedUserIds.has(player.userId)) {
+                    return;
+                }
+                announcedUserIds.add(player.userId);
+                if (!joinEventsSent) {
+                    // Nobody was known when we joined (getFirstUsers backstop, or zone data that never came):
+                    // this first peer IS the meeting we joined, not a participant joining an existing one.
+                    joinEventsSent = true;
+                    this.sendJoinEvents(spaceName, [player]);
+                    return;
+                }
+                iframeListener.sendParticipantJoinMeetingEvent(spaceName, player);
+                if (this.isDefaultProximityRoom()) {
+                    iframeListener.sendParticipantJoinProximityMeetingEvent(player);
+                }
+                if (!isMeetingRoomChat) {
+                    if (this.users && this.users.size <= MAX_PARTICIPANTS_FOR_SOUND_NOTIFICATIONS) {
+                        this.soundManager.playBubbleInSound();
+                    }
+                    return;
+                }
+
+                if (this.users && this.users.size <= MAX_PARTICIPANTS_FOR_SOUND_NOTIFICATIONS) {
+                    this.soundManager.playMeetingInSound();
+                }
+            })().catch((e) => {
+                if (!(e instanceof AbortError)) {
+                    console.error("Error while announcing a user joining the proximity space", e);
+                }
+            });
+        });
+
+        this.observeUserLeftSubscription = this._space.observeUserLeft.subscribe((spaceUser) => {
+            this.markFileOffersFromSenderUnavailable(spaceUser.spaceUserId);
+            this.failUnfinishedOutgoingRecipients(spaceUser.spaceUserId);
+            const player = this.getRemotePlayerFromSpaceUserId(spaceUser.spaceUserId);
+            // Only announce the departure of users we did announce (one still waiting for zone data is unknown to
+            // scripts), and forget them so they are announced again if they come back.
+            if (player && announcedUserIds.delete(player.userId)) {
+                iframeListener.sendParticipantLeaveMeetingEvent(spaceName, player);
+                if (this.isDefaultProximityRoom()) {
+                    iframeListener.sendParticipantLeaveProximityMeetingEvent(player);
+                }
+                if (!isMeetingRoomChat) {
+                    if (this.users && this.users.size <= MAX_PARTICIPANTS_FOR_SOUND_NOTIFICATIONS) {
+                        this.soundManager.playBubbleOutSound();
+                    }
+                    return;
+                }
+
+                if (this.users && this.users.size <= MAX_PARTICIPANTS_FOR_SOUND_NOTIFICATIONS) {
+                    this.soundManager.playMeetingOutSound();
+                }
+            }
+            this.removeTypingUserbyID(spaceUser.spaceUserId);
+        });
+        try {
+            await this.throwIfAborted(joinSignal, spaceForThisJoin);
+
+            const playersInMeeting = await this.mapSpaceUsersToRemotePlayers(
+                Array.from((this.users ?? new Map()).values()),
+            );
+            await this.throwIfAborted(joinSignal, spaceForThisJoin);
+
+            // A bubble with nobody known yet is not announced: the first peer to show up will trigger the join
+            // events (see observeUserJoinedSubscription above). Being alone in a meeting room is legitimate though.
+            if (isMeetingRoomChat || playersInMeeting.length > 0) {
+                joinEventsSent = true;
+                for (const player of playersInMeeting) {
+                    announcedUserIds.add(player.userId);
+                }
+                this.sendJoinEvents(spaceName, playersInMeeting);
+            }
+            initialJoinEvents.resolve();
+        } catch (e) {
+            initialJoinEvents.reject(asError(e));
+            throw e;
+        }
+
+        this.joinSpaceAbortController = undefined;
+        return this._space;
+    }
+
+    private sendJoinEvents(spaceName: string, players: MessageUserJoined[]): void {
+        if (this.isDefaultProximityRoom()) {
+            iframeListener.sendJoinProximityMeetingEvent(players);
+        }
+        iframeListener.sendJoinMeetingEvent(spaceName, get(this.name), get(this.kind), players);
+    }
+
+    /**
+     * Leaves the given space (so it is not leaked) and, only if that space is still the current one,
+     * clears all state and subscriptions. If a newer join has already overwritten this._space,
+     * we only leave the aborted join's space and do not touch the current instance state.
+     */
+    private async cleanupJoinAttemptAndLeave(space: SpaceInterface | undefined): Promise<void> {
+        if (space) {
+            try {
+                await this.spaceRegistry.leaveSpace(space);
+            } catch (error) {
+                console.error("Error leaving space after abort: ", error);
+                Sentry.captureException(error);
+            }
+        }
+        if (this._space !== space) {
+            return;
+        }
+        this.usersUnsubscriber?.();
+        this.usersUnsubscriber = undefined;
+        this.spaceMessageSubscription?.unsubscribe();
+        this.spaceMessageSubscription = undefined;
+        this.spaceIsTypingSubscription?.unsubscribe();
+        this.spaceIsTypingSubscription = undefined;
+        this.spaceMessageReactionSubscription?.unsubscribe();
+        this.spaceMessageReactionSubscription = undefined;
+        this.spaceStateUnsubscriber?.();
+        this.spaceStateUnsubscriber = undefined;
+        this.cleanupFileTransferService();
+        this.spaceWatcherUserJoinedObserver?.unsubscribe();
+        this.spaceWatcherUserJoinedObserver = undefined;
+        this.spaceWatcherUserLeftObserver?.unsubscribe();
+        this.spaceWatcherUserLeftObserver = undefined;
+        this.observeUserJoinedSubscription?.unsubscribe();
+        this.observeUserJoinedSubscription = undefined;
+        this.observeUserLeftSubscription?.unsubscribe();
+        this.observeUserLeftSubscription = undefined;
+        this.scriptingOutputAudioStreamManager?.close();
+        this.scriptingOutputAudioStreamManager = undefined;
+        this.scriptingInputAudioStreamManager?.close();
+        this.scriptingInputAudioStreamManager = undefined;
+        if (this.screenWakeRelease) {
+            this.screenWakeRelease().catch((error) => console.error(error));
+            this.screenWakeRelease = undefined;
+        }
+        this.spaceUsersStore.forward(readable(new Map()));
+        this.pollsStore.set({});
+        this.questionsStore.set({});
+        this.unreadQuestionIdsStore.set(new Set());
+        this._space = undefined;
+        this.isJoined.set(false);
+        this.isChatDisabled.set(false);
+        this.joinSpaceAbortController = undefined;
+        this._currentMeetingParticipantsStore.set([]);
+    }
+
+    /**
+     * Maps the space users map to the public MeetingParticipant list (for current meeting participants).
+     */
+    private mapSpaceUsersToMeetingParticipants(users: Map<string, SpaceUserExtended>): MeetingParticipant[] {
+        return Array.from(users.values()).map((user) => ({
+            spaceUserId: user.spaceUserId,
+            name: user.name,
+            uuid: user.uuid,
+            pictureStore: user.pictureStore,
+            playUri: user.playUri,
+            roomName: user.roomName,
+            tags: user.tags ?? [],
+            cameraState: user.cameraState ?? false,
+            microphoneState: user.microphoneState ?? false,
+            screenSharingState: user.screenSharingState ?? false,
+        }));
+    }
+
+    /**
+     * If joinSignal is aborted, cleans up join state (for the given space only), leaves that space, and throws AbortError.
+     * spaceForThisJoin is the space this join attempt created; it is used so we never clear state that a newer join has set.
+     */
+    private async throwIfAborted(joinSignal: AbortSignal, spaceForThisJoin: SpaceInterface | undefined): Promise<void> {
+        if (!joinSignal.aborted) {
+            return;
+        }
+        await this.cleanupJoinAttemptAndLeave(spaceForThisJoin);
+        throw new AbortError(
+            typeof joinSignal.reason === "object" && joinSignal.reason instanceof Error
+                ? joinSignal.reason.message
+                : "Join space aborted",
+        );
+    }
+
+    /**
+     * Wait for some users (that are not us) to be in the space, and return them.
+     */
+    private async getFirstUsers(space: SpaceInterface, options: { signal: AbortSignal }): Promise<SpaceUserExtended[]> {
+        const users = await space.getUsers({ signal: options.signal });
+
+        const otherUsers = Array.from(users.values()).filter((user) => user.spaceUserId !== this._spaceUserId);
+        if (otherUsers.length > 0) {
+            return otherUsers;
+        }
+
+        return new Promise<SpaceUserExtended[]>((resolve, reject) => {
+            const cleanup = () => {
+                subscription.unsubscribe();
+                clearTimeout(timeout);
+                options.signal.removeEventListener("abort", onAbort);
+            };
+            const onAbort = (event: Event) => {
+                cleanup();
+                reject(asError(eventToAbortReason(event)));
+            };
+            const subscription = space.observeUserJoined.subscribe((user) => {
+                if (user.spaceUserId !== this._spaceUserId) {
+                    cleanup();
+                    resolve([user]);
+                }
+            });
+            // Deadlock backstop: if the peer's browser never registers in the space, observeUserJoined
+            // never fires. Resolve with no peer rather than hanging joinSpace forever; a late peer is
+            // still handled by the observeUserJoined observers wired later in joinSpace.
+            const timeout = setTimeout(() => {
+                Sentry.captureMessage(
+                    `getFirstUsers backstop fired: no peer joined space "${space.getName()}" within ${GET_FIRST_USERS_TIMEOUT_MS}ms`,
+                );
+                cleanup();
+                resolve([]);
+            }, GET_FIRST_USERS_TIMEOUT_MS);
+            options.signal.addEventListener("abort", onAbort, { once: true });
+        });
+    }
+
+    private getRemotePlayerFromSpaceUserId(spaceUserId: string) {
+        const { /*roomUrl,*/ userId } = this.extractUserIdAndRoomUrlFromSpaceId(spaceUserId);
+        // Technically, we should check the roomUrl is the same as the current one.
+        // In practice, all users in this space are in the same room.
+        return this.remotePlayersRepository.getPlayers().get(userId);
+    }
+
+    /**
+     * Resolves the remote player data of a space user. A user can be registered in the space before their
+     * userJoinedMessage reaches us through the zone system (typically someone spawning right next to us), so we
+     * wait for it rather than dropping the user. Resolves to undefined for ourselves and for users whose data
+     * never arrives.
+     */
+    private async waitForRemotePlayer(spaceUserId: string): Promise<MessageUserJoined | undefined> {
+        if (spaceUserId === this._spaceUserId) {
+            return undefined;
+        }
+        const { userId } = this.extractUserIdAndRoomUrlFromSpaceId(spaceUserId);
+        try {
+            return await this.remotePlayersRepository.getPlayer(userId);
+        } catch (e) {
+            console.warn(`User ${spaceUserId} is in the proximity space but never showed up in the players list`, e);
+            return undefined;
+        }
+    }
+
+    private async mapSpaceUsersToRemotePlayers(spaceUsers: SpaceUserExtended[]): Promise<MessageUserJoined[]> {
+        const players = await Promise.all(
+            spaceUsers.map(async (spaceUser) => {
+                const player = await this.waitForRemotePlayer(spaceUser.spaceUserId);
+                // The user may have left the space while we were waiting for their zone data.
+                return this.users?.has(spaceUser.spaceUserId) ? player : undefined;
+            }),
+        );
+        return players.filter((player): player is MessageUserJoined => player !== undefined);
+    }
+
+    private extractUserIdAndRoomUrlFromSpaceId(spaceId: string): { roomUrl: string; userId: number } {
+        const lastUnderscoreIndex = spaceId.lastIndexOf("_");
+        if (lastUnderscoreIndex === -1) {
+            throw new Error("Invalid spaceId format: no underscore found");
+        }
+        const userId = parseInt(spaceId.substring(lastUnderscoreIndex + 1));
+        if (isNaN(userId)) {
+            throw new Error("Invalid userId format: not a number");
+        }
+        const roomUrl = spaceId.substring(0, lastUnderscoreIndex);
+        return { roomUrl, userId };
+    }
+
+    public async leaveSpace(spaceName: string, isMeetingRoomChat: boolean = false): Promise<boolean> {
+        // Capture space before aborting so we still run full leave (UI + leaveSpace) even if
+        // joinSpace's cleanup runs first and clears this._space.
+        const space = this._space;
+        if (this.joinSpaceAbortController) {
+            this.joinSpaceAbortController.abort(new AbortError("Leave space called while joining a space"));
+            this.joinSpaceAbortController = undefined;
+
+            if (!space) {
+                // We aborted the join before it completed (no space yet), so we are done.
+                return false;
+            }
+        }
+        if (!space) {
+            console.error("Trying to leave a space that is not joined");
+            return false;
+        }
+        if (space.getName() !== spaceName) {
+            console.error(
+                "Trying to leave a space different from the one joined : " + space.getName() + " !== " + spaceName,
+            );
+            return false;
+        }
+
+        // The messages stay readable, but the people they were sent to are gone: no more reactions or replies.
+        for (const message of get(this.messages)) {
+            if (message instanceof ProximityChatMessage) {
+                message.leaveConversation();
+            }
+        }
+        const replyTo = get(selectedChatMessageToReply);
+        if (replyTo && this.messages.get(replyTo.id) === replyTo) {
+            selectedChatMessageToReply.set(null);
+        }
+
+        this.isChatDisabled.set(false);
+        this.intentionallyClosed.set(false);
+        this.unreadMessagesCount.set(0);
+        chatNotificationStore.clearRoom(this.id);
+
+        this.spaceUsersStore.forward(readable(new Map()));
+        this.pollsStore.set({});
+        this.questionsStore.set({});
+        this.unreadQuestionIdsStore.set(new Set());
+        this._space = undefined;
+        this.isJoined.set(false);
+        this._currentMeetingParticipantsStore.set([]);
+
+        hideBubbleConfirmationModal();
+        iframeListener.sendLeaveMeetingEvent(spaceName);
+        if (this.isDefaultProximityRoom()) {
+            iframeListener.sendLeaveProximityMeetingEvent();
+        }
+        faviconManager.pushOriginalFavicon();
+
+        if (!isMeetingRoomChat) {
+            this.soundManager.playBubbleOutSound();
+        } else {
+            this.soundManager.playMeetingOutSound();
+        }
+
+        if (this.screenWakeRelease) {
+            this.screenWakeRelease().catch((error) => console.error(error));
+            this.screenWakeRelease = undefined;
+        }
+
+        if (this.users) {
+            if (this.users.size > 2) {
+                if (isMeetingRoomChat) {
+                    this.sendMessage(get(LL).chat.timeLine.youleftMeetingRoom(), "outcoming", false);
+                } else {
+                    this.sendMessage(get(LL).chat.timeLine.youLeft(), "outcoming", false);
+                }
+            } else {
+                for (const user of this.users.values()) {
+                    if (user.spaceUserId === this._spaceUserId) {
+                        continue;
+                    }
+                    if (isMeetingRoomChat) {
+                        this.sendMessage(get(LL).chat.timeLine.youleftMeetingRoom(), "outcoming", false);
+                    } else {
+                        this.sendMessage(get(LL).chat.timeLine.outcoming({ userName: user.name }), "outcoming", false);
+                    }
+                }
+            }
+            this.clearTypingMembers();
+        }
+        this.hasUserInProximityChat.set(false);
+
+        this.restoreChatState();
+
+        this.spaceWatcherUserJoinedObserver?.unsubscribe();
+        this.spaceWatcherUserLeftObserver?.unsubscribe();
+        this.spaceWatcherUserJoinedObserver = undefined;
+        this.spaceWatcherUserLeftObserver = undefined;
+        this.observeUserJoinedSubscription?.unsubscribe();
+        this.observeUserLeftSubscription?.unsubscribe();
+        this.observeUserJoinedSubscription = undefined;
+        this.observeUserLeftSubscription = undefined;
+        if (this.usersUnsubscriber) {
+            this.usersUnsubscriber();
+        }
+        this.users = undefined;
+
+        this.spaceMessageSubscription?.unsubscribe();
+        this.spaceIsTypingSubscription?.unsubscribe();
+        this.spaceMessageReactionSubscription?.unsubscribe();
+        this.spaceStateUnsubscriber?.();
+        this.spaceStateUnsubscriber = undefined;
+        this.cleanupFileTransferService();
+
+        this.scriptingOutputAudioStreamManager?.close();
+        this.scriptingInputAudioStreamManager?.close();
+        this.scriptingOutputAudioStreamManager = undefined;
+        this.scriptingInputAudioStreamManager = undefined;
+
+        try {
+            await this.spaceRegistry.leaveSpace(space);
+        } catch (error) {
+            console.error("Error leaving space: ", error);
+            Sentry.captureException(error);
+        }
+        return true;
+    }
+
+    private restoreChatState() {
+        if (get(selectedRoomStore) == this && get(shouldRestoreChatStateStore)) {
+            selectedRoomStore.set(this.currentMatrixRoom);
+        }
+
+        chatVisibilityStore.set(this.currentChatVisibility);
+        shouldRestoreChatStateStore.set(false);
+    }
+
+    private saveChatState() {
+        const currentChatVisibility = get(chatVisibilityStore);
+        const currentRoom = get(selectedRoomStore);
+        this.currentChatVisibility = currentChatVisibility;
+        this.currentMatrixRoom = currentRoom;
+        shouldRestoreChatStateStore.set(true);
+    }
+
+    public dispatchSound(url: URL): Promise<void> {
+        if (!this._space) {
+            console.error("Trying to dispatch sound in a space that is not joined");
+            return Promise.resolve();
+        }
+        return this._space.dispatchSound(url);
+    }
+
+    public async startScriptingAudioStream(sampleRate: number): Promise<void> {
+        await this.getOrCreateScriptingOutputAudioStreamManager().startStream(sampleRate);
+    }
+
+    public async appendScriptingAudioData(float32Array: Float32Array): Promise<void> {
+        await this.getOrCreateScriptingOutputAudioStreamManager().appendPCMData(float32Array);
+    }
+
+    public stopScriptingAudioStream(): void {
+        this.scriptingOutputAudioStreamManager?.stopStream();
+    }
+
+    public async resetScriptingAudioBuffer(): Promise<void> {
+        await this.getOrCreateScriptingOutputAudioStreamManager().resetAudioBuffer();
+    }
+
+    public async startListeningToScriptingAudioStream(sampleRate: number, meetingId?: string): Promise<void> {
+        await this.getOrCreateScriptingInputAudioStreamManager().startListeningToAudioStream(sampleRate, meetingId);
+    }
+
+    public stopListeningToScriptingAudioStream(): void {
+        this.scriptingInputAudioStreamManager?.stopListeningToAudioStream();
+    }
+
+    private getOrCreateScriptingOutputAudioStreamManager(): ScriptingOutputAudioStreamManager {
+        if (!this._space) {
+            throw new Error("Trying to start a scripting audio stream in a space that is not joined");
+        }
+        if (!this.scriptingOutputAudioStreamManager) {
+            this.scriptingOutputAudioStreamManager = new ScriptingOutputAudioStreamManager(this._space);
+        }
+        return this.scriptingOutputAudioStreamManager;
+    }
+
+    private getOrCreateScriptingInputAudioStreamManager(): ScriptingInputAudioStreamManager {
+        if (!this._space) {
+            throw new Error("Trying to listen to scripting audio streams in a space that is not joined");
+        }
+        if (!this.scriptingInputAudioStreamManager) {
+            this.scriptingInputAudioStreamManager = new ScriptingInputAudioStreamManager(this._space);
+        }
+        return this.scriptingInputAudioStreamManager;
+    }
+
+    /**
+     * Returns the name of the currently joined space, or undefined if not in any space.
+     */
+    public getCurrentSpaceName(): string | undefined {
+        return this._space?.getName();
+    }
+
+    /**
+     * Returns the currently joined space, or undefined if not in any space.
+     */
+    public getCurrentSpace(): SpaceInterface | undefined {
+        return this._space;
+    }
+
+    private clearTypingMembers(): void {
+        this.typingExpiry.clear();
+        this.typingMembers.set([]);
+    }
+
+    public destroy(): void {
+        this.clearTypingMembers();
+        this.spaceMessageSubscription?.unsubscribe();
+        this.spaceIsTypingSubscription?.unsubscribe();
+        this.spaceMessageReactionSubscription?.unsubscribe();
+        this.spaceStateUnsubscriber?.();
+        this.roomSidePanelUnsubscriber();
+        this.selectedRoomUnsubscriber();
+        this.cleanupFileTransferService();
+
+        this.scriptingOutputAudioStreamManager?.close();
+        this.scriptingInputAudioStreamManager?.close();
+        this.spaceWatcherUserJoinedObserver?.unsubscribe();
+        this.spaceWatcherUserLeftObserver?.unsubscribe();
+        this.observeUserJoinedSubscription?.unsubscribe();
+        this.observeUserLeftSubscription?.unsubscribe();
+        if (this.usersUnsubscriber) {
+            this.usersUnsubscriber();
+        }
+    }
+
+    private cleanupFileTransferService(): void {
+        this.fileTransferSubscriptions.unsubscribe();
+        this.fileTransferService?.destroy();
+        this.fileTransferService = undefined;
+        // Leaving ends every transfer and frees the files received: say so on each card, instead of
+        // leaving an Accept button, a progress bar or a save link that no longer lead anywhere.
+        for (const { content, status, decision } of this.fileTransfers.values()) {
+            if (get(decision) !== "declined") {
+                content.update((currentContent) => ({ ...currentContent, url: undefined }));
+                status.set({ state: "error", error: "unavailable" });
+            }
+        }
+        this.fileTransfers.clear();
+        this.failUnfinishedOutgoingRecipients();
+        this.outgoingFileTransfers.clear();
+        for (const objectUrl of this.fileTransferObjectUrls) {
+            URL.revokeObjectURL(objectUrl);
+        }
+        this.fileTransferObjectUrls.clear();
+    }
+}

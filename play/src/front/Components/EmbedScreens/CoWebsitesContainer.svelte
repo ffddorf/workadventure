@@ -1,0 +1,328 @@
+<script lang="ts">
+    import { onDestroy, onMount } from "svelte";
+    import type { Unsubscriber } from "svelte/store";
+    import { coWebsiteRatio, coWebsites, fullScreenCowebsite } from "../../Stores/CoWebsiteStore";
+    import JitsiCowebsiteComponent from "../Cowebsites/JistiCowebsiteComponent.svelte";
+    import SimpleCowebsiteComponent from "../Cowebsites/SimpleCowebsiteComponent.svelte";
+    import ImageCowebsiteComponent from "../Cowebsites/ImageCowebsiteComponent.svelte";
+    import { ImageCoWebsite } from "../../WebRtc/CoWebsite/ImageCoWebsite";
+    import { JitsiCoWebsite } from "../../WebRtc/CoWebsite/JitsiCoWebsite";
+    import { SimpleCoWebsite } from "../../WebRtc/CoWebsite/SimpleCoWebsite";
+    import { BBBCoWebsite } from "../../WebRtc/CoWebsite/BBBCoWebsite";
+    import { VideoCoWebsite } from "../../WebRtc/CoWebsite/VideoCoWebsite";
+    import BigBlueButtonCowebsiteComponent from "../Cowebsites/BigBlueButtonCowebsiteComponent.svelte";
+    import VideoCowebsiteComponent from "../Cowebsites/VideoCowebsiteComponent.svelte";
+    import type { CoWebsite } from "../../WebRtc/CoWebsite/CoWebsite";
+    import { screenOrientationStore } from "../../Stores/ScreenOrientationStore";
+    import { analyticsClient } from "../../Administration/AnalyticsClient";
+    import CoWebsiteTab from "./CoWebsiteTab.svelte";
+    import { IconChevronLeft, IconChevronRight, IconArrowsMinimize } from "@wa-icons";
+
+    //let container: HTMLElement;
+    let activeCowebsite: CoWebsite = $state($coWebsites[0]);
+    let resizeBar: HTMLElement;
+    let unsubscribeCowebsitesUpdate: Unsubscriber | undefined;
+
+    onMount(() => {
+        unsubscribeCowebsitesUpdate = coWebsites.subscribe((arr) => {
+            activeCowebsite = arr[arr.length - 1];
+        });
+
+        resizeBar.addEventListener("mousedown", handleMouseDown);
+        resizeBar.addEventListener("touchstart", handleTouchStart);
+    });
+
+    const handleMouseDown = () => {
+        document.addEventListener("mousemove", handleMouseMove);
+        document.addEventListener("mouseup", handleMouseUp);
+    };
+
+    const handleTouchStart = () => {
+        document.addEventListener("touchmove", handleTouchMove);
+        document.addEventListener("touchend", handleTouchEnd);
+    };
+
+    const handleMove = (clientX: number, clientY: number) => {
+        if ($screenOrientationStore === "landscape") {
+            if (document.documentElement.dir === "rtl") {
+                // 8 is the number of pixels of the resize bar
+                if (clientX < 8) {
+                    clientX = 8;
+                }
+                if (clientX > window.innerWidth) {
+                    clientX = window.innerWidth;
+                }
+
+                coWebsiteRatio.set(clientX / window.innerWidth);
+            } else {
+                if (clientX < 0) {
+                    clientX = 0;
+                }
+                // 8 is the number of pixels of the resize bar
+                if (clientX > window.innerWidth - 8) {
+                    clientX = window.innerWidth - 8;
+                }
+                coWebsiteRatio.set((window.innerWidth - clientX) / window.innerWidth);
+            }
+        } else {
+            // 8 is the number of pixels of the resize bar
+            if (clientY < 8) {
+                clientY = 8;
+            }
+            if (clientY > window.innerHeight) {
+                clientY = window.innerHeight;
+            }
+
+            coWebsiteRatio.set(clientY / window.innerHeight);
+        }
+    };
+
+    const handleMouseMove = (e: MouseEvent) => {
+        let clientX = e.clientX;
+        let clientY = e.clientY;
+        handleMove(clientX, clientY);
+    };
+
+    const handleTouchMove = (e: TouchEvent) => {
+        let clientX = e.touches[0].clientX;
+        let clientY = e.touches[0].clientY;
+        handleMove(clientX, clientY);
+    };
+    const handleMouseUp = () => {
+        document.removeEventListener("mousemove", handleMouseMove);
+        document.removeEventListener("mouseup", handleMouseUp);
+    };
+    const handleTouchEnd = () => {
+        document.removeEventListener("touchmove", handleTouchMove);
+        document.removeEventListener("touchend", handleTouchEnd);
+    };
+
+    function addDivForResize() {
+        const div = document.createElement("div");
+        div.id = "resize-overlay";
+        div.style.width = "100%";
+        div.style.height = "100%";
+        div.style.position = "absolute";
+        div.style.top = "0";
+        div.style.right = "0";
+        div.style.zIndex = "1800";
+        document.body.appendChild(div);
+        window.addEventListener("mouseup", removeDivForResize);
+    }
+
+    function removeDivForResize() {
+        const div = document.getElementById("resize-overlay");
+        if (div) {
+            document.body.removeChild(div);
+        }
+        window.removeEventListener("mouseup", removeDivForResize);
+    }
+
+    const setActiveCowebsite = (coWebsite: CoWebsite) => {
+        activeCowebsite = coWebsite;
+    };
+
+    function toggleFullScreen(event: MouseEvent) {
+        event.preventDefault();
+        event.stopPropagation();
+
+        if ($fullScreenCowebsite) {
+            fullScreenCowebsite.set(false);
+        } else {
+            fullScreenCowebsite.set(true);
+            analyticsClient.trackAdminEvent("cowebsite.fullscreen_opened");
+        }
+    }
+
+    onDestroy(() => {
+        fullScreenCowebsite.set(false);
+
+        unsubscribeCowebsitesUpdate?.();
+
+        resizeBar.removeEventListener("mousedown", handleMouseDown);
+        document.removeEventListener("mousemove", handleMouseMove);
+        document.removeEventListener("mouseup", handleMouseUp);
+        resizeBar.removeEventListener("touchstart", handleTouchStart);
+        document.removeEventListener("touchmove", handleTouchMove);
+        document.removeEventListener("touchend", handleTouchEnd);
+    });
+
+    let tabsContainer: HTMLElement | undefined = $state();
+    let tabsContainerWidth = $state(0);
+    let tabsOverflowing = $derived(tabsContainerWidth >= 0 && $coWebsites.length >= 0 && areTabsOverflowing());
+    let tabsScrollX = $state(0);
+
+    function areTabsOverflowing(): boolean {
+        if (!tabsContainer) {
+            return false;
+        }
+
+        return tabsContainer.scrollWidth > tabsContainer.clientWidth;
+    }
+
+    function scrollTabsLeft() {
+        if (!tabsContainer) {
+            return;
+        }
+        const scrollX = tabsContainer.scrollLeft;
+        for (let i = tabsContainer.childNodes.length - 1; i >= 0; i--) {
+            const tab = tabsContainer.childNodes[i] as HTMLElement;
+            if (tab.offsetLeft < scrollX) {
+                tabsContainer.scrollTo({
+                    left: tab.offsetLeft,
+                    behavior: "smooth",
+                });
+                break;
+            }
+        }
+    }
+
+    function scrollTabsRight() {
+        if (!tabsContainer) {
+            return;
+        }
+        const scrollX = tabsContainer.scrollLeft;
+        for (let i = 0; i < tabsContainer.childNodes.length; i++) {
+            const tab = tabsContainer.childNodes[i] as HTMLElement;
+            if (tab.offsetLeft > scrollX) {
+                tabsContainer.scrollTo({
+                    left: tab.offsetLeft,
+                    behavior: "smooth",
+                });
+                break;
+            }
+        }
+    }
+
+    function onTabsScroll() {
+        tabsScrollX = tabsContainer?.scrollLeft ?? 0;
+    }
+</script>
+
+<div
+    id="cowebsites-container"
+    class="w-full h-full bg-contrast/50 backdrop-blur relative {!$fullScreenCowebsite
+        ? 'cowebsite-normal'
+        : 'cowebsite-fullscreen'}"
+    style="transition: background-color 0.2s ease-in-out, backdrop-filter 0.2s ease-in-out;"
+>
+    <div class="h-full w-full flex flex-col">
+        <div class="flex py-2 ms-3 items-center height-tab overflow-hidden flex-none">
+            {#if tabsOverflowing && tabsScrollX > 0}
+                <div class="flex-0 w-10">
+                    <button
+                        class="w-10 h-10 rounded flex items-center justify-center hover:bg-white/10 me-2"
+                        onclick={scrollTabsLeft}
+                    >
+                        <IconChevronLeft font-size="20" class="text-white" />
+                    </button>
+                </div>
+            {/if}
+            <!-- For some weird reason, we need to put a random width so that flex-1 can work and ignore the width...
+                 Otherwise, flex-1 does nothing -->
+            <div class="tab-bar flex-1 w-32" bind:clientWidth={tabsContainerWidth}>
+                <div
+                    bind:this={tabsContainer}
+                    class="flex items-stretch overflow-x-hidden space-x-2 snap-x touch-pan-x"
+                    onscroll={onTabsScroll}
+                >
+                    {#each $coWebsites as coWebsite, index (coWebsite.getId())}
+                        <!-- svelte-ignore a11y_click_events_have_key_events -->
+                        <!-- svelte-ignore a11y_no_static_element_interactions -->
+                        <div data-testid="tab{index + 1}" class="snap-start">
+                            <CoWebsiteTab
+                                {coWebsite}
+                                isLoading={false}
+                                active={activeCowebsite === coWebsite}
+                                onclose={() => coWebsites.remove(coWebsite)}
+                                onclick={() => setActiveCowebsite(coWebsite)}
+                            />
+                        </div>
+                    {/each}
+                </div>
+            </div>
+
+            {#if tabsOverflowing && tabsScrollX < tabsContainer?.scrollWidth - tabsContainer?.clientWidth}
+                <div class="flex-0 w-10">
+                    <button
+                        class="w-10 h-10 rounded flex items-center justify-center hover:bg-white/10 me-2"
+                        onclick={scrollTabsRight}
+                    >
+                        <IconChevronRight font-size="20" class="text-white" />
+                    </button>
+                </div>
+            {/if}
+
+            <!-- svelte-ignore a11y_click_events_have_key_events -->
+            <!-- svelte-ignore a11y_no_static_element_interactions -->
+            <div class="flex justify-end w-10 flex-none">
+                <div
+                    class="ms-full h-10 w-10 rounded flex items-center justify-center hover:bg-white/10 me-2 cursor-pointer"
+                    onclick={toggleFullScreen}
+                >
+                    {#if !$fullScreenCowebsite}
+                        <IconArrowsMinimize font-size="20" class="text-white" />
+                    {:else}
+                        <IconArrowsMinimize font-size="20" class="text-white" />
+                    {/if}
+                </div>
+            </div>
+        </div>
+
+        <div class={$screenOrientationStore === "portrait" ? "flex-1 mb-3" : "h-full object-contain ms-3"}>
+            {#each $coWebsites as coWebsite (coWebsite.getId())}
+                {#if coWebsite instanceof JitsiCoWebsite}
+                    <JitsiCowebsiteComponent actualCowebsite={coWebsite} visible={coWebsite === activeCowebsite} />
+                {:else if coWebsite instanceof BBBCoWebsite}
+                    <BigBlueButtonCowebsiteComponent
+                        actualCowebsite={coWebsite}
+                        visible={coWebsite === activeCowebsite}
+                    />
+                {:else if coWebsite instanceof VideoCoWebsite}
+                    <VideoCowebsiteComponent actualCowebsite={coWebsite} visible={coWebsite === activeCowebsite} />
+                {:else if coWebsite instanceof ImageCoWebsite}
+                    <ImageCowebsiteComponent actualCowebsite={coWebsite} visible={coWebsite === activeCowebsite} />
+                {:else if coWebsite instanceof SimpleCoWebsite}
+                    <SimpleCowebsiteComponent
+                        actualCowebsite={coWebsite}
+                        allowApi={coWebsite.getAllowApi()}
+                        visible={coWebsite === activeCowebsite}
+                    />
+                {/if}
+            {/each}
+        </div>
+    </div>
+    <!-- We make the drag handle bigger than it really is to make it more easily selectable (especially on mobile) with "after" pseudo element -->
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div
+        class={$screenOrientationStore === "portrait"
+            ? "-mt-1.5 mx-auto w-40 h-1 bg-white rounded cursor-row-resize relative after:content-[''] after:absolute after:-start-4 after:-top-1  after:w-48 after:h-6 select-none"
+            : "absolute start-1 top-0 bottom-0 m-auto w-1 h-40 bg-white rounded cursor-col-resize after:content-[''] after:absolute after:-start-4 after:-top-4 after:h-48 after:w-6 select-none"}
+        class:hidden={$fullScreenCowebsite}
+        bind:this={resizeBar}
+        onmousedown={addDivForResize}
+        onmouseup={removeDivForResize}
+        ontouchstart={() => {
+            addDivForResize();
+            /*isResized.set(true)*/
+        }}
+        ondragend={removeDivForResize}
+        ontouchend={removeDivForResize}
+    ></div>
+</div>
+
+<style>
+    .cowebsite-normal {
+        position: relative;
+        z-index: 1;
+    }
+
+    .cowebsite-fullscreen {
+        position: fixed;
+        top: 0;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        z-index: 1000;
+    }
+</style>

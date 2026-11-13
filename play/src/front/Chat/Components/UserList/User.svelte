@@ -1,0 +1,231 @@
+<script lang="ts">
+    import { AskPositionMessage_AskType } from "@workadventure/messages";
+    import * as Sentry from "@sentry/svelte";
+    import highlightWords from "highlight-words";
+    import { defaultColor } from "@workadventure/shared-utils";
+    import { localUserStore } from "../../../Connection/LocalUserStore";
+    import { availabilityStatusStore } from "../../../Stores/MediaStore";
+    import { getColorHexOfStatus, getStatusLabel } from "../../../Utils/AvailabilityStatus";
+    import type { ChatUser } from "../../Connection/ChatConnection";
+    import { LL } from "../../../../i18n/i18n-svelte";
+    import { chatSearchBarValue } from "../../Stores/ChatStore";
+    import { resolveChatUserColor } from "../../Connection/Matrix/services/WaMatrixProfileService";
+    import { getMatrixClientForChatTint, openDirectChatRoom, openingDirectChatIdsStore } from "../../Utils";
+    import { gameManager } from "../../../Phaser/Game/GameManager";
+    import { analyticsClient } from "../../../Administration/AnalyticsClient";
+    import { createFloatingUiActions } from "../../../Utils/svelte-floatingui";
+    import Avatar from "../Avatar.svelte";
+    import UserActionButton from "./UserActionButton.svelte";
+    import { IconLoader, IconSend } from "@wa-icons";
+
+    interface Props {
+        user: ChatUser;
+        isMatrixChatEnabled: boolean;
+    }
+
+    let { user, isMatrixChatEnabled = true }: Props = $props();
+
+    let { chatId, availabilityStatus, username = "", color, isAdmin, pictureStore } = $derived(user);
+
+    /** Tint: local name, Matrix `account_data`, or peer cache — deps keep the row in sync. */
+    let resolvedAvatarColor = $derived(
+        chatId !== undefined && chatId !== ""
+            ? (resolveChatUserColor(chatId, color, getMatrixClientForChatTint()) ?? defaultColor)
+            : defaultColor,
+    );
+
+    let isMe = $derived(
+        user.chatId === localUserStore.getChatId() || user.uuid === localUserStore.getLocalUser()?.uuid,
+    );
+
+    let userStatus = $derived(isMe ? availabilityStatusStore : availabilityStatus);
+
+    let sendButtonTooltipVisible = $state(false);
+    const [sendButtonFloatingRef, sendButtonFloatingContent, sendButtonArrowAction] = createFloatingUiActions(
+        { placement: "top" },
+        8,
+    );
+
+    let chunks = $derived(
+        highlightWords({
+            text: username.match(/\[\d*]/) ? username.substring(0, username.search(/\[\d*]/)) : username,
+            query: $chatSearchBarValue,
+        }),
+    );
+
+    let canSendMessage = $derived(chatId !== undefined && chatId !== "");
+    let openingDirectChat = $derived(chatId !== undefined && $openingDirectChatIdsStore.has(chatId));
+
+    function openWokaMenu() {
+        const currentScene = gameManager.getCurrentGameScene();
+        // The back only locates users of our own map: for anyone else, a LOCATE would get no answer.
+        if (user.uuid == undefined || user.playUri !== currentScene.roomUrl) return;
+        // Track the open woka menu action
+        analyticsClient.trackAdminEvent("user.woka_menu.opened");
+
+        const remotePlayerData = currentScene.getRemotePlayersRepository().getPlayerByUuid(user.uuid);
+        if (remotePlayerData != undefined) {
+            const remotePlayer = currentScene.MapPlayersByKey.get(remotePlayerData.userId);
+            if (remotePlayer != undefined) {
+                remotePlayer.activate();
+                return;
+            }
+        }
+
+        currentScene.connection?.emitAskPosition(
+            user.uuid ?? "",
+            user.playUri ?? "",
+            AskPositionMessage_AskType.LOCATE,
+        );
+    }
+</script>
+
+<div class="flex flex-col px-2 pb-2 user">
+    <div
+        class="wa-chat-item {isAdmin
+            ? 'admin'
+            : 'user'} group/chatItem relative mb-[1px] text-md flex gap-2 flex-row items-center transition-all hover:bg-white/10 hover:rounded hover:!cursor-pointer px-2 py-2 cursor-pointer"
+    >
+        <!-- svelte-ignore a11y_click_events_have_key_events -->
+        <!-- svelte-ignore a11y_no_static_element_interactions -->
+        <div
+            class="relative shrink-0 wa-avatar {!$userStatus ? 'opacity-50' : ''} cursor-pointer"
+            onclick={(event) => {
+                event.stopPropagation();
+                openWokaMenu();
+            }}
+        >
+            <Avatar compact {pictureStore} fallbackName={username || "?"} color={resolvedAvatarColor} />
+        </div>
+        <!-- svelte-ignore a11y_click_events_have_key_events -->
+        <!-- svelte-ignore a11y_no_static_element_interactions -->
+        <div
+            class={`flex-auto ms-1 ${!$userStatus && "opacity-50"} cursor-pointer`}
+            onclick={(event) => {
+                event.stopPropagation();
+                openWokaMenu();
+            }}
+        >
+            <div class="flex items-center h-4">
+                <div class="text-sm font-bold mb-0 flex items-center text-nowrap">
+                    {#each chunks as chunk (chunk.key)}
+                        <div class={`${chunk.match ? "text-light-blue" : ""}`}>
+                            {chunk.text}
+                        </div>
+                    {/each}
+                    {#if username && username.match(/\[\d*]/)}
+                        <div class="font-light text-xs text-gray">
+                            #{username
+                                .match(/\[\d*]/)
+                                ?.join()
+                                ?.replace("[", "")
+                                ?.replace("]", "")}
+                        </div>
+                    {/if}
+                    {#if isAdmin}
+                        <div class="text-xxs bg-secondary rounded-sm px-1 py-0.5 ms-1" title={$LL.chat.role.admin()}>
+                            {$LL.chat.role.adminShort()}
+                        </div>
+                    {/if}
+                </div>
+            </div>
+            <div class="text-xs mb-0 font-condensed opacity-75 self-end">
+                {#if isMe}
+                    {$LL.chat.you()}
+                {:else if $userStatus}
+                    <div class="flex items-center brightness-150" style="color:{getColorHexOfStatus($userStatus)}">
+                        <div
+                            class="rounded-full me-1 h-1.5 w-1.5"
+                            style="background:{getColorHexOfStatus($userStatus)}"
+                        ></div>
+                        {getStatusLabel($userStatus)}
+                    </div>
+                {:else}
+                    {$LL.chat.userList.disconnected()}
+                {/if}
+            </div>
+        </div>
+        <div class="flex flex-wrap justify-start items-start content-start">
+            <div class="transition-all">
+                {#if !isMe && $userStatus != 0}
+                    <UserActionButton {user} />
+                {/if}
+            </div>
+            {#if !isMe && isMatrixChatEnabled}
+                <!-- svelte-ignore a11y_no_static_element_interactions -->
+                <div
+                    class="relative"
+                    use:sendButtonFloatingRef
+                    onmouseenter={() => (sendButtonTooltipVisible = true)}
+                    onmouseleave={() => (sendButtonTooltipVisible = false)}
+                >
+                    <button
+                        class="transition-all hover:bg-white/10 p-2 rounded-md flex items-center justify-center m-0"
+                        class:text-white={canSendMessage}
+                        class:text-gray-400={!canSendMessage}
+                        class:aspect-square={!openingDirectChat}
+                        data-testId={`send-message-${user.username}`}
+                        disabled={!canSendMessage || openingDirectChat}
+                        aria-label={canSendMessage
+                            ? $LL.chat.userList.sendMessage()
+                            : $LL.chat.remoteUserNotConnected()}
+                        onclick={(event) => {
+                            event.stopPropagation();
+                            openDirectChatRoom(chatId, username).catch((error) => {
+                                console.error("Error opening direct chat room:", error);
+                                Sentry.captureException(error, {
+                                    extra: {
+                                        userId: user.uuid,
+                                        chatId: chatId,
+                                        playUri: user.playUri,
+                                        username: user.username,
+                                    },
+                                });
+                            });
+                            analyticsClient.trackAdminEvent("chat.message_from_user_list_clicked");
+                        }}
+                    >
+                        {#if openingDirectChat}
+                            <IconLoader class="animate-spin" font-size="16" />
+                            <span class="text-xs ms-1">{$LL.chat.userList.openingDirectChat()}</span>
+                        {:else}
+                            <IconSend font-size="16" />
+                        {/if}
+                    </button>
+                    <!-- The wrapper, not the button, listens: a disabled button gets no mouse events, and its
+                         tooltip is where we say why nobody can write to this person. -->
+                    {#if sendButtonTooltipVisible && !openingDirectChat}
+                        <div
+                            use:sendButtonFloatingContent
+                            class="send-button-tooltip absolute z-50 bg-contrast/90 backdrop-blur-xl text-white text-nowrap p-2 rounded text-sm"
+                        >
+                            <div class="!top-[30%] !-translate-x-1/2" use:sendButtonArrowAction></div>
+                            {canSendMessage ? $LL.chat.userList.sendMessage() : $LL.chat.remoteUserNotConnected()}
+                        </div>
+                    {/if}
+                </div>
+            {/if}
+        </div>
+    </div>
+</div>
+
+<style>
+    .status {
+        background-color: var(--color);
+    }
+
+    .send-button-tooltip {
+        opacity: 0;
+        transition: opacity 0.2s ease-in-out;
+        animation: sendButtonTooltipFadeIn 0.2s forwards;
+    }
+
+    @keyframes sendButtonTooltipFadeIn {
+        from {
+            opacity: 0;
+        }
+        to {
+            opacity: 1;
+        }
+    }
+</style>

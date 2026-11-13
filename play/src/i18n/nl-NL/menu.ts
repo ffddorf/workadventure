@@ -1,0 +1,220 @@
+import type { Translation } from "../i18n-types";
+import type { DeepPartial } from "../DeepPartial";
+
+const menu: DeepPartial<Translation["menu"]> = {
+    title: "Menu",
+    icon: {
+        open: {
+            menu: "Open menu",
+            invite: "Toon uitnodiging",
+            register: "Registreren",
+            chat: "Open chat",
+            userlist: "Lijst met gebruikers",
+            openEmoji: "Open emoji-selectie popup",
+            closeEmoji: "Sluit emoji-menu",
+            mobile: "Open mobiel menu",
+            calendar: "Open agenda",
+            todoList: "Open takenlijst",
+        },
+    },
+    visitCard: {
+        close: "Sluiten",
+        sendMessage: "Verstuur bericht",
+    },
+    profile: {
+        login: "Inloggen",
+        logout: "Uitloggen",
+        helpAndTips: "Help & tips",
+    },
+    settings: {
+        videoBandwidth: {
+            title: "Videokwaliteit",
+            low: "Laag",
+            recommended: "Aanbevolen",
+            high: "High",
+        },
+        shareScreenBandwidth: {
+            title: "Kwaliteit van schermdeling",
+            low: "Laag",
+            recommended: "Aanbevolen",
+            high: "High",
+        },
+        bandwidthConstrainedPreference: {
+            title: "Als de netwerkbandbreedte beperkt is",
+            maintainFramerateTitle: "Vloeiende animaties behouden",
+            maintainFramerateDescription:
+                "Geef voorrang aan framerate boven resolutie. Gebruik dit wanneer vloeiende animaties belangrijk zijn, zoals bij het streamen van videogames.",
+            maintainResolutionTitle: "Tekst leesbaar houden",
+            maintainResolutionDescription:
+                "Geef voorrang aan resolutie boven framerate. Gebruik dit wanneer leesbaarheid van tekst belangrijk is, zoals bij presentaties of bij het delen van code.",
+            balancedTitle: "Framerate en resolutie in balans houden",
+            balancedDescription: "Probeer een balans te bewaren tussen framerate en resolutie.",
+        },
+        microphone: {
+            title: "Microfooninstellingen",
+            autoGainControl: "Automatische versterkingsregeling",
+            autoGainControlDescription: "Past automatisch het volume van je microfoon aan.",
+            echoCancellation: "Echo-onderdrukking",
+            enableAdvancedNoiseReduction: "Geavanceerde ruisreductie inschakelen",
+            noiseSuppressionMode: "Ruisonderdrukkingsmodus:",
+            workAdventureNoiseSuppression: "WorkAdventure-ruisonderdrukking",
+            workAdventureNoiseSuppressionDescription:
+                "Verwerk je microfoon met de ruisonderdrukking van WorkAdventure.",
+            recommended: "Aanbevolen",
+            browserNoiseSuppression: "Browserruisonderdrukking",
+            browserNoiseSuppressionDescription: "Gebruik de ingebouwde ruisonderdrukking van je browser.",
+            voiceIsolation: "Stemisolatie",
+            voiceIsolationDescription: "Gebruik stemisolatie van je browser en besturingssysteem wanneer beschikbaar.",
+            noiseSuppressionEngine: "Ruisonderdrukkingsengine",
+            noiseSuppressionEngineDeepFilterNet: "DeepFilterNet (nieuw, volledige spraakband)",
+            noiseSuppressionEngineDtln: "DTLN (vorige engine)",
+        },
+        language: {
+            title: "Taal",
+        },
+        privacySettings: {
+            title: "Afwezigheidsmodus",
+            explanation:
+                'Wanneer je naar een ander venster of tabblad gaat, schakelt WorkAdventure over naar de "afwezigheidsmodus", behalve tijdens een gesprek of een uitzending.',
+            cameraToggle: 'Houd camera actief in "afwezigheidsmodus"',
+            microphoneToggle: 'Houd microfoon actief in "afwezigheidsmodus"',
+        },
+        save: "Opslaan",
+        otherSettings: "Andere instellingen",
+        fullscreen: "Volledig scherm",
+        notifications: "Meldingen",
+        enablePictureInPicture: "Picture-in-picture inschakelen",
+        chatSounds: "Geluiden van chat",
+        cowebsiteTrigger: "Altijd vragen voordat websites en Jitsi Meet-ruimtes worden geopend",
+        ignoreFollowRequest: "Negeer verzoeken om andere gebruikers te volgen",
+        proximityDiscussionVolume: "Volume van nabijheidsdiscussies",
+        blockAudio: "Omgevingsgeluiden en muziek blokkeren",
+        disableAnimations: "Kaartanimaties uitschakelen",
+        bubbleSound: "Bubbelgeluid",
+        bubbleSoundOptions: {
+            ding: "Ding",
+            wobble: "Wobble",
+        },
+        displayVideoQualityStats: "Videokwaliteitsstatistieken weergeven",
+    },
+    invite: {
+        description: "Deel de link van de kamer!",
+        copy: "Kopiëren",
+        copied: "Gekopieerd",
+        share: "Delen",
+        walkAutomaticallyToPosition: "Automatisch naar mijn positie lopen",
+        selectEntryPoint: "Gebruik een ander toegangspunt",
+        selectEntryPointSelect: "Selecteer het toegangspunt waar gebruikers zullen arriveren",
+    },
+    globalMessage: {
+        enter: "Voer hier je bericht in...",
+    },
+    contact: {
+        gettingStarted: {
+            title: "Aan de slag",
+            description:
+                "WorkAdventure stelt je in staat om een online ruimte te creëren om spontaan met anderen te communiceren. En het begint allemaal met het creëren van je eigen ruimte. Kies uit een grote selectie van prefab-kaarten door ons team.",
+        },
+        createMap: {
+            title: "Maak je kaart",
+            description: "Je kunt ook je eigen aangepaste kaart maken door de stappen van de documentatie te volgen.",
+        },
+    },
+    about: {
+        mapInfo: "Informatie over de kaart",
+        mapLink: "link naar deze kaart",
+        copyrights: {
+            map: {
+                title: "Auteursrechten van de kaart",
+                empty: "De maker van de kaart heeft geen auteursrecht voor de kaart gedeclareerd.",
+            },
+            tileset: {
+                title: "Auteursrechten van de tilesets",
+                empty: "De maker van de kaart heeft geen auteursrecht voor de tilesets gedeclareerd. Dit betekent niet dat deze tilesets geen licentie hebben.",
+            },
+            audio: {
+                title: "Auteursrechten van audiobestanden",
+                empty: "De maker van de kaart heeft geen auteursrecht voor audiobestanden gedeclareerd. Dit betekent niet dat deze audiobestanden geen licentie hebben.",
+            },
+        },
+    },
+    chat: {
+        resetKeyStorageUpButtonLabel: "Reset je sleutelopslag",
+        resetKeyStorageConfirmationModal: {
+            title: "Bevestiging van reset van sleutelopslag",
+            content: "Je staat op het punt de sleutelopslag te resetten. Weet je het zeker?",
+            warning:
+                "Het resetten van de sleutelopslag zal je huidige sessie en alle vertrouwde gebruikers verwijderen. Je zou toegang kunnen verliezen tot sommige eerdere berichten en je zult niet langer worden herkend als een vertrouwde gebruiker. Zorg ervoor dat je de gevolgen van deze actie volledig begrijpt voordat je doorgaat.",
+            cancel: "Annuleren",
+            continue: "Doorgaan",
+        },
+    },
+    sub: {
+        profile: "Profiel",
+        settings: "Instellingen",
+        credit: "Credits",
+        contact: "Contact",
+        report: "Problemen melden",
+        help: "Help & tutorials",
+        contextualActions: "Contextuele acties",
+        shortcuts: "Sneltoetsen",
+    },
+    shortcuts: {
+        title: "Toetsenbordsneltoetsen",
+        speedUp: "Rennen",
+        interact: "Interacteren",
+        follow: "Volgen",
+        openChat: "Chat openen",
+        openUserList: "Gebruikerslijst openen",
+        toggleMapEditor: "Kaarteditor tonen/verbergen",
+        rotatePlayer: "Speler roteren",
+        openSayPopup: "Zeg-popup openen",
+        openThinkPopup: "Denk-popup openen",
+        walkMyDesk: "Naar mijn bureau lopen",
+        edit: {
+            start: "Bewerken",
+            title: "Bewerkmodus",
+            help: "Klik op een sneltoets en druk dan op de nieuwe combinatie. Escape annuleert. Je keuzes worden in deze browser opgeslagen.",
+            resetAll: "Alles herstellen",
+            done: "Klaar",
+            pressKey: "Druk op een toets…",
+            none: "Geen",
+            change: "Sneltoets van ‘{action}’ wijzigen",
+            reset: "Standaardsneltoets van ‘{action}’ herstellen",
+            locked: "Niet te wijzigen",
+            modified: "Gewijzigd",
+            usedBy: "{keys} wordt al gebruikt door ‘{action}’. Bij vervangen heeft ‘{action}’ geen sneltoets meer.",
+            usedByFixed: "{keys} wordt al gebruikt door ‘{action}’, die niet kan worden gewijzigd.",
+            reserved: "{keys} is gereserveerd door de browser. Kies een andere toets.",
+            replace: "Vervangen",
+            cancel: "Annuleren",
+        },
+        subtitle: "Ze zijn uitgeschakeld terwijl je in een tekstveld typt.",
+        searchLabel: "Sneltoets zoeken",
+        searchPlaceholder: "Zoek een actie of een toets…",
+        noResult: "Geen sneltoets komt overeen met ‘{query}’.",
+        or: "of",
+        layout: "Toetsenbordindeling",
+        walk: "Lopen",
+        sendEmote: "Emote sturen",
+        groups: {
+            move: "Bewegen",
+            communicate: "Communiceren",
+            express: "Jezelf uiten",
+            interact: "Interactie",
+        },
+        hints: {
+            speedUp: "Ingedrukt houden tijdens het lopen",
+            follow: "In de buurt van iemand",
+            emotes: "In de volgorde van de emotebalk",
+            mapEditor: "Als je de kaart mag bewerken",
+        },
+        keyNames: {
+            shift: "Shift",
+            enter: "Enter",
+            space: "Spatie",
+        },
+    },
+};
+
+export default menu;

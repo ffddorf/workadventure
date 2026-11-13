@@ -1,0 +1,1608 @@
+// Disabled because test mocks use vi.fn() which are passed as object properties
+import { afterEach, describe, expect, it, vi, type Mock } from "vitest";
+import {
+    HandleLivekitWebhookRequest,
+    HandleRecordingWebhookRequest,
+    RecordingWebhookPhase,
+    SpaceUser,
+    FilterType,
+} from "@workadventure/messages";
+import { emptySpaceState } from "@workadventure/shared-utils";
+import type { InitialStateFactory } from "../src/Model/CommunicationManager";
+import { CommunicationManager, findRecording } from "../src/Model/CommunicationManager";
+import { CommunicationType } from "../src/Model/Types/CommunicationTypes";
+import type { ICommunicationSpace } from "../src/Model/Interfaces/ICommunicationSpace";
+import type { ICommunicationState } from "../src/Model/Interfaces/ICommunicationState";
+import type { ITransitionPolicy } from "../src/Model/Interfaces/ITransitionPolicy";
+import type {
+    ITransitionOrchestrator,
+    TransitionCompleteCallback,
+} from "../src/Model/Interfaces/ITransitionOrchestrator";
+import type { IStateLifecycleManager } from "../src/Model/Interfaces/IStateLifecycleManager";
+import { UserRegistry } from "../src/Model/Services/UserRegistry";
+import type { ICommunicationStrategy } from "../src/Model/Interfaces/ICommunicationStrategy";
+import type { IRecordingManager } from "../src/Model/RecordingManager";
+import { AutoRecorder } from "../src/Model/AutoRecorder";
+import { analyticsEventsQueue } from "../src/Services/AnalyticsEventsQueue";
+import { adminApi } from "../src/Services/AdminApi";
+import { setCapabilities } from "../src/Services/Capabilities";
+import type { LivekitCredentialsResponse } from "../src/Services/Repository/LivekitCredentialsResponse";
+
+describe("CommunicationManager", () => {
+    // Helper to create real SpaceUser objects
+    const createSpaceUser = (id: string, playUri = "http://test.com"): SpaceUser => {
+        return SpaceUser.fromPartial({
+            spaceUserId: id,
+            uuid: `uuid-${id}`,
+            name: `User ${id}`,
+            playUri,
+        });
+    };
+
+    // Real state object (minimal implementation)
+    const createState = (
+        type: CommunicationType,
+    ): ICommunicationState<ICommunicationStrategy> & { mocks: Record<string, ReturnType<typeof vi.fn>> } => {
+        const mocks = {
+            init: vi.fn().mockResolvedValue(undefined),
+            finalize: vi.fn(),
+            switchState: vi.fn(),
+            handleUserAdded: vi.fn().mockResolvedValue(undefined),
+            handleUserDeleted: vi.fn().mockResolvedValue(undefined),
+            handleUserUpdated: vi.fn().mockResolvedValue(undefined),
+            handleUserToNotifyAdded: vi.fn().mockResolvedValue(undefined),
+            handleUserToNotifyDeleted: vi.fn().mockResolvedValue(undefined),
+            handleMeetingConnectionRestartMessage: vi.fn().mockResolvedValue(undefined),
+        };
+        return {
+            communicationType: type,
+            init: mocks.init,
+            finalize: mocks.finalize,
+            switchState: mocks.switchState,
+            handleUserAdded: mocks.handleUserAdded,
+            handleUserDeleted: mocks.handleUserDeleted,
+            handleUserUpdated: mocks.handleUserUpdated,
+            handleUserToNotifyAdded: mocks.handleUserToNotifyAdded,
+            handleUserToNotifyDeleted: mocks.handleUserToNotifyDeleted,
+            handleMeetingConnectionRestartMessage: mocks.handleMeetingConnectionRestartMessage,
+            mocks,
+        };
+    };
+
+    // Real space implementation (no complex mock)
+    const createSpace = (users: SpaceUser[] = []): ICommunicationSpace => ({
+        getAllUsers: () => users,
+        getUsersInFilter: () => users,
+        getUsersToNotify: () => [],
+        getRecordingState: () => ({ isRecording: false, recorder: null, status: "idle" }),
+        dispatchPrivateEvent: vi.fn(),
+        dispatchPublicEvent: vi.fn().mockResolvedValue(undefined),
+        getSpaceName: () => "test-space",
+        getPropertiesToSync: () => ["cameraState", "microphoneState"],
+        updateState: vi.fn(),
+        stopRecordingByServer: vi.fn().mockResolvedValue(undefined),
+        getUser: vi.fn(),
+        world: "world",
+        getState: () => emptySpaceState(),
+        filterType: FilterType.ALL_USERS,
+    });
+
+    const createRecordingManager = (): IRecordingManager & { mocks: Record<string, ReturnType<typeof vi.fn>> } => {
+        const mocks = {
+            getRecordingState: vi.fn().mockReturnValue({ isRecording: false, recorder: null, status: "idle" }),
+            startRecording: vi.fn().mockResolvedValue(undefined),
+            stopRecording: vi.fn().mockResolvedValue(undefined),
+            stopRecordingByServer: vi.fn().mockResolvedValue(null),
+            stopRecordingIfRecorderMatches: vi.fn().mockResolvedValue(null),
+            getRecordingSessionIds: vi.fn().mockReturnValue([]),
+            confirmRecordingStartedByWebhook: vi.fn().mockReturnValue(false),
+            finishRecordingByWebhook: vi
+                .fn()
+                .mockReturnValue({ processed: false, recorder: null, unexpected: false, hasActiveSessions: false }),
+            handleAddUser: vi.fn(),
+            destroy: vi.fn(),
+        };
+
+        return {
+            getRecordingState: mocks.getRecordingState,
+            startRecording: mocks.startRecording,
+            stopRecording: mocks.stopRecording,
+            stopRecordingByServer: mocks.stopRecordingByServer,
+            stopRecordingIfRecorderMatches: mocks.stopRecordingIfRecorderMatches,
+            getRecordingSessionIds: mocks.getRecordingSessionIds,
+            confirmRecordingStartedByWebhook: mocks.confirmRecordingStartedByWebhook,
+            finishRecordingByWebhook: mocks.finishRecordingByWebhook,
+            handleAddUser: mocks.handleAddUser,
+            isRecording: false,
+            destroy: mocks.destroy,
+            mocks,
+        };
+    };
+
+    // Real policy implementation (simple, testable)
+    const createPolicy = (
+        shouldTransitionResult = false,
+        nextStateType: CommunicationType | null = null,
+    ): ITransitionPolicy & { mocks: Record<string, ReturnType<typeof vi.fn>> } => {
+        const mocks = {
+            shouldTransition: vi.fn().mockReturnValue(shouldTransitionResult),
+            getNextStateType: vi.fn().mockReturnValue(nextStateType),
+        };
+        return {
+            shouldTransition: mocks.shouldTransition,
+            getNextStateType: mocks.getNextStateType,
+            mocks,
+        };
+    };
+
+    // Real orchestrator implementation
+    const createOrchestrator = (): ITransitionOrchestrator & { mocks: Record<string, ReturnType<typeof vi.fn>> } => {
+        const mocks = {
+            executeImmediateTransition: vi.fn().mockResolvedValue(null),
+            scheduleDelayedTransition: vi.fn().mockReturnValue({ abortController: new AbortController() }),
+            cancelPendingTransition: vi.fn(),
+            hasPendingTransition: vi.fn().mockReturnValue(false),
+            waitForTransitionLock: vi.fn().mockResolvedValue(undefined),
+            setTransitionLock: vi.fn(),
+            clearTransitionLock: vi.fn(),
+            dispose: vi.fn(),
+        };
+        return {
+            executeImmediateTransition: mocks.executeImmediateTransition,
+            scheduleDelayedTransition: mocks.scheduleDelayedTransition,
+            cancelPendingTransition: mocks.cancelPendingTransition,
+            hasPendingTransition: mocks.hasPendingTransition,
+            waitForTransitionLock: mocks.waitForTransitionLock,
+            setTransitionLock: mocks.setTransitionLock,
+            clearTransitionLock: mocks.clearTransitionLock,
+            dispose: mocks.dispose,
+            mocks,
+        };
+    };
+
+    // Gives the orchestrator mock a real transition lock (waiters block until it is cleared)
+    const withRealTransitionLock = (orchestrator: ReturnType<typeof createOrchestrator>) => {
+        orchestrator.mocks.setTransitionLock.mockImplementation((promise: Promise<void>) => {
+            orchestrator.mocks.waitForTransitionLock.mockReturnValue(promise);
+        });
+        orchestrator.mocks.clearTransitionLock.mockImplementation(() => {
+            orchestrator.mocks.waitForTransitionLock.mockResolvedValue(undefined);
+        });
+    };
+
+    // Real lifecycle manager implementation
+    const createLifecycleManager = (
+        initialState: ICommunicationState<ICommunicationStrategy>,
+    ): IStateLifecycleManager & { mocks: Record<string, ReturnType<typeof vi.fn>> } => {
+        const mocks = {
+            getCurrentState: vi.fn().mockReturnValue(initialState),
+            transitionTo: vi.fn().mockResolvedValue(undefined),
+            dispatchSwitchEvent: vi.fn(),
+            dispose: vi.fn(),
+        };
+        return {
+            getCurrentState: mocks.getCurrentState,
+            transitionTo: mocks.transitionTo,
+            dispatchSwitchEvent: mocks.dispatchSwitchEvent,
+            dispose: mocks.dispose,
+            mocks,
+        };
+    };
+
+    // Initial state factory
+    const createInitialStateFactory = (
+        state: ICommunicationState<ICommunicationStrategy>,
+    ): InitialStateFactory & { mocks: Record<string, ReturnType<typeof vi.fn>> } => {
+        const mocks = {
+            createInitialState: vi.fn().mockReturnValue(state),
+        };
+        return {
+            createInitialState: mocks.createInitialState,
+            mocks,
+        };
+    };
+
+    describe("constructor", () => {
+        it("should create manager with default dependencies when none provided", () => {
+            const space = createSpace();
+
+            const manager = new CommunicationManager(space);
+
+            expect(manager).toBeDefined();
+        });
+
+        it("should use injected userRegistry when provided", async () => {
+            const space = createSpace();
+            const userRegistry = new UserRegistry();
+            const state = createState(CommunicationType.WEBRTC);
+            const lifecycleManager = createLifecycleManager(state);
+
+            const manager = new CommunicationManager(space, {
+                userRegistry: userRegistry,
+                lifecycleManager: lifecycleManager,
+            });
+
+            const user = createSpaceUser("user_1");
+            await manager.handleUserAdded(user);
+
+            expect(userRegistry.hasUser("user_1")).toBe(true);
+        });
+
+        it("should use injected policy when provided", async () => {
+            const space = createSpace();
+            const policy = createPolicy(false);
+            const state = createState(CommunicationType.WEBRTC);
+            const lifecycleManager = createLifecycleManager(state);
+
+            const manager = new CommunicationManager(space, {
+                policy: policy,
+                lifecycleManager: lifecycleManager,
+            });
+
+            const user = createSpaceUser("user_1");
+            await manager.handleUserAdded(user);
+
+            expect(policy.mocks.shouldTransition).toHaveBeenCalled();
+        });
+
+        it("should use injected initialStateFactory when provided", () => {
+            const space = createSpace();
+            const customState = createState(CommunicationType.LIVEKIT);
+            const initialStateFactory = createInitialStateFactory(customState);
+
+            new CommunicationManager(space, { initialStateFactory: initialStateFactory });
+
+            expect(initialStateFactory.mocks.createInitialState).toHaveBeenCalledWith(
+                space,
+                expect.any(Map),
+                expect.any(Map),
+            );
+        });
+    });
+
+    describe("handleUserAdded", () => {
+        it("should add user to registry when user is added", async () => {
+            const space = createSpace();
+            const userRegistry = new UserRegistry();
+            const state = createState(CommunicationType.WEBRTC);
+            const lifecycleManager = createLifecycleManager(state);
+            const policy = createPolicy(false);
+
+            const manager = new CommunicationManager(space, {
+                userRegistry: userRegistry,
+                lifecycleManager: lifecycleManager,
+                policy: policy,
+            });
+
+            const user = createSpaceUser("user_1");
+            await manager.handleUserAdded(user);
+
+            expect(userRegistry.hasUser("user_1")).toBe(true);
+        });
+
+        it("should delegate to current state when user is added", async () => {
+            const space = createSpace();
+            const state = createState(CommunicationType.WEBRTC);
+            const lifecycleManager = createLifecycleManager(state);
+            const policy = createPolicy(false);
+
+            const manager = new CommunicationManager(space, {
+                lifecycleManager: lifecycleManager,
+                policy: policy,
+            });
+
+            const user = createSpaceUser("user_1");
+            await manager.handleUserAdded(user);
+
+            expect(state.mocks.handleUserAdded).toHaveBeenCalledWith(user);
+        });
+
+        it("should evaluate transition when user is added", async () => {
+            const space = createSpace();
+            const policy = createPolicy(false);
+            const state = createState(CommunicationType.WEBRTC);
+            const lifecycleManager = createLifecycleManager(state);
+
+            const manager = new CommunicationManager(space, {
+                policy: policy,
+                lifecycleManager: lifecycleManager,
+            });
+
+            const user = createSpaceUser("user_1");
+            await manager.handleUserAdded(user);
+
+            expect(policy.mocks.shouldTransition).toHaveBeenCalledWith(CommunicationType.WEBRTC, 0, 0);
+        });
+
+        it("should cancel pending transition when conditions change after adding user", async () => {
+            const space = createSpace();
+            const orchestrator = createOrchestrator();
+            orchestrator.mocks.hasPendingTransition.mockReturnValue(true);
+            const state = createState(CommunicationType.WEBRTC);
+            const lifecycleManager = createLifecycleManager(state);
+            const policy = createPolicy(false); // Should not transition -> cancel pending
+
+            const manager = new CommunicationManager(space, {
+                orchestrator: orchestrator,
+                lifecycleManager: lifecycleManager,
+                policy: policy,
+            });
+
+            const user = createSpaceUser("user_1");
+            await manager.handleUserAdded(user);
+
+            expect(orchestrator.mocks.cancelPendingTransition).toHaveBeenCalled();
+        });
+    });
+
+    describe("handleUserDeleted", () => {
+        it("should remove user from registry when user is deleted", async () => {
+            const space = createSpace();
+            const userRegistry = new UserRegistry();
+            const state = createState(CommunicationType.WEBRTC);
+            const lifecycleManager = createLifecycleManager(state);
+            const policy = createPolicy(false);
+
+            const manager = new CommunicationManager(space, {
+                userRegistry: userRegistry,
+                lifecycleManager: lifecycleManager,
+                policy: policy,
+            });
+
+            const user = createSpaceUser("user_1");
+            userRegistry.addUser(user);
+            await manager.handleUserDeleted(user);
+
+            expect(userRegistry.hasUser("user_1")).toBe(false);
+        });
+
+        it("should delegate to current state when user is deleted", async () => {
+            const space = createSpace();
+            const state = createState(CommunicationType.WEBRTC);
+            const lifecycleManager = createLifecycleManager(state);
+            const policy = createPolicy(false);
+
+            const manager = new CommunicationManager(space, {
+                lifecycleManager: lifecycleManager,
+                policy: policy,
+            });
+
+            const user = createSpaceUser("user_1");
+            await manager.handleUserDeleted(user);
+
+            expect(state.mocks.handleUserDeleted).toHaveBeenCalledWith(user);
+        });
+
+        it("should evaluate transition when user is deleted", async () => {
+            const space = createSpace();
+            const policy = createPolicy(false);
+            const state = createState(CommunicationType.LIVEKIT);
+            const lifecycleManager = createLifecycleManager(state);
+
+            const manager = new CommunicationManager(space, {
+                policy: policy,
+                lifecycleManager: lifecycleManager,
+            });
+
+            const user = createSpaceUser("user_1");
+            await manager.handleUserDeleted(user);
+
+            expect(policy.mocks.shouldTransition).toHaveBeenCalledWith(CommunicationType.LIVEKIT, 0, 0);
+        });
+    });
+
+    describe("handleUserUpdated", () => {
+        it("evaluates the transition, counting the flagged users, when a user raises its cpuLimited flag", async () => {
+            const flagged = { ...createSpaceUser("user_1"), cpuLimited: true };
+            const space = createSpace([flagged, createSpaceUser("user_2"), createSpaceUser("user_3")]);
+            const policy = createPolicy(true, CommunicationType.LIVEKIT);
+            const state = createState(CommunicationType.WEBRTC);
+            const lifecycleManager = createLifecycleManager(state);
+            const orchestrator = createOrchestrator();
+
+            const manager = new CommunicationManager(space, {
+                policy: policy,
+                lifecycleManager: lifecycleManager,
+                orchestrator: orchestrator,
+            });
+
+            await manager.handleUserUpdated(flagged, ["cpuLimited"]);
+
+            expect(state.mocks.handleUserUpdated).toHaveBeenCalledWith(flagged);
+            expect(policy.mocks.shouldTransition).toHaveBeenCalledWith(CommunicationType.WEBRTC, 3, 1);
+            expect(orchestrator.mocks.executeImmediateTransition).toHaveBeenCalledWith(
+                CommunicationType.LIVEKIT,
+                expect.anything(),
+            );
+        });
+
+        it("should delegate to current state when user is updated", async () => {
+            const space = createSpace();
+            const state = createState(CommunicationType.WEBRTC);
+            const lifecycleManager = createLifecycleManager(state);
+
+            const manager = new CommunicationManager(space, {
+                lifecycleManager: lifecycleManager,
+            });
+
+            const user = createSpaceUser("user_1");
+            await manager.handleUserUpdated(user);
+
+            expect(state.mocks.handleUserUpdated).toHaveBeenCalledWith(user);
+        });
+
+        it("should not evaluate transition when user is updated", async () => {
+            const space = createSpace();
+            const policy = createPolicy(false);
+            const state = createState(CommunicationType.WEBRTC);
+            const lifecycleManager = createLifecycleManager(state);
+
+            const manager = new CommunicationManager(space, {
+                policy: policy,
+                lifecycleManager: lifecycleManager,
+            });
+
+            const user = createSpaceUser("user_1");
+            await manager.handleUserUpdated(user);
+
+            expect(policy.mocks.shouldTransition).not.toHaveBeenCalled();
+        });
+    });
+
+    describe("handleUserToNotifyAdded", () => {
+        it("should add user to notify registry when user to notify is added", async () => {
+            const space = createSpace();
+            const userRegistry = new UserRegistry();
+            const state = createState(CommunicationType.WEBRTC);
+            const lifecycleManager = createLifecycleManager(state);
+            const policy = createPolicy(false);
+
+            const manager = new CommunicationManager(space, {
+                userRegistry: userRegistry,
+                lifecycleManager: lifecycleManager,
+                policy: policy,
+            });
+
+            const user = createSpaceUser("user_1");
+            await manager.handleUserToNotifyAdded(user);
+
+            expect(userRegistry.hasUserToNotify("user_1")).toBe(true);
+        });
+
+        it("should delegate to current state when user to notify is added", async () => {
+            const space = createSpace();
+            const state = createState(CommunicationType.WEBRTC);
+            const lifecycleManager = createLifecycleManager(state);
+            const policy = createPolicy(false);
+
+            const manager = new CommunicationManager(space, {
+                lifecycleManager: lifecycleManager,
+                policy: policy,
+            });
+
+            const user = createSpaceUser("user_1");
+            await manager.handleUserToNotifyAdded(user);
+
+            expect(state.mocks.handleUserToNotifyAdded).toHaveBeenCalledWith(user);
+        });
+    });
+
+    describe("handleUserToNotifyDeleted", () => {
+        it("should remove user from notify registry when user to notify is deleted", async () => {
+            const space = createSpace();
+            const userRegistry = new UserRegistry();
+            const state = createState(CommunicationType.WEBRTC);
+            const lifecycleManager = createLifecycleManager(state);
+            const policy = createPolicy(false);
+
+            const manager = new CommunicationManager(space, {
+                userRegistry: userRegistry,
+                lifecycleManager: lifecycleManager,
+                policy: policy,
+            });
+
+            const user = createSpaceUser("user_1");
+            userRegistry.addUserToNotify(user);
+            await manager.handleUserToNotifyDeleted(user);
+
+            expect(userRegistry.hasUserToNotify("user_1")).toBe(false);
+        });
+
+        it("should delegate to current state when user to notify is deleted", async () => {
+            const space = createSpace();
+            const state = createState(CommunicationType.WEBRTC);
+            const lifecycleManager = createLifecycleManager(state);
+            const policy = createPolicy(false);
+
+            const manager = new CommunicationManager(space, {
+                lifecycleManager: lifecycleManager,
+                policy: policy,
+            });
+
+            const user = createSpaceUser("user_1");
+            await manager.handleUserToNotifyDeleted(user);
+
+            expect(state.mocks.handleUserToNotifyDeleted).toHaveBeenCalledWith(user);
+        });
+    });
+
+    describe("transition evaluation", () => {
+        it("should not transition when policy returns false", async () => {
+            const space = createSpace();
+            const policy = createPolicy(false);
+            const orchestrator = createOrchestrator();
+            const state = createState(CommunicationType.WEBRTC);
+            const lifecycleManager = createLifecycleManager(state);
+
+            const manager = new CommunicationManager(space, {
+                policy: policy,
+                orchestrator: orchestrator,
+                lifecycleManager: lifecycleManager,
+            });
+
+            const user = createSpaceUser("user_1");
+            await manager.handleUserAdded(user);
+
+            expect(orchestrator.mocks.executeImmediateTransition).not.toHaveBeenCalled();
+            expect(orchestrator.mocks.scheduleDelayedTransition).not.toHaveBeenCalled();
+        });
+
+        it("should execute immediate transition to LiveKit when policy approves", async () => {
+            const users = [
+                createSpaceUser("user_1"),
+                createSpaceUser("user_2"),
+                createSpaceUser("user_3"),
+                createSpaceUser("user_4"),
+                createSpaceUser("user_5"),
+            ];
+            const space = createSpace(users);
+            const policy = createPolicy(true, CommunicationType.LIVEKIT);
+            const orchestrator = createOrchestrator();
+            const state = createState(CommunicationType.WEBRTC);
+            const lifecycleManager = createLifecycleManager(state);
+
+            const manager = new CommunicationManager(space, {
+                policy: policy,
+                orchestrator: orchestrator,
+                lifecycleManager: lifecycleManager,
+            });
+
+            const user = createSpaceUser("user_6");
+            await manager.handleUserAdded(user);
+
+            expect(orchestrator.mocks.executeImmediateTransition).toHaveBeenCalledWith(
+                CommunicationType.LIVEKIT,
+                expect.objectContaining({
+                    space: space,
+                    playUri: user.playUri,
+                }),
+            );
+        });
+
+        it("should schedule delayed transition to WebRTC when policy approves", async () => {
+            const space = createSpace([createSpaceUser("user_1")]);
+            const policy = createPolicy(true, CommunicationType.WEBRTC);
+            const orchestrator = createOrchestrator();
+            const state = createState(CommunicationType.LIVEKIT);
+            const lifecycleManager = createLifecycleManager(state);
+
+            const manager = new CommunicationManager(space, {
+                policy: policy,
+                orchestrator: orchestrator,
+                lifecycleManager: lifecycleManager,
+            });
+
+            const user = createSpaceUser("user_1");
+            await manager.handleUserDeleted(user);
+
+            expect(orchestrator.mocks.scheduleDelayedTransition).toHaveBeenCalledWith(
+                CommunicationType.WEBRTC,
+                expect.any(Object),
+                expect.any(Function),
+                expect.any(Function),
+            );
+        });
+
+        it("should transition to new state when immediate transition succeeds", async () => {
+            const users = [
+                createSpaceUser("user_1"),
+                createSpaceUser("user_2"),
+                createSpaceUser("user_3"),
+                createSpaceUser("user_4"),
+                createSpaceUser("user_5"),
+            ];
+            const space = createSpace(users);
+            const newState = createState(CommunicationType.LIVEKIT);
+            const orchestrator = createOrchestrator();
+            orchestrator.mocks.executeImmediateTransition.mockResolvedValue(newState);
+
+            const policy = createPolicy(true, CommunicationType.LIVEKIT);
+            const currentState = createState(CommunicationType.WEBRTC);
+            const lifecycleManager = createLifecycleManager(currentState);
+
+            const manager = new CommunicationManager(space, {
+                policy: policy,
+                orchestrator: orchestrator,
+                lifecycleManager: lifecycleManager,
+            });
+
+            const user = createSpaceUser("user_6");
+            await manager.handleUserAdded(user);
+
+            expect(lifecycleManager.mocks.transitionTo).toHaveBeenCalledWith(newState);
+        });
+
+        it("should make a concurrent watch wait for the in-flight transition instead of cancelling it", async () => {
+            const space = createSpace();
+            const oldState = createState(CommunicationType.WEBRTC);
+            const newState = createState(CommunicationType.LIVEKIT);
+
+            // Orchestrator mock with a real transition lock and a deferred state creation
+            const orchestrator = createOrchestrator();
+            withRealTransitionLock(orchestrator);
+            let resolveCreation!: (state: ICommunicationState<ICommunicationStrategy>) => void;
+            orchestrator.mocks.executeImmediateTransition.mockReturnValue(
+                new Promise<ICommunicationState<ICommunicationStrategy>>((resolve) => {
+                    resolveCreation = resolve;
+                }),
+            );
+
+            const policy = createPolicy(true, CommunicationType.LIVEKIT);
+            policy.mocks.shouldTransition.mockImplementation(
+                (currentType: CommunicationType) => currentType === CommunicationType.WEBRTC,
+            );
+            const lifecycleManager = createLifecycleManager(oldState);
+            lifecycleManager.mocks.transitionTo.mockImplementation(
+                (state: ICommunicationState<ICommunicationStrategy>) => {
+                    lifecycleManager.mocks.getCurrentState.mockReturnValue(state);
+                },
+            );
+
+            const manager = new CommunicationManager(space, {
+                policy: policy,
+                orchestrator: orchestrator,
+                lifecycleManager: lifecycleManager,
+            });
+
+            const joiner = createSpaceUser("user_5");
+            const joinPromise = manager.handleUserAdded(joiner);
+            // The join and the watch are two distinct back messages: give the join one tick to take the lock
+            await Promise.resolve();
+            const watchPromise = manager.handleUserToNotifyAdded(joiner);
+            // Let the watch reach the lock before the LiveKit state is ready
+            await Promise.resolve();
+            resolveCreation(newState);
+            await Promise.all([joinPromise, watchPromise]);
+
+            expect(orchestrator.mocks.executeImmediateTransition).toHaveBeenCalledTimes(1);
+            expect(orchestrator.mocks.cancelPendingTransition).toHaveBeenCalledTimes(1);
+            expect(lifecycleManager.mocks.transitionTo).toHaveBeenCalledTimes(1);
+            expect(oldState.mocks.handleUserAdded).not.toHaveBeenCalled();
+            expect(oldState.mocks.handleUserToNotifyAdded).not.toHaveBeenCalled();
+        });
+
+        it("should delegate a user joining while the new state initializes without waiting for init()", async () => {
+            const space = createSpace();
+            const oldState = createState(CommunicationType.WEBRTC);
+            const newState = createState(CommunicationType.LIVEKIT);
+
+            const orchestrator = createOrchestrator();
+            withRealTransitionLock(orchestrator);
+            orchestrator.mocks.executeImmediateTransition.mockResolvedValue(newState);
+
+            const policy = createPolicy(true, CommunicationType.LIVEKIT);
+            policy.mocks.shouldTransition.mockImplementation(
+                (currentType: CommunicationType) => currentType === CommunicationType.WEBRTC,
+            );
+            // transitionTo() makes the new state current right away, then init() takes a while
+            let finishInit!: () => void;
+            const lifecycleManager = createLifecycleManager(oldState);
+            (
+                lifecycleManager.mocks.transitionTo as Mock<
+                    (state: ICommunicationState<ICommunicationStrategy>) => Promise<void>
+                >
+            ).mockImplementation((state) => {
+                lifecycleManager.mocks.getCurrentState.mockReturnValue(state);
+                return new Promise<void>((resolve) => {
+                    finishInit = resolve;
+                });
+            });
+
+            const manager = new CommunicationManager(space, {
+                policy: policy,
+                orchestrator: orchestrator,
+                lifecycleManager: lifecycleManager,
+            });
+
+            const flipper = createSpaceUser("user_4");
+            const flipperJoin = manager.handleUserAdded(flipper);
+            // Let the transition reach transitionTo() (init pending)
+            await new Promise((resolve) => {
+                setTimeout(resolve, 0);
+            });
+            expect(lifecycleManager.mocks.transitionTo).toHaveBeenCalledTimes(1);
+
+            // A user joining now must be told the new strategy before init() sends their invitation:
+            // the join must complete through the new state without waiting for init() to finish.
+            const lateJoiner = createSpaceUser("user_5");
+            await manager.handleUserAdded(lateJoiner);
+            expect(newState.mocks.handleUserAdded).toHaveBeenCalledWith(lateJoiner);
+            expect(oldState.mocks.handleUserAdded).not.toHaveBeenCalled();
+
+            finishInit();
+            await flipperJoin;
+            expect(newState.mocks.handleUserAdded).toHaveBeenCalledTimes(1);
+        });
+
+        it("should not transition when immediate transition returns null", async () => {
+            const users = [
+                createSpaceUser("user_1"),
+                createSpaceUser("user_2"),
+                createSpaceUser("user_3"),
+                createSpaceUser("user_4"),
+                createSpaceUser("user_5"),
+            ];
+            const space = createSpace(users);
+            const orchestrator = createOrchestrator();
+            orchestrator.mocks.executeImmediateTransition.mockResolvedValue(null);
+
+            const policy = createPolicy(true, CommunicationType.LIVEKIT);
+            const state = createState(CommunicationType.WEBRTC);
+            const lifecycleManager = createLifecycleManager(state);
+
+            const manager = new CommunicationManager(space, {
+                policy: policy,
+                orchestrator: orchestrator,
+                lifecycleManager: lifecycleManager,
+            });
+
+            const user = createSpaceUser("user_6");
+            await manager.handleUserAdded(user);
+
+            expect(lifecycleManager.mocks.transitionTo).not.toHaveBeenCalled();
+        });
+    });
+
+    describe("pending transition cancellation", () => {
+        it("should cancel pending transition when conditions no longer allow transition", async () => {
+            const space = createSpace();
+            const orchestrator = createOrchestrator();
+            orchestrator.mocks.hasPendingTransition.mockReturnValue(true);
+
+            const policy = createPolicy(false); // No transition allowed
+            const state = createState(CommunicationType.LIVEKIT);
+            const lifecycleManager = createLifecycleManager(state);
+
+            const manager = new CommunicationManager(space, {
+                orchestrator: orchestrator,
+                policy: policy,
+                lifecycleManager: lifecycleManager,
+            });
+
+            const user = createSpaceUser("user_1");
+            await manager.handleUserAdded(user);
+
+            expect(orchestrator.mocks.cancelPendingTransition).toHaveBeenCalled();
+        });
+
+        it("should not cancel pending transition when conditions still allow transition", async () => {
+            const space = createSpace([createSpaceUser("user_1")]);
+            const orchestrator = createOrchestrator();
+            orchestrator.mocks.hasPendingTransition.mockReturnValue(true);
+
+            const policy = createPolicy(true, CommunicationType.WEBRTC); // Transition allowed
+            const state = createState(CommunicationType.LIVEKIT);
+            const lifecycleManager = createLifecycleManager(state);
+
+            const manager = new CommunicationManager(space, {
+                orchestrator: orchestrator,
+                policy: policy,
+                lifecycleManager: lifecycleManager,
+            });
+
+            const user = createSpaceUser("user_2");
+            await manager.handleUserDeleted(user);
+
+            // Should be called once for executeTransition, not for cancel
+            expect(orchestrator.mocks.cancelPendingTransition).toHaveBeenCalledTimes(1);
+        });
+
+        it("should not try to cancel when no pending transition exists", async () => {
+            const space = createSpace();
+            const orchestrator = createOrchestrator();
+            orchestrator.mocks.hasPendingTransition.mockReturnValue(false);
+
+            const policy = createPolicy(false);
+            const state = createState(CommunicationType.WEBRTC);
+            const lifecycleManager = createLifecycleManager(state);
+
+            const manager = new CommunicationManager(space, {
+                orchestrator: orchestrator,
+                policy: policy,
+                lifecycleManager: lifecycleManager,
+            });
+
+            const user = createSpaceUser("user_1");
+            await manager.handleUserAdded(user);
+
+            expect(orchestrator.mocks.cancelPendingTransition).not.toHaveBeenCalled();
+        });
+    });
+
+    describe("delayed transition callback", () => {
+        it("should wait for the terminal webhook when the recorder leaves the space", async () => {
+            const space = createSpace();
+            const orchestrator = createOrchestrator();
+            const state = createState(CommunicationType.LIVEKIT);
+            const lifecycleManager = createLifecycleManager(state);
+            const recordingManager = createRecordingManager();
+            const policy = createPolicy(false);
+            const recorder = createSpaceUser("recorder_1");
+
+            recordingManager.mocks.stopRecordingIfRecorderMatches.mockResolvedValue(recorder);
+
+            const manager = new CommunicationManager(space, {
+                orchestrator,
+                lifecycleManager,
+                recordingManager,
+                policy,
+            });
+
+            const didStop = await manager.handleRecorderLeftSpace(recorder.spaceUserId);
+
+            expect(didStop).toBe(true);
+            expect(recordingManager.mocks.stopRecordingIfRecorderMatches).toHaveBeenCalledWith(recorder.spaceUserId);
+            expect(orchestrator.mocks.scheduleDelayedTransition).not.toHaveBeenCalled();
+        });
+
+        it("should no-op when a server stop is requested and no recording is active", async () => {
+            const space = createSpace();
+            const orchestrator = createOrchestrator();
+            const state = createState(CommunicationType.LIVEKIT);
+            const lifecycleManager = createLifecycleManager(state);
+            const recordingManager = createRecordingManager();
+            const policy = createPolicy(false);
+
+            recordingManager.mocks.stopRecordingByServer.mockResolvedValue(null);
+
+            const manager = new CommunicationManager(space, {
+                orchestrator,
+                lifecycleManager,
+                recordingManager,
+                policy,
+            });
+
+            const didStop = await manager.handleServerStopRecording();
+
+            expect(didStop).toBe(false);
+            expect(orchestrator.mocks.scheduleDelayedTransition).not.toHaveBeenCalled();
+        });
+
+        it("should schedule a delayed WebRTC transition when an ended webhook is received", () => {
+            const space = createSpace();
+            const orchestrator = createOrchestrator();
+            const state = createState(CommunicationType.LIVEKIT);
+            const lifecycleManager = createLifecycleManager(state);
+            const recordingManager = createRecordingManager();
+            const policy = createPolicy(false);
+            const recorder = createSpaceUser("recorder_1");
+
+            recordingManager.mocks.finishRecordingByWebhook.mockReturnValue({
+                processed: true,
+                recorder,
+                unexpected: false,
+                hasActiveSessions: false,
+            });
+
+            const manager = new CommunicationManager(space, {
+                orchestrator,
+                lifecycleManager,
+                recordingManager,
+                policy,
+            });
+
+            manager.handleNormalizedRecordingWebhook(
+                HandleRecordingWebhookRequest.fromPartial({
+                    recordingSessionId: "session-1",
+                    egressId: "egress-1",
+                    roomName: "test-space",
+                    phase: RecordingWebhookPhase.RECORDING_WEBHOOK_PHASE_ENDED,
+                }),
+            );
+
+            expect(recordingManager.mocks.finishRecordingByWebhook).toHaveBeenCalledWith(
+                "session-1",
+                "egress-1",
+                "test-space",
+            );
+            expect(orchestrator.mocks.scheduleDelayedTransition).toHaveBeenCalledWith(
+                CommunicationType.WEBRTC,
+                expect.objectContaining({
+                    playUri: recorder.playUri,
+                    space,
+                }),
+                expect.any(Function),
+                expect.any(Function),
+            );
+        });
+
+        it("should notify the admin once when an ended webhook is processed", async () => {
+            const state = createState(CommunicationType.LIVEKIT);
+            const recordingManager = createRecordingManager();
+            const recorder = createSpaceUser("recorder_1", "http://play.test/@/team/world/room");
+            const recordingEventNotifier = vi.fn().mockResolvedValue(undefined);
+
+            recordingManager.mocks.finishRecordingByWebhook.mockReturnValue({
+                processed: true,
+                recorder,
+                unexpected: false,
+                hasActiveSessions: true,
+            });
+
+            const manager = new CommunicationManager(createSpace(), {
+                orchestrator: createOrchestrator(),
+                lifecycleManager: createLifecycleManager(state),
+                recordingManager,
+                policy: createPolicy(false),
+                recordingEventNotifier,
+            });
+
+            manager.handleNormalizedRecordingWebhook(
+                HandleRecordingWebhookRequest.fromPartial({
+                    recordingSessionId: "session-1",
+                    egressId: "egress-1",
+                    roomName: "test-space",
+                    phase: RecordingWebhookPhase.RECORDING_WEBHOOK_PHASE_ENDED,
+                    status: "EGRESS_COMPLETE",
+                    startedAtMs: 1_700_000_000_000,
+                    endedAtMs: 1_700_000_610_000,
+                    fileResults: [{ filename: "uuid-recorder_1/recording-1.mp4", sizeBytes: 123, durationMs: 610_400 }],
+                }),
+            );
+            await Promise.resolve();
+
+            expect(recordingEventNotifier).toHaveBeenCalledTimes(1);
+            expect(recordingEventNotifier).toHaveBeenCalledWith({
+                phase: "ended",
+                status: "EGRESS_COMPLETE",
+                egressId: "egress-1",
+                recordingSessionId: "session-1",
+                playUri: "http://play.test/@/team/world/room",
+                recorder: { uuid: "uuid-recorder_1", spaceUserId: "recorder_1" },
+                startedAt: "2023-11-14T22:13:20.000Z",
+                endedAt: "2023-11-14T22:23:30.000Z",
+                error: null,
+                files: [{ filename: "uuid-recorder_1/recording-1.mp4", sizeBytes: 123, durationSeconds: 610 }],
+            });
+        });
+
+        it("should not notify the admin when the ended webhook matches no session", () => {
+            const recordingManager = createRecordingManager();
+            const recordingEventNotifier = vi.fn().mockResolvedValue(undefined);
+
+            const manager = new CommunicationManager(createSpace(), {
+                orchestrator: createOrchestrator(),
+                lifecycleManager: createLifecycleManager(createState(CommunicationType.LIVEKIT)),
+                recordingManager,
+                policy: createPolicy(false),
+                recordingEventNotifier,
+            });
+
+            manager.handleNormalizedRecordingWebhook(
+                HandleRecordingWebhookRequest.fromPartial({
+                    recordingSessionId: "unknown",
+                    egressId: "egress-1",
+                    roomName: "test-space",
+                    phase: RecordingWebhookPhase.RECORDING_WEBHOOK_PHASE_ENDED,
+                }),
+            );
+
+            expect(recordingEventNotifier).not.toHaveBeenCalled();
+        });
+
+        it("should not notify the admin when a started webhook arrives, and survive a failing admin on end", async () => {
+            const recordingManager = createRecordingManager();
+            const recorder = createSpaceUser("recorder_1");
+            recordingManager.mocks.confirmRecordingStartedByWebhook.mockReturnValue(true);
+            recordingManager.mocks.finishRecordingByWebhook.mockReturnValue({
+                processed: true,
+                recorder,
+                unexpected: false,
+                hasActiveSessions: true,
+            });
+            const recordingEventNotifier = vi.fn().mockRejectedValue(new Error("admin down"));
+
+            const manager = new CommunicationManager(createSpace(), {
+                orchestrator: createOrchestrator(),
+                lifecycleManager: createLifecycleManager(createState(CommunicationType.LIVEKIT)),
+                recordingManager,
+                policy: createPolicy(false),
+                recordingEventNotifier,
+            });
+
+            manager.handleNormalizedRecordingWebhook(
+                HandleRecordingWebhookRequest.fromPartial({
+                    recordingSessionId: "session-1",
+                    egressId: "egress-1",
+                    roomName: "test-space",
+                    phase: RecordingWebhookPhase.RECORDING_WEBHOOK_PHASE_STARTED,
+                    status: "EGRESS_ACTIVE",
+                }),
+            );
+            expect(recordingEventNotifier).not.toHaveBeenCalled();
+
+            expect(() =>
+                manager.handleNormalizedRecordingWebhook(
+                    HandleRecordingWebhookRequest.fromPartial({
+                        recordingSessionId: "session-1",
+                        egressId: "egress-1",
+                        roomName: "test-space",
+                        phase: RecordingWebhookPhase.RECORDING_WEBHOOK_PHASE_ENDED,
+                        status: "EGRESS_FAILED",
+                        error: "upload failed",
+                    }),
+                ),
+            ).not.toThrow();
+            await Promise.resolve();
+
+            expect(recordingEventNotifier).toHaveBeenCalledWith(
+                expect.objectContaining({
+                    phase: "ended",
+                    status: "EGRESS_FAILED",
+                    error: "upload failed",
+                    recorder: { uuid: "uuid-recorder_1", spaceUserId: "recorder_1" },
+                    startedAt: null,
+                    files: [],
+                }),
+            );
+        });
+
+        it("should verify raw LiveKit webhooks in the active recordable state before handling the normalized event", async () => {
+            const space = createSpace();
+            const orchestrator = createOrchestrator();
+            const normalizedRequest = HandleRecordingWebhookRequest.fromPartial({
+                spaceName: "test-space",
+                recordingSessionId: "session-1",
+                egressId: "egress-1",
+                roomName: "test-space",
+                phase: RecordingWebhookPhase.RECORDING_WEBHOOK_PHASE_ENDED,
+            });
+            const state = {
+                ...createState(CommunicationType.LIVEKIT),
+                handleStartRecording: vi.fn(),
+                handleStopRecording: vi.fn(),
+                handleLivekitWebhook: vi.fn().mockResolvedValue(normalizedRequest),
+            };
+            const lifecycleManager = createLifecycleManager(state);
+            const recordingManager = createRecordingManager();
+            const policy = createPolicy(false);
+
+            const manager = new CommunicationManager(space, {
+                orchestrator,
+                lifecycleManager,
+                recordingManager,
+                policy,
+            });
+
+            await manager.handleLivekitWebhook(
+                HandleLivekitWebhookRequest.fromPartial({
+                    spaceName: "test-space",
+                    recordingSessionId: "session-1",
+                    rawBody: Buffer.from("{}"),
+                    authorizationHeader: "jwt-token",
+                }),
+            );
+
+            expect(state.handleLivekitWebhook).toHaveBeenCalledWith(
+                expect.any(Uint8Array),
+                "jwt-token",
+                "test-space",
+                "session-1",
+            );
+            expect(recordingManager.mocks.finishRecordingByWebhook).toHaveBeenCalledWith(
+                "session-1",
+                "egress-1",
+                "test-space",
+            );
+        });
+
+        it("should still report the end of a recording whose space was destroyed before LiveKit did", async () => {
+            const space = createSpace();
+            const orchestrator = createOrchestrator();
+            const recorder = createSpaceUser("recorder_1");
+            const state = {
+                ...createState(CommunicationType.LIVEKIT),
+                handleStartRecording: vi.fn(),
+                handleStopRecording: vi.fn(),
+                handleLivekitWebhook: vi.fn().mockResolvedValue(
+                    HandleRecordingWebhookRequest.fromPartial({
+                        spaceName: "test-space",
+                        recordingSessionId: "orphan-session",
+                        egressId: "egress-1",
+                        roomName: "test-space",
+                        phase: RecordingWebhookPhase.RECORDING_WEBHOOK_PHASE_ENDED,
+                        status: "EGRESS_COMPLETE",
+                    }),
+                ),
+            };
+            const recordingManager = createRecordingManager();
+            recordingManager.mocks.getRecordingSessionIds.mockReturnValue(["orphan-session"]);
+            recordingManager.mocks.finishRecordingByWebhook.mockImplementation(() => {
+                recordingManager.onSessionRemoved?.("orphan-session");
+                return { processed: true, recorder, unexpected: true, hasActiveSessions: false };
+            });
+            const recordingEventNotifier = vi.fn().mockResolvedValue(undefined);
+
+            const manager = new CommunicationManager(space, {
+                orchestrator,
+                lifecycleManager: createLifecycleManager(state),
+                recordingManager,
+                policy: createPolicy(false),
+                recordingEventNotifier,
+            });
+
+            recordingManager.onSessionAdded?.("orphan-session");
+            manager.destroy();
+            expect(findRecording("orphan-session")).toBe(manager);
+
+            await findRecording("orphan-session")?.handleLivekitWebhook(
+                HandleLivekitWebhookRequest.fromPartial({
+                    spaceName: "test-space",
+                    recordingSessionId: "orphan-session",
+                    rawBody: Buffer.from("{}"),
+                }),
+            );
+
+            expect(recordingEventNotifier).toHaveBeenCalledWith(
+                expect.objectContaining({ phase: "ended", status: "EGRESS_COMPLETE", egressId: "egress-1" }),
+            );
+            expect(findRecording("orphan-session")).toBeUndefined();
+            // A destroyed space has nobody to warn and no state to switch.
+            expect(space.dispatchPrivateEvent).not.toHaveBeenCalled();
+            expect(orchestrator.mocks.scheduleDelayedTransition).not.toHaveBeenCalled();
+        });
+
+        it("should route a recording's webhooks by session, to its destroyed space rather than the one recreated under its name", async () => {
+            // Real RecordingManager: the session registers itself, the destruction stops it, the end webhook deletes it.
+            const webhook = (phase: RecordingWebhookPhase, recordingSessionId: string) =>
+                HandleRecordingWebhookRequest.fromPartial({
+                    spaceName: "test-space",
+                    recordingSessionId,
+                    egressId: "egress-1",
+                    roomName: "test-space",
+                    phase,
+                    status: phase === RecordingWebhookPhase.RECORDING_WEBHOOK_PHASE_ENDED ? "EGRESS_COMPLETE" : "",
+                });
+            const createRecordableState = () => ({
+                ...createState(CommunicationType.LIVEKIT),
+                handleStartRecording: vi.fn().mockResolvedValue({ egressId: "egress-1", roomName: "test-space" }),
+                handleStopRecording: vi.fn().mockResolvedValue(undefined),
+                handleLivekitWebhook: vi.fn(),
+            });
+            const oldSpace = createSpace();
+            const oldState = createRecordableState();
+            const oldOrchestrator = createOrchestrator();
+            const recordingEventNotifier = vi.fn().mockResolvedValue(undefined);
+            const oldManager = new CommunicationManager(oldSpace, {
+                orchestrator: oldOrchestrator,
+                lifecycleManager: createLifecycleManager(oldState),
+                policy: createPolicy(false),
+                recordingEventNotifier,
+            });
+
+            await oldManager.handleStartRecording(createSpaceUser("recorder_1"));
+            const recordingSessionId = oldState.handleStartRecording.mock.calls[0][1] as string;
+            expect(findRecording(recordingSessionId)).toBe(oldManager);
+
+            const livekitRequest = HandleLivekitWebhookRequest.fromPartial({
+                spaceName: "test-space",
+                recordingSessionId,
+                rawBody: Buffer.from("{}"),
+            });
+            oldState.handleLivekitWebhook.mockResolvedValueOnce(
+                webhook(RecordingWebhookPhase.RECORDING_WEBHOOK_PHASE_STARTED, recordingSessionId),
+            );
+            await findRecording(recordingSessionId)?.handleLivekitWebhook(livekitRequest);
+            expect(oldManager.getRecordingState().status).toBe("recording");
+
+            // Everyone leaves: the space is destroyed, which stops the egress; then someone walks back in.
+            oldManager.destroy();
+            await vi.waitFor(() => expect(oldState.handleStopRecording).toHaveBeenCalled());
+            expect(oldManager.getRecordingState().status).toBe("stopping");
+            const newState = createRecordableState();
+            new CommunicationManager(createSpace(), {
+                lifecycleManager: createLifecycleManager(newState),
+                policy: createPolicy(false),
+                recordingEventNotifier,
+            });
+
+            oldState.handleLivekitWebhook.mockResolvedValueOnce(
+                webhook(RecordingWebhookPhase.RECORDING_WEBHOOK_PHASE_ENDED, recordingSessionId),
+            );
+            await findRecording(recordingSessionId)?.handleLivekitWebhook(livekitRequest);
+
+            expect(recordingEventNotifier).toHaveBeenCalledTimes(1);
+            expect(recordingEventNotifier).toHaveBeenCalledWith(
+                expect.objectContaining({ phase: "ended", status: "EGRESS_COMPLETE", recordingSessionId }),
+            );
+            expect(newState.handleLivekitWebhook).not.toHaveBeenCalled();
+            expect(findRecording(recordingSessionId)).toBeUndefined();
+            expect(oldSpace.dispatchPrivateEvent).not.toHaveBeenCalled();
+            expect(oldOrchestrator.mocks.scheduleDelayedTransition).not.toHaveBeenCalled();
+        });
+
+        it("should notify only the recorder on unexpected end webhooks", () => {
+            const space = createSpace();
+            const orchestrator = createOrchestrator();
+            const state = createState(CommunicationType.LIVEKIT);
+            const lifecycleManager = createLifecycleManager(state);
+            const recordingManager = createRecordingManager();
+            const policy = createPolicy(false);
+            const recorder = createSpaceUser("recorder_1");
+
+            recordingManager.mocks.finishRecordingByWebhook.mockReturnValue({
+                processed: true,
+                recorder,
+                unexpected: true,
+                hasActiveSessions: false,
+            });
+
+            const manager = new CommunicationManager(space, {
+                orchestrator,
+                lifecycleManager,
+                recordingManager,
+                policy,
+            });
+
+            manager.handleNormalizedRecordingWebhook(
+                HandleRecordingWebhookRequest.fromPartial({
+                    recordingSessionId: "session-1",
+                    egressId: "egress-1",
+                    roomName: "test-space",
+                    phase: RecordingWebhookPhase.RECORDING_WEBHOOK_PHASE_ENDED,
+                }),
+            );
+
+            expect(space.dispatchPrivateEvent).toHaveBeenCalledWith({
+                spaceName: "test-space",
+                receiverUserId: recorder.spaceUserId,
+                senderUserId: recorder.spaceUserId,
+                spaceEvent: {
+                    event: {
+                        $case: "recordingUnexpectedlyStoppedMessage",
+                        recordingUnexpectedlyStoppedMessage: {},
+                    },
+                },
+            });
+        });
+
+        it("should not schedule a delayed WebRTC transition while another recording session remains", () => {
+            const space = createSpace();
+            const orchestrator = createOrchestrator();
+            const state = createState(CommunicationType.LIVEKIT);
+            const lifecycleManager = createLifecycleManager(state);
+            const recordingManager = createRecordingManager();
+            const policy = createPolicy(false);
+            const recorder = createSpaceUser("recorder_1");
+
+            recordingManager.mocks.finishRecordingByWebhook.mockReturnValue({
+                processed: true,
+                recorder,
+                unexpected: false,
+                hasActiveSessions: true,
+            });
+
+            const manager = new CommunicationManager(space, {
+                orchestrator,
+                lifecycleManager,
+                recordingManager,
+                policy,
+            });
+
+            manager.handleNormalizedRecordingWebhook(
+                HandleRecordingWebhookRequest.fromPartial({
+                    recordingSessionId: "session-1",
+                    egressId: "egress-1",
+                    roomName: "test-space",
+                    phase: RecordingWebhookPhase.RECORDING_WEBHOOK_PHASE_ENDED,
+                }),
+            );
+
+            expect(orchestrator.mocks.scheduleDelayedTransition).not.toHaveBeenCalled();
+        });
+
+        it("should transition when delayed transition callback is invoked and conditions are still valid", async () => {
+            const space = createSpace([createSpaceUser("user_1")]);
+            const orchestrator = createOrchestrator();
+            let capturedCallback: TransitionCompleteCallback | undefined;
+
+            orchestrator.mocks.scheduleDelayedTransition.mockImplementation(
+                (_type: CommunicationType, _context: unknown, onComplete: TransitionCompleteCallback) => {
+                    capturedCallback = onComplete;
+                    return { abortController: new AbortController() };
+                },
+            );
+
+            const policy = createPolicy(true, CommunicationType.WEBRTC);
+            const state = createState(CommunicationType.LIVEKIT);
+            const lifecycleManager = createLifecycleManager(state);
+
+            const manager = new CommunicationManager(space, {
+                orchestrator: orchestrator,
+                policy: policy,
+                lifecycleManager: lifecycleManager,
+            });
+
+            const user = createSpaceUser("user_1");
+            await manager.handleUserDeleted(user);
+
+            // Simulate delayed transition completing
+            const newState = createState(CommunicationType.WEBRTC);
+            capturedCallback?.(newState);
+
+            expect(lifecycleManager.mocks.transitionTo).toHaveBeenCalledWith(newState);
+        });
+
+        it("should not transition when delayed transition callback is invoked but conditions changed", async () => {
+            const space = createSpace([createSpaceUser("user_1")]);
+            const orchestrator = createOrchestrator();
+            let capturedCallback: TransitionCompleteCallback | undefined;
+
+            orchestrator.mocks.scheduleDelayedTransition.mockImplementation(
+                (_type: CommunicationType, _context: unknown, onComplete: TransitionCompleteCallback) => {
+                    capturedCallback = onComplete;
+                    return { abortController: new AbortController() };
+                },
+            );
+
+            // Start with transition allowed
+            const policy = createPolicy(true, CommunicationType.WEBRTC);
+            const state = createState(CommunicationType.LIVEKIT);
+            const lifecycleManager = createLifecycleManager(state);
+
+            const manager = new CommunicationManager(space, {
+                orchestrator: orchestrator,
+                policy: policy,
+                lifecycleManager: lifecycleManager,
+            });
+
+            const user = createSpaceUser("user_1");
+            await manager.handleUserDeleted(user);
+
+            // Change conditions - transition no longer allowed
+            policy.mocks.shouldTransition.mockReturnValue(false);
+
+            // Simulate delayed transition completing
+            const newState = createState(CommunicationType.WEBRTC);
+            capturedCallback?.(newState);
+
+            expect(lifecycleManager.mocks.transitionTo).not.toHaveBeenCalled();
+        });
+    });
+    describe("session analytics", () => {
+        // The manager builds its own tracker, so this covers the wiring the refactor
+        // introduced end to end: the kind read off the space state, the
+        // predicate that opens a meeting on the second arrival, and the rows that only
+        // exist once the session has ended. Injecting a fake tracker would test the
+        // delegation and skip exactly the part that can break.
+        const rowsFrom = (enqueue: Mock) => enqueue.mock.calls.map(([row]) => row as { eventName: string });
+
+        const withQueue = async (
+            body: (enqueue: Mock, rows: () => { eventName: string }[]) => Promise<void> | void,
+        ) => {
+            const enqueue = vi.spyOn(analyticsEventsQueue, "enqueue").mockImplementation(() => {});
+            try {
+                await body(enqueue, () => rowsFrom(enqueue));
+            } finally {
+                enqueue.mockRestore();
+            }
+        };
+
+        const managerFor = (space: ICommunicationSpace) =>
+            new CommunicationManager(space, {
+                lifecycleManager: createLifecycleManager(createState(CommunicationType.WEBRTC)),
+                recordingManager: createRecordingManager(),
+            });
+
+        it("measures a meeting from the kind the space declares", async () => {
+            await withQueue(async (enqueue, rows) => {
+                const space = createSpace();
+                space.getState = () => ({ ...emptySpaceState(), kind: "bubble" });
+                const manager = managerFor(space);
+
+                await manager.handleUserAdded(createSpaceUser("1"));
+                expect(rows()).toEqual([]);
+
+                // Second arrival opens it; nothing is emitted until it closes.
+                await manager.handleUserAdded(createSpaceUser("2"));
+                expect(rows()).toEqual([]);
+
+                expect(manager.closeSession("back_shutdown")).toBe(true);
+                expect(rows().map((row) => row.eventName)).toEqual([
+                    "meeting.participation.ended",
+                    "meeting.participation.ended",
+                    "meeting.ended",
+                ]);
+            });
+        });
+
+        it("measures nothing for a space whose client declared no kind", async () => {
+            await withQueue(async (enqueue) => {
+                const space = createSpace();
+                space.getState = () => emptySpaceState();
+                const manager = managerFor(space);
+
+                await manager.handleUserAdded(createSpaceUser("1"));
+                await manager.handleUserAdded(createSpaceUser("2"));
+
+                expect(manager.closeSession("back_shutdown")).toBe(false);
+                expect(enqueue).not.toHaveBeenCalled();
+            });
+        });
+
+        it("counts a member once, whichever registry they arrive through", async () => {
+            // The point of deriving presence from the union: a listener is only ever in
+            // usersToNotify, a speaker is in both, and going on air is not an arrival.
+            await withQueue(async (enqueue, rows) => {
+                const space = createSpace();
+                space.getState = () => ({ ...emptySpaceState(), kind: "bubble" });
+                const manager = managerFor(space);
+
+                const watcher = createSpaceUser("watcher");
+                const both = createSpaceUser("both");
+
+                await manager.handleUserToNotifyAdded(watcher);
+                await manager.handleUserToNotifyAdded(both);
+                // Already present: crossing the filter must not add them a second time.
+                await manager.handleUserAdded(both);
+
+                expect(manager.closeSession("back_shutdown")).toBe(true);
+                expect(rows().filter((row) => row.eventName === "meeting.participation.ended")).toHaveLength(2);
+            });
+        });
+
+        it("keeps a member until they have left both registries", async () => {
+            await withQueue(async (enqueue, rows) => {
+                const space = createSpace();
+                space.getState = () => ({ ...emptySpaceState(), kind: "bubble" });
+                const manager = managerFor(space);
+
+                const staying = createSpaceUser("staying");
+                const leaving = createSpaceUser("leaving");
+                await manager.handleUserToNotifyAdded(staying);
+                await manager.handleUserToNotifyAdded(leaving);
+                await manager.handleUserAdded(leaving);
+
+                // Off air but still watching: not a departure, so the meeting holds.
+                await manager.handleUserDeleted(leaving);
+                expect(manager.closeSession("closed")).toBe(true);
+                expect(rows().filter((row) => row.eventName === "meeting.ended")).toHaveLength(1);
+                expect(rows().filter((row) => row.eventName === "meeting.participation.ended")).toHaveLength(2);
+            });
+        });
+    });
+
+    describe("automatic recording", () => {
+        const credentials = (autoRecording: boolean): LivekitCredentialsResponse => ({
+            livekitHost: "https://livekit.example",
+            livekitApiKey: "key",
+            livekitApiSecret: "secret",
+            autoRecording,
+        });
+
+        /** A space on a back that records, asking an admin whose answer the test gives when it wants. */
+        const recordingSpace = (users: SpaceUser[], backRecords = true) => {
+            setCapabilities({ "api/livekit/credentials": "v1" });
+            let answer!: (credentials: LivekitCredentialsResponse) => void;
+            const fetchLivekitCredentials = vi.spyOn(adminApi, "fetchLivekitCredentials").mockReturnValue(
+                new Promise((resolve) => {
+                    answer = resolve;
+                }),
+            );
+            const space = createSpace(users);
+            const oldState = createState(CommunicationType.WEBRTC);
+            const newState = createState(CommunicationType.LIVEKIT);
+            const orchestrator = createOrchestrator();
+            withRealTransitionLock(orchestrator);
+            orchestrator.mocks.executeImmediateTransition.mockResolvedValue(newState);
+            const lifecycleManager = createLifecycleManager(oldState);
+            lifecycleManager.mocks.transitionTo.mockImplementation(
+                (state: ICommunicationState<ICommunicationStrategy>) => {
+                    lifecycleManager.mocks.getCurrentState.mockReturnValue(state);
+                },
+            );
+            // The real policy, which reads the recorder
+            const manager = new CommunicationManager(space, {
+                orchestrator,
+                lifecycleManager,
+                recordingManager: createRecordingManager(),
+                autoRecorder: new AutoRecorder(space, () => lifecycleManager.getCurrentState(), { backRecords }),
+            });
+            return { manager, answer, fetchLivekitCredentials, oldState, newState, orchestrator, lifecycleManager };
+        };
+
+        afterEach(() => {
+            setCapabilities({});
+            vi.restoreAllMocks();
+        });
+
+        it("makes the first joins wait for the world's answer, then starts a recorded space on LiveKit with it", async () => {
+            const users = [createSpaceUser("user_1"), createSpaceUser("user_2")];
+            const { manager, answer, fetchLivekitCredentials, oldState, orchestrator, lifecycleManager } =
+                recordingSpace(users);
+
+            // Two distinct back messages, both arriving before the admin answers
+            const firstJoin = manager.handleUserAdded(users[0]);
+            await Promise.resolve();
+            const secondJoin = manager.handleUserAdded(users[1]);
+            await Promise.resolve();
+            expect(oldState.mocks.handleUserAdded).not.toHaveBeenCalled();
+
+            answer(credentials(true));
+            await Promise.all([firstJoin, secondJoin]);
+
+            expect(fetchLivekitCredentials).toHaveBeenCalledOnce();
+            // One LiveKit state, created from that same answer; nobody ever told to use P2P
+            expect(orchestrator.mocks.executeImmediateTransition).toHaveBeenCalledOnce();
+            expect(orchestrator.mocks.executeImmediateTransition).toHaveBeenCalledWith(
+                CommunicationType.LIVEKIT,
+                expect.objectContaining({ livekitCredentials: credentials(true) }),
+            );
+            expect(lifecycleManager.mocks.transitionTo).toHaveBeenCalledOnce();
+            expect(oldState.mocks.handleUserAdded).not.toHaveBeenCalled();
+        });
+
+        it("hands a joiner's join and watch to the state once the answer came, the state telling the strategy once", async () => {
+            const users = [createSpaceUser("user_1")];
+            const { manager, answer, oldState } = recordingSpace(users);
+
+            // The join and the watch of the same user, both before the admin answers
+            const join = manager.handleUserAdded(users[0]);
+            await Promise.resolve();
+            const watch = manager.handleUserToNotifyAdded(users[0]);
+            answer(credentials(false));
+            await Promise.all([join, watch]);
+
+            // Both reach the state; telling the strategy only once is the state's job (WebRTCState.test.ts)
+            expect(oldState.mocks.handleUserAdded).toHaveBeenCalledWith(users[0]);
+            expect(oldState.mocks.handleUserToNotifyAdded).toHaveBeenCalledWith(users[0]);
+        });
+
+        it("keeps a world that is not recorded in P2P, and asks once per space", async () => {
+            const users = [createSpaceUser("user_1"), createSpaceUser("user_2")];
+            const { manager, answer, fetchLivekitCredentials, oldState, orchestrator } = recordingSpace(users);
+
+            const firstJoin = manager.handleUserAdded(users[0]);
+            answer(credentials(false));
+            await firstJoin;
+            await manager.handleUserAdded(users[1]);
+
+            expect(fetchLivekitCredentials).toHaveBeenCalledOnce();
+            expect(orchestrator.mocks.executeImmediateTransition).not.toHaveBeenCalled();
+            expect(oldState.mocks.handleUserAdded).toHaveBeenCalledTimes(2);
+        });
+
+        it("neither asks nor records without an admin", async () => {
+            const users = [createSpaceUser("user_1"), createSpaceUser("user_2")];
+            const { manager, fetchLivekitCredentials, oldState, orchestrator } = recordingSpace(users);
+            setCapabilities({});
+
+            await manager.handleUserAdded(users[0]);
+            await manager.handleUserAdded(users[1]);
+
+            expect(fetchLivekitCredentials).not.toHaveBeenCalled();
+            expect(orchestrator.mocks.executeImmediateTransition).not.toHaveBeenCalled();
+            expect(oldState.mocks.handleUserAdded).toHaveBeenCalledTimes(2);
+        });
+
+        it("does not ask on a back that does not record", async () => {
+            const users = [createSpaceUser("user_1")];
+            const { manager, fetchLivekitCredentials, oldState } = recordingSpace(users, false);
+
+            await manager.handleUserAdded(users[0]);
+
+            expect(fetchLivekitCredentials).not.toHaveBeenCalled();
+            expect(oldState.mocks.handleUserAdded).toHaveBeenCalledOnce();
+        });
+    });
+});

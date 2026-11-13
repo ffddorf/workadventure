@@ -1,0 +1,19 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "rewriteRelativeImportExtensions": true,
+    "outDir": "./dist",
+    "preserveValueImports": false,
+  },
+  "include": [
+    "./src",
+  ],
+  "exclude": [
+    "./src/front",
+    "./src/svelte.ts",
+    "./src/iframe_api.ts",
+  ]
+}

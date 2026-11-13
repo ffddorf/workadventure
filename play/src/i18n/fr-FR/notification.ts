@@ -1,0 +1,40 @@
+import type { DeepPartial } from "../DeepPartial";
+import type { Translation } from "../i18n-types";
+
+const notification: DeepPartial<Translation["notification"]> = {
+    discussion: "{name} veut discuter avec toi",
+    message: "{name} a envoyé un message",
+    mention: "{name} vous a mentionné",
+    askToMuteMicrophone: "Puis-je couper votre micro ?",
+    askToMuteCamera: "Puis-je couper votre caméra ?",
+    microphoneMuted: "Votre micro a été coupé par un modérateur",
+    cameraMuted: "Votre caméra a été coupée par un modérateur",
+    givenTheFloor: "C'est à toi de parler",
+    givenTheFloorEnableMicrophone: "C'est à toi de parler — active ton micro",
+    floorRevoked: "Tu n'as plus la parole",
+    floorGivenBack: "Vous avez rendu la parole",
+    handLowered: "Un modérateur a baissé votre main",
+    removedFromConversation: "Un modérateur vous a retiré de la conversation.",
+    actionFailed: "Cette action n'a pas pu aboutir",
+    announcement: "Annonce",
+    help: {
+        title: "Accès aux notifications refusé",
+        permissionDenied: "Permission refusée",
+        content:
+            "Ne manquez aucune discussion. Activez les notifications pour être informé(e) lorsque quelqu'un souhaite vous parler, même si vous n'êtes pas sur l'onglet WorkAdventure.",
+        firefoxContent:
+            'Veuillez cocher la case "Se souvenir de cette décision" si vous ne voulez pas que Firefox vous demande sans cesse l\'autorisation.',
+        refresh: "Rafraîchir",
+        continue: "Continuer sans les notifications",
+        screen: {
+            chrome: "/resources/help-setting-notification-permission/en-US-chrome.png",
+        },
+        screenAlt: "Autoriser les notifications via la barre d’adresse dans Chrome",
+    },
+    addNewTag: 'nouveau tag : "{tag}"',
+    screenSharingError: "Impossible de démarrer le partage d'écran",
+    recordingStarted: "Une personne dans la discussion a commencé un enregistrement.",
+    urlCopiedToClipboard: "URL copiée dans le presse-papiers",
+};
+
+export default notification;

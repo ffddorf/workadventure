@@ -1,0 +1,74 @@
+import type { BaseTranslation } from "../i18n-types";
+
+const warning: BaseTranslation = {
+    title: "Aviso!",
+    content: `Este mundo está perto do seu limite!. Você pode atualizar sua capacidade <a href="{upgradeLink}" target="_blank">aqui</a>`,
+    limit: "Este mundo está perto do seu limite!",
+    accessDenied: {
+        camera: "Acesso à câmera negado. Clique aqui e verifique as permissões do seu navegador.",
+        teleport: "Você não tem direito de teleportar este usuário.",
+        room: "Acesso a sala negado. Você não tem permissão para entrar nesta sala.",
+    },
+    connectionLost: "Conexão perdida. Reconectando...",
+    connectionLostTitle: "Conexão perdida",
+    connectionLostSubtitle: "Reconectando",
+    waitingConnectionTitle: "Aguardando a conexão",
+    waitingConnectionSubtitle: "Conectando",
+    megaphoneNeeds: "Para usar o megafone, você deve ativar sua câmera ou seu microfone ou compartilhar sua tela.",
+    mapEditorShortCut: "Houve um erro ao tentar abrir o editor de mapas.",
+    mapEditorNotEnabled: "O editor de mapas não está habilitado neste mundo.",
+    backgroundProcessing: {
+        failedToApply: "Falha ao aplicar efeitos de fundo",
+        notSupportedOnThisBrowser: "Efeitos de fundo não são suportados neste navegador",
+    },
+    popupBlocked: {
+        title: "Bloqueador de pop-up",
+        content: "Por favor, permita pop-ups para este site nas configurações do seu navegador.",
+        done: "Ok",
+    },
+    duplicateUserConnected: {
+        title: "Já conectado",
+        message:
+            "Este usuário já está conectado a esta sala em outra aba ou dispositivo. Para evitar conflitos, feche a outra aba ou janela.",
+        confirmContinue: "Entendi, continuar",
+        dontRemindAgain: "Não mostrar esta mensagem novamente",
+    },
+    browserNotSupported: {
+        title: "😢 Navegador não suportado",
+        message: "Seu navegador ({browserName}) não é mais suportado pelo WorkAdventure.",
+        description:
+            "Seu navegador está muito antigo para executar WorkAdventure. Por favor, atualize-o para a versão mais recente para continuar.",
+        whatToDo: "O que você pode fazer?",
+        option1: "Atualizar {browserName} para a versão mais recente",
+        option2: "Sair do WorkAdventure e usar um navegador diferente",
+        updateBrowser: "Atualizar navegador",
+        leave: "Sair",
+    },
+    pwaInstall: {
+        title: "Instalar WorkAdventure",
+        description:
+            "Instale o app para ter uma experiência melhor: acesso rápido, inicialização automática e uma experiência de app.",
+        descriptionIos: "Adicione o WorkAdventure à Tela de Início para ter uma experiência melhor e acesso rápido.",
+        feature1Title: "Acesso rápido",
+        feature1Description: "Abra o WorkAdventure pelo menu Iniciar, Dock ou área de trabalho.",
+        feature2Title: "Janela dedicada do app",
+        feature2Description:
+            "Mantenha o WorkAdventure separado das abas do navegador e encontre o WorkAdventure rapidamente na barra de tarefas.",
+        feature3Title: "Iniciar com o computador",
+        feature3Description: "Abra o WorkAdventure quando o dispositivo iniciar.",
+        iosStepsTitle: "Como instalar",
+        iosStep1: "Toque no botão Compartilhar (quadrado com seta) na parte inferior do Safari.",
+        iosStep2: 'Role para baixo e toque em "Adicionar à Tela Inicial".',
+        iosStep3: 'Toque em "Adicionar" para confirmar.',
+        install: "Instalar o app WorkAdventure",
+        installing: "Instalando…",
+        skip: "Continuar no navegador",
+        continue: "Continuar no navegador",
+        neverShowPage: "Não perguntar novamente",
+    },
+    otherMeetingMuted:
+        "Agora você está em uma reunião aqui. Seu microfone, câmera e compartilhamento de tela foram desligados em {world}.",
+    desktopAppOutdated: "Uma nova versão do aplicativo WorkAdventure está disponível: {url}",
+};
+
+export default warning;

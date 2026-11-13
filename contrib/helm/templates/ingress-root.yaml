@@ -1,0 +1,51 @@
+{{- if and .Values.ingress.enabled .Values.singleDomain -}}
+{{- $fullName := include "workadventure.fullname" . -}}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ $fullName }}-root
+  labels:
+    {{- include "workadventure.labels" . | nindent 4 }}
+  {{- if or .Values.play.ingress.sticky.enabled .Values.ingress.annotationsRoot }}
+  annotations:
+    {{- with .Values.ingress.annotationsRoot }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+    {{- if .Values.play.ingress.sticky.enabled }}
+    # Sticky annotations for Nginx are added at the ingress level, while for Traefik they are added at the service level (see play-service.yaml)
+    nginx.ingress.kubernetes.io/affinity: "cookie"
+    nginx.ingress.kubernetes.io/session-cookie-name: {{ .Values.play.ingress.sticky.cookie.name | quote }}
+    nginx.ingress.kubernetes.io/session-cookie-secure: {{ .Values.play.ingress.sticky.cookie.secure | quote }}
+    nginx.ingress.kubernetes.io/session-cookie-samesite: {{ .Values.play.ingress.sticky.cookie.sameSite | title | quote }}
+  {{- end }}
+
+  {{- end }}
+spec:
+  {{- if .Values.ingress.className }}
+  ingressClassName: {{ .Values.ingress.className }}
+  {{- end }}
+  {{- if .Values.ingress.tls }}
+  tls:
+    - hosts:
+        - {{ .Values.domainName }}
+      secretName: {{ .Values.ingress.secretName }}
+  {{- end }}
+  rules:
+    - host: {{ .Values.domainName }}
+      http:
+        paths:
+          - path: /ws/
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "workadventure.fullname" . }}-play
+                port:
+                  number: {{ .Values.play.service.wsPort }}
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "workadventure.fullname" . }}-play
+                port:
+                  number: {{ .Values.play.service.port }}
+{{- end }}
